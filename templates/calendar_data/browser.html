@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}Calendar — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Calendar</h1>
+    <p class="page-head__sub">
+      Every release the dataset holds, with the provenance of each number
+      attached. Actual and forecast are shown as separate columns rather than
+      merged — three different numbers can occupy the same “actual” cell, and
+      collapsing them is how look-ahead contamination gets in.
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <a class="btn btn--ghost" href="{% url 'sources:console' %}">Collect more</a>
+  </div>
+</div>
+
+<form class="filters" method="get">
+  <label class="field" style="flex:1 1 200px;">
+    <span>Search</span>
+    <input type="search" name="q" value="{{ q }}" placeholder="indicator, code or period">
+  </label>
+  <label class="field">
+    <span>Currency</span>
+    <select name="currency">
+      <option value="">all</option>
+      {% for code, label in currencies %}<option value="{{ code }}" {% if code == currency %}selected{% endif %}>{{ code }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Importance</span>
+    <select name="importance">
+      <option value="">all</option>
+      {% for value, label in importances %}<option value="{{ value }}" {% if value|stringformat:"s" == importance %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Flag</span>
+    <select name="flag">
+      <option value="">any</option>
+      {% for key, label in quality_filters %}<option value="{{ key }}" {% if key == flag %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="field"><span>From</span><input type="date" name="from" value="{{ date_from }}"></label>
+  <label class="field"><span>To</span><input type="date" name="to" value="{{ date_to }}"></label>
+  <button class="btn btn--primary" type="submit">Apply</button>
+  <a class="btn btn--ghost" href="{% url 'calendar_data:browser' %}">Reset</a>
+  <span class="tiny faint" style="margin-left:auto;">{{ match_count|intcomma }} of {{ total_count|intcomma }} releases</span>
+</form>
+
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t">
+      <thead>
+        <tr>
+          <th>Scheduled (UTC)</th><th>Ccy</th><th>Indicator</th>
+          <th class="num">Actual</th><th class="num">Forecast</th><th class="num">Previous</th>
+          <th>Provenance</th><th>Quality</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for e in page %}
+        <tr>
+          <td class="mono small nowrap">
+            {{ e.scheduled_time_utc|date:"Y-m-d H:i"|default:"—" }}
+            {% if e.trading_day %}<span class="sub">trading day {{ e.trading_day|date:"j M" }}</span>{% endif %}
+          </td>
+          <td class="mono small">{{ e.indicator.currency }}</td>
+          <td>
+            <a href="{% url 'calendar_data:event' e.pk %}">{{ e.indicator.name }}</a>
+            <span class="sub">
+              {% if e.indicator.canonical_code %}<span class="mono">{{ e.indicator.canonical_code }}</span>{% else %}<span class="badge badge--warn">unmapped</span>{% endif %}
+              {% if e.release_group %}· group {{ e.release_group.key }}{% endif %}
+            </span>
+          </td>
+          <td class="num small">{{ e.actual|default:"—" }}</td>
+          <td class="num small">{{ e.forecast|default:"—" }}</td>
+          <td class="num small">{{ e.previous|default:"—" }}</td>
+          <td class="small">
+            {% if e.forecast_provenance == "point_in_time" %}
+              <span class="badge">point in time</span>
+            {% elif e.forecast_provenance == "vendor_stored" %}
+              <span class="badge badge--warn">vendor stored</span>
+            {% else %}
+              <span class="badge badge--ghost faint">no forecast</span>
+            {% endif %}
+          </td>
+          <td class="small">
+            {% if e.cross_source == "disagree" %}<span class="badge badge--err">disagree</span>
+            {% elif e.cross_source == "agree" %}<span class="badge">agree</span>
+            {% else %}<span class="badge badge--ghost faint">single source</span>{% endif %}
+            <span class="sub">{{ e.get_timestamp_confidence_display|truncatewords:2 }}</span>
+          </td>
+          <td class="right"><a class="tiny" href="{% url 'calendar_data:event' e.pk %}">open</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="9">
+          <div class="empty">
+            <div class="empty__t">No releases match.</div>
+            <p class="tiny">If the dataset is empty, collect a source first.</p>
+            <a class="btn btn--primary btn--sm" href="{% url 'sources:console' %}">Sources console</a>
+          </div>
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% include "_pager.html" with page=page querystring=querystring %}
+{% endblock %}

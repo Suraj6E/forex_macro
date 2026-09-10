@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block title %}{{ release.indicator.name }} — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>{{ release.indicator.name }}</h1>
+    <p class="page-head__sub">
+      <span class="mono">{{ release.indicator.currency }}</span> ·
+      {{ release.scheduled_time_utc|date:"l j F Y, H:i"|default:"unscheduled" }} UTC ·
+      reference period <span class="mono">{{ release.reference_period }}</span>
+      {% if release.revision_no %}· revision {{ release.revision_no }}{% endif %}
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <a class="btn btn--ghost" href="{% url 'calendar_data:indicator' release.indicator.pk %}">Indicator</a>
+    <a class="btn btn--ghost" href="{% url 'calendar_data:browser' %}">Calendar</a>
+  </div>
+</div>
+
+{% if not release.indicator.canonical_code %}
+<p class="msg msg--warning">
+  This indicator has no canonical code, so it cannot be joined to any other
+  source yet. <a href="{% url 'calendar_data:indicator' release.indicator.pk %}">Map it →</a>
+</p>
+{% endif %}
+
+<div class="cols cols--2">
+
+  <section class="card card--flush">
+    <div class="card__head"><h3>Data</h3><span class="spacer"></span>
+      <span class="badge badge--ghost tiny">measured, not interpreted</span></div>
+    <div class="tablewrap">
+      <table class="t t--dense">
+        <thead><tr><th>Field</th><th class="num">Value</th><th>Supplied by</th></tr></thead>
+        <tbody>
+        {% for f in fields %}
+          <tr>
+            <td class="small">{{ f.label }}</td>
+            <td class="num small">{{ f.value|default:"—" }}</td>
+            <td class="small">
+              {% if f.source %}<span class="mono faint">{{ f.source }}</span>
+              {% else %}<span class="faint">—</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card__foot">
+      The merged row is a composite: each field records which source supplied
+      it. Nothing here is a copy of one source's row.
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>Quality</h3>
+    <dl class="kv" style="margin-top:10px;">
+      <dt>Timestamp confidence</dt><dd class="small">{{ release.get_timestamp_confidence_display }}</dd>
+      <dt>Forecast provenance</dt><dd class="small">{{ release.get_forecast_provenance_display }}</dd>
+      <dt>Actual provenance</dt><dd class="small">{{ release.get_actual_provenance_display }}</dd>
+      <dt>Cross-source</dt><dd class="small">{{ release.get_cross_source_display }}</dd>
+      <dt>Volatility check</dt><dd class="small">{{ release.get_vol_check_display }}</dd>
+      <dt>Confounded</dt><dd class="small">{% if release.confounded %}yes — another event within ±15 min{% else %}not flagged{% endif %}</dd>
+      <dt>Trading day</dt><dd class="small">{{ release.trading_day|date:"j M Y"|default:"—" }}
+        <span class="faint tiny">— anchored to 17:00 New York, not the UTC date</span></dd>
+      <dt>First seen</dt><dd class="small">{{ release.first_seen_at|date:"Y-m-d H:i" }}Z</dd>
+    </dl>
+  </section>
+
+</div>
+
+{% if co_timed %}
+<h2>Released at the same instant <span class="h2sub">cannot be separated</span></h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <tbody>
+      {% for e in co_timed %}
+        <tr>
+          <td class="mono small">{{ e.indicator.currency }}</td>
+          <td><a href="{% url 'calendar_data:event' e.pk %}">{{ e.indicator.name }}</a></td>
+          <td class="num small">{{ e.actual|default:"—" }}</td>
+          <td class="right small faint">{{ e.reference_period }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    Two variables released at the identical instant produce identical
+    regressors — the regression is perfectly collinear, and no amount of data
+    separates them. The move is attributed to the group, never to one member.
+    The only partial escape is the surprise mix, which needs forecast values.
+  </div>
+</section>
+{% endif %}
+
+<h2>What each source said <span class="h2sub">kept verbatim, so the merge can be re-run</span></h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Source</th><th>Observed</th><th>Run</th><th>Payload</th></tr></thead>
+      <tbody>
+      {% for o in observations %}
+        <tr>
+          <td class="small">{{ o.source.name }}<span class="sub mono">{{ o.source.key }}</span></td>
+          <td class="small nowrap">{{ o.observed_at|date:"Y-m-d H:i" }}Z</td>
+          <td class="small">{% if o.fetch_run %}<a href="{% url 'sources:run_detail' o.fetch_run.pk %}">#{{ o.fetch_run.pk }}</a>{% else %}—{% endif %}</td>
+          <td><pre class="pre tiny" style="max-height:150px; overflow:auto;">{{ o.raw_json }}</pre></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="4"><div class="empty tiny">No observations recorded.</div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<h2>Value revisions <span class="h2sub">append-only</span></h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>When</th><th>Field</th><th>Was</th><th>Became</th><th>Source</th></tr></thead>
+      <tbody>
+      {% for r in revisions %}
+        <tr>
+          <td class="small nowrap">{{ r.observed_at|date:"Y-m-d H:i" }}Z</td>
+          <td class="mono small">{{ r.field }}</td>
+          <td class="num small">{{ r.old_value|default:"—" }}</td>
+          <td class="num small">{{ r.new_value|default:"—" }}</td>
+          <td class="small faint">{{ r.source.key|default:"—" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="5"><div class="empty tiny">No source has changed a value on this release. This table is how a site quietly editing a forecast after the fact becomes visible.</div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<h2>Other releases of this indicator</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <tbody>
+      {% for e in siblings %}
+        <tr>
+          <td class="mono small nowrap">{{ e.scheduled_time_utc|date:"Y-m-d H:i" }}</td>
+          <td><a href="{% url 'calendar_data:event' e.pk %}">{{ e.reference_period }}</a></td>
+          <td class="num small">actual {{ e.actual|default:"—" }}</td>
+          <td class="num small">forecast {{ e.forecast|default:"—" }}</td>
+          <td class="num small">previous {{ e.previous|default:"—" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td><div class="empty tiny">This is the only release of this indicator held so far — the last-20-occurrences strip arrives with history in P1.</div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<h2>Price around t0</h2>
+<section class="card">
+  <div class="empty">
+    <div class="empty__t">No price data yet.</div>
+    <p class="tiny">
+      The chart centred on t0 with the horizon windows shaded arrives in P1,
+      once the M1 backbone is loaded. Until then this screen shows the calendar
+      side only — which is honest: there is nothing to plot.
+    </p>
+    <a class="btn btn--ghost btn--sm" href="{% url 'prices:index' %}">Price coverage</a>
+  </div>
+</section>
+{% endblock %}

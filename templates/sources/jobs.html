@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}Jobs & runs — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Jobs &amp; runs</h1>
+    <p class="page-head__sub">
+      Every button press becomes a row here. Progress lives in the database
+      rather than in the request, so nothing is lost to a page reload — which is
+      the whole reason there is a job runner instead of a synchronous download.
+    </p>
+  </div>
+</div>
+
+<form class="filters" method="get">
+  <label class="field">
+    <span>Kind</span>
+    <select name="kind">
+      <option value="">all</option>
+      {% for k in kinds %}<option value="{{ k }}" {% if k == kind %}selected{% endif %}>{{ k }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Status</span>
+    <select name="status">
+      <option value="">all</option>
+      {% for value, label in statuses %}<option value="{{ value }}" {% if value == status %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <button class="btn" type="submit">Filter</button>
+  <a class="btn btn--ghost" href="{% url 'sources:jobs' %}">Clear</a>
+</form>
+
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t">
+      <thead>
+        <tr><th>Job</th><th>Kind</th><th>Status</th><th>Params</th><th>Result</th>
+            <th class="num">Took</th><th>Queued</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for job in page %}
+        <tr>
+          <td class="mono">#{{ job.pk }}</td>
+          <td class="mono small">{{ job.kind }}</td>
+          <td>{% include "sources/_status.html" with status=job.status label=job.get_status_display %}</td>
+          <td class="small muted mono">{{ job.params_json|default:"—" }}</td>
+          <td class="small muted">{{ job.result_json.summary|default:job.message|default:"—"|truncatechars:70 }}</td>
+          <td class="num small">{% if job.duration_seconds %}{{ job.duration_seconds|floatformat:1 }}s{% else %}—{% endif %}</td>
+          <td class="small faint nowrap">{{ job.created_at|date:"j M H:i:s" }}Z</td>
+          <td class="right"><a class="tiny" href="{% url 'sources:job_detail' job.pk %}">open</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="8"><div class="empty"><div class="empty__t">No jobs match.</div></div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% include "_pager.html" with page=page querystring=querystring %}
+
+<h2>Fetch runs <span class="h2sub">what each collection actually did</span></h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead>
+        <tr><th>Run</th><th>Source</th><th>Status</th><th class="num">Seen</th><th class="num">New</th>
+            <th class="num">Changed</th><th class="num">Unmapped</th><th>Parser</th><th>Started</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for run in runs %}
+        <tr>
+          <td class="mono">#{{ run.pk }}</td>
+          <td class="small">{{ run.source.name }}</td>
+          <td>{% include "sources/_status.html" with status=run.status label=run.get_status_display %}</td>
+          <td class="num">{{ run.rows_seen|intcomma }}</td>
+          <td class="num">{{ run.rows_new|intcomma }}</td>
+          <td class="num">{{ run.rows_changed|intcomma }}</td>
+          <td class="num">{{ run.rows_unmapped|intcomma }}</td>
+          <td class="mono small faint">{{ run.parser_version|default:"—" }}</td>
+          <td class="small faint nowrap">{{ run.started_at|date:"j M H:i" }}Z</td>
+          <td class="right"><a class="tiny" href="{% url 'sources:run_detail' run.pk %}">open</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="10"><div class="empty"><div class="empty__t">No fetch runs yet.</div></div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

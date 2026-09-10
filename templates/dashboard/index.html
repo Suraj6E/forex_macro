@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}Dashboard — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Dashboard</h1>
+    <p class="page-head__sub">
+      Forex Macro Event Impact Explorer — a testbed for asking questions about
+      what the majors do around macroeconomic releases. Collection is manual and
+      button-driven; everything below is measured from what has actually been
+      ingested.
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <a class="btn" href="{% url 'quality:index' %}">Data quality</a>
+    <a class="btn btn--primary" href="{% url 'sources:console' %}">Collect data</a>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat">
+    <span class="stat__k">Event releases</span>
+    <span class="stat__v">{{ head.total|intcomma }}</span>
+    <span class="stat__note">
+      {% if head.earliest %}{{ head.earliest|date:"j M Y" }} → {{ head.latest|date:"j M Y" }}{% else %}nothing ingested yet{% endif %}
+    </span>
+  </div>
+  <div class="stat">
+    <span class="stat__k">Source observations</span>
+    <span class="stat__v">{{ head.observations|intcomma }}</span>
+    <span class="stat__note">every source's raw claim, kept separately (§9)</span>
+  </div>
+  <div class="stat {% if head.indicators_unmapped %}stat--warn{% endif %}">
+    <span class="stat__k">Indicators mapped</span>
+    <span class="stat__v">{{ head.indicators_mapped }}<small> / {{ head.indicators_total }}</small></span>
+    <span class="stat__note">
+      {% if head.indicators_unmapped %}<a href="{% url 'calendar_data:indicators' %}?state=unmapped">{{ head.indicators_unmapped }} awaiting a canonical code</a>{% else %}all mapped{% endif %}
+    </span>
+  </div>
+  <div class="stat">
+    <span class="stat__k">Point-in-time forecasts</span>
+    <span class="stat__v">{{ head.point_in_time|intcomma }}</span>
+    <span class="stat__note">captured before their release (§4.3)</span>
+  </div>
+  <div class="stat {% if head.disagree %}stat--warn{% endif %}">
+    <span class="stat__k">Cross-source conflicts</span>
+    <span class="stat__v">{{ head.disagree|intcomma }}</span>
+    <span class="stat__note">both values retained, never silently picked</span>
+  </div>
+  <div class="stat">
+    <span class="stat__k">Raw snapshots</span>
+    <span class="stat__v">{{ snapshot_count|intcomma }}</span>
+    <span class="stat__note">{{ snapshot_bytes|filesizeformat }} on disk, content-hashed</span>
+  </div>
+</div>
+
+<div class="cols cols--2" style="margin-top:16px;">
+
+  <section class="card card--flush">
+    <div class="card__head">
+      <h3>What the dataset actually holds</h3>
+      <span class="spacer"></span>
+      <span class="badge badge--ghost">{{ total_releases|intcomma }} releases</span>
+    </div>
+    <div class="card__body">
+      {{ coverage_chart }}
+    </div>
+    <div class="card__foot">
+      Bars are counts of releases carrying each column, against the total.
+      Actual and forecast are split rather than coalesced — §4.3: three
+      different numbers can occupy the same “actual” cell, and merging them is
+      look-ahead contamination.
+    </div>
+  </section>
+
+  <section class="card card--flush">
+    <div class="card__head">
+      <h3>Release density</h3>
+      <span class="spacer"></span>
+      <span class="badge badge--ghost">7 days back → 14 forward</span>
+    </div>
+    <div class="card__body">
+      {{ density_chart }}
+    </div>
+    <div class="card__foot">
+      Scheduled releases per UTC day. Clusters are where overlapping-event
+      attribution (§3.3) gets hard.
+    </div>
+  </section>
+
+</div>
+
+<div class="cols cols--2" style="margin-top:16px;">
+  <section class="card card--flush">
+    <div class="card__head"><h3>Releases by currency</h3></div>
+    <div class="card__body">{{ currency_chart }}</div>
+  </section>
+  <section class="card card--flush">
+    <div class="card__head">
+      <h3>By importance</h3>
+      <span class="spacer"></span>
+      <span class="badge badge--ghost">as the source claims</span>
+    </div>
+    <div class="card__body">{{ importance_chart }}</div>
+    <div class="card__foot">
+      This is the calendar site's traffic-light rating, not a measurement.
+      §6.4 ranks events by measured impact and compares the two.
+    </div>
+  </section>
+</div>
+
+<h2>Where the data came from</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t">
+      <thead>
+        <tr><th>Source</th><th class="num">Observations</th><th class="num">Releases</th>
+            <th class="num">Indicators</th><th>Span</th></tr>
+      </thead>
+      <tbody>
+      {% for c in contributions %}
+        <tr>
+          <td><strong>{{ c.source__name }}</strong><span class="sub mono">{{ c.source__key }}</span></td>
+          <td class="num">{{ c.observations|intcomma }}</td>
+          <td class="num">{{ c.releases|intcomma }}</td>
+          <td class="num">{{ c.indicators|intcomma }}</td>
+          <td class="small muted nowrap">{{ c.earliest|date:"j M Y" }} → {{ c.latest|date:"j M Y" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="5">
+          <div class="empty">
+            <div class="empty__t">No source has contributed data yet.</div>
+            <a class="btn btn--primary btn--sm" href="{% url 'sources:console' %}">Go to the sources console</a>
+          </div>
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    {{ sources_with_data }} of {{ sources_total }} registered sources have contributed;
+    {{ sources_implemented }} have a collector built. The rest are register rows with their
+    clocks and fetch policies recorded, awaiting one.
+  </div>
+</section>
+
+<div class="cols cols--2" style="margin-top:16px;">
+
+  <section class="card card--flush">
+    <div class="card__head">
+      <h3>{{ upcoming_label }}</h3>
+      <span class="spacer"></span>
+      <a class="btn btn--ghost btn--sm" href="{% url 'calendar_data:browser' %}">Browse all</a>
+    </div>
+    <div class="tablewrap">
+      <table class="t t--dense">
+        <tbody>
+        {% for e in next_releases %}
+          <tr>
+            <td class="mono small nowrap">{{ e.scheduled_time_utc|date:"D j M H:i" }}</td>
+            <td class="mono small">{{ e.indicator.currency }}</td>
+            <td><a href="{% url 'calendar_data:event' e.pk %}">{{ e.indicator.name }}</a></td>
+            <td class="right"><span class="badge">{{ e.indicator.get_importance_display }}</span></td>
+          </tr>
+        {% empty %}
+          <tr><td><div class="empty tiny">No scheduled releases loaded.</div></td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card card--flush">
+    <div class="card__head">
+      <h3>Recent activity</h3>
+      <span class="spacer"></span>
+      <a class="btn btn--ghost btn--sm" href="{% url 'sources:jobs' %}">All jobs</a>
+    </div>
+    <div class="tablewrap">
+      <table class="t t--dense">
+        <tbody>
+        {% for j in recent_jobs %}
+          <tr>
+            <td class="mono small nowrap">{{ j.created_at|date:"j M H:i" }}</td>
+            <td class="mono small">{{ j.kind }}</td>
+            <td>{% include "sources/_status.html" with status=j.status label=j.get_status_display %}</td>
+            <td class="small muted">{{ j.message|default:"—"|truncatechars:44 }}</td>
+            <td class="right"><a class="tiny" href="{% url 'sources:job_detail' j.pk %}">open</a></td>
+          </tr>
+        {% empty %}
+          <tr><td><div class="empty tiny">Nothing has been run yet.</div></td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</div>
+
+<h2>Capabilities <span class="h2sub">what this tool can do today, and what it cannot</span></h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <tbody>
+      {% for p in phases %}
+        <tr>
+          <td class="mono nowrap" style="width:52px;">{{ p.key }}</td>
+          <td class="nowrap" style="width:190px;"><strong>{{ p.title }}</strong></td>
+          <td style="width:110px;">
+            {% if p.status == 'done' %}<span class="badge badge--solid">built</span>
+            {% elif p.status == 'active' %}<span class="badge"><span class="badge__dot"></span>next</span>
+            {% else %}<span class="badge badge--ghost faint">planned</span>{% endif %}
+          </td>
+          <td class="small muted">{{ p.detail }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

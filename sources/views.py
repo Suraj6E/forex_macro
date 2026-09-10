@@ -1,79 +1,77 @@
-"""Sources console — planning.md §7.1, screen 1 of §10.
+"""Ingestion console — planning.md §7.1, screen 1 of §10.
 
-"A Sources page lists each source with state (coverage, last fetch, health,
-quality grade), a date-range picker and a Fetch button.  Pressing it enqueues
-a job; the page shows live progress; the result is a run record with rows
-seen/new/changed, errors, and a link to the raw snapshot."
+Every operation this project has is a button on this page. There is no command
+you are expected to remember, and no login: it is a local single-user tool, so
+authentication would protect nothing.
 """
 
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 from django.contrib import messages
-from django.db.models import Count, Q
+from django.core.paginator import Paginator
+from django.db.models import Count, Sum
 from django.http import HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
 
-from calendar_data.models import EventRelease, Indicator, SourceObservation
-from quality.enums import CrossSource, ForecastProvenance, MappingStatus
+from quality import stats
 from sources import jobs, registry
-from sources.models import FetchRun, Job, Source
+from sources.models import FetchRun, Job, JobStatus, RawSnapshot, Source
 
-ACTIVE_JOB_LIMIT = 12
+ACTIVE_JOB_LIMIT = 10
 
 
-def _dataset_summary() -> dict:
-    indicators = Indicator.objects.aggregate(
-        total=Count("id"),
-        unmapped=Count("id", filter=Q(canonical_code__isnull=True)),
-    )
-    releases = EventRelease.objects.aggregate(
-        total=Count("id"),
-        disagree=Count("id", filter=Q(cross_source=CrossSource.DISAGREE)),
-        point_in_time=Count(
-            "id", filter=Q(forecast_provenance=ForecastProvenance.POINT_IN_TIME)
-        ),
-    )
-    return {
-        "indicators_total": indicators["total"],
-        "indicators_unmapped": indicators["unmapped"],
-        "releases_total": releases["total"],
-        "releases_disagree": releases["disagree"],
-        "releases_point_in_time": releases["point_in_time"],
-        "observations_total": SourceObservation.objects.count(),
-    }
+def _require_post(request):
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    return None
 
 
 def console(request):
     implemented = registry.implemented_keys()
-    sources = list(Source.objects.all())
+    contributions = {c["source__key"]: c for c in stats.source_contributions()}
 
+    sources = list(
+        Source.objects.annotate(
+            run_count=Count("runs", distinct=True),
+        )
+    )
     for source in sources:
         source.has_collector = source.key in implemented
         source.latest_run = source.runs.first()
-        source.run_count = source.runs.count()
         source.cooldown = source.cooldown_remaining()
+        source.contribution = contributions.get(source.key)
+        source.snapshot_count = RawSnapshot.objects.filter(fetch_run__source=source).count()
+
+    calendar_sources = [s for s in sources if s.kind in ("calendar", "actuals", "reference")]
+    price_sources = [s for s in sources if s.kind == "price"]
 
     return render(
         request,
         "sources/console.html",
         {
-            "sources": sources,
-            "summary": _dataset_summary(),
-            "jobs": Job.objects.all()[:ACTIVE_JOB_LIMIT],
+            "nav": "sources",
+            "calendar_sources": calendar_sources,
+            "price_sources": price_sources,
+            "implemented_count": len(implemented),
+            "sources_total": len(sources),
+            "reference_seeded": Source.objects.exists(),
         },
     )
 
 
 def fetch(request, key: str):
-    if request.method != "POST":
-        return HttpResponseNotAllowed(["POST"])
+    if (bad := _require_post(request)) is not None:
+        return bad
 
     source = get_object_or_404(Source, key=key)
     if registry.get(source.key) is None:
         messages.warning(
             request,
-            f"{source.name} is registered but its collector is not built yet — "
-            f"nothing was enqueued.",
+            f"{source.name} is a register row without a collector yet — nothing "
+            f"was queued. Its clock and fetch policy are recorded so the "
+            f"collector has somewhere to land.",
         )
         return redirect("sources:console")
 
@@ -86,38 +84,107 @@ def fetch(request, key: str):
         params["force"] = True
 
     job = jobs.enqueue("fetch_source", **params)
-    messages.success(request, f"Queued fetch for {source.name} (job #{job.pk}).")
+    messages.success(request, f"Queued a fetch of {source.name} — job #{job.pk}.")
+    return redirect(request.POST.get("next") or "sources:console")
+
+
+def reparse(request, key: str):
+    """§5.4: a parser fix is a re-parse, not a re-crawl."""
+    if (bad := _require_post(request)) is not None:
+        return bad
+
+    source = get_object_or_404(Source, key=key)
+    job = jobs.enqueue("reparse_snapshot", source_key=source.key)
+    messages.success(
+        request,
+        f"Queued a re-parse of {source.name}'s latest stored snapshot — job "
+        f"#{job.pk}. No network request is made.",
+    )
+    return redirect(request.POST.get("next") or "sources:console")
+
+
+def seed(request):
+    if (bad := _require_post(request)) is not None:
+        return bad
+    job = jobs.enqueue("seed_reference")
+    messages.success(request, f"Queued reference-data seeding — job #{job.pk}.")
+    return redirect(request.POST.get("next") or "sources:console")
+
+
+def toggle_source(request, key: str):
+    if (bad := _require_post(request)) is not None:
+        return bad
+    source = get_object_or_404(Source, key=key)
+    source.enabled = not source.enabled
+    source.save(update_fields=["enabled"])
+    messages.success(
+        request, f"{source.name} is now {'enabled' if source.enabled else 'disabled'}."
+    )
     return redirect("sources:console")
 
 
+def rerun_job(request, pk: int):
+    if (bad := _require_post(request)) is not None:
+        return bad
+    original = get_object_or_404(Job, pk=pk)
+    job = jobs.enqueue(original.kind, **(original.params_json or {}))
+    messages.success(request, f"Re-queued {original.kind} as job #{job.pk}.")
+    return redirect("sources:job_detail", pk=job.pk)
+
+
+def jobs_list(request):
+    queryset = Job.objects.all()
+    kind = request.GET.get("kind") or ""
+    status = request.GET.get("status") or ""
+    if kind:
+        queryset = queryset.filter(kind=kind)
+    if status:
+        queryset = queryset.filter(status=status)
+
+    page = Paginator(queryset, 40).get_page(request.GET.get("page"))
+    params = {k: v for k, v in request.GET.items() if k != "page" and v}
+    return render(
+        request,
+        "sources/jobs.html",
+        {
+            "nav": "jobs",
+            "page": page,
+            "querystring": urlencode(params) + "&" if params else "",
+            "kinds": Job.objects.values_list("kind", flat=True).distinct(),
+            "statuses": JobStatus.choices,
+            "kind": kind,
+            "status": status,
+            "runs": FetchRun.objects.select_related("source")[:15],
+        },
+    )
+
+
 def jobs_panel(request):
-    """Polled fragment.  Progress lives in the DB, so a reload never loses it."""
+    """Polled fragment. Progress lives in the DB, so a reload never loses it."""
     return render(
         request,
         "sources/_jobs.html",
-        {"jobs": Job.objects.all()[:ACTIVE_JOB_LIMIT], "summary": _dataset_summary()},
+        {"jobs": Job.objects.all()[:ACTIVE_JOB_LIMIT]},
     )
 
 
 def job_detail(request, pk: int):
     job = get_object_or_404(Job, pk=pk)
-    return render(request, "sources/job_detail.html", {"job": job})
+    return render(request, "sources/job_detail.html", {"nav": "jobs", "job": job})
 
 
 def run_detail(request, pk: int):
     run = get_object_or_404(
         FetchRun.objects.select_related("source", "job").prefetch_related("snapshots"), pk=pk
     )
-    return render(request, "sources/run_detail.html", {"run": run})
-
-
-def unmapped(request):
-    """§9: the "unmapped events" report.  `canonical_code` will be the
-    buggiest artifact in the project, so it gets a screen from day one."""
-    indicators = (
-        Indicator.objects.filter(canonical_code__isnull=True)
-        .exclude(mapping_status=MappingStatus.IGNORED)
-        .annotate(alias_count=Count("aliases"), release_count=Count("releases", distinct=True))
-        .order_by("currency", "name")
+    totals = run.snapshots.aggregate(n=Count("id"), bytes=Sum("size_bytes"))
+    return render(
+        request,
+        "sources/run_detail.html",
+        {
+            "nav": "jobs",
+            "run": run,
+            "snapshot_count": totals["n"] or 0,
+            "snapshot_bytes": totals["bytes"] or 0,
+        },
     )
-    return render(request, "sources/unmapped.html", {"indicators": indicators})

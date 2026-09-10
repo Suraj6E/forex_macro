@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}Indicators — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Indicators</h1>
+    <p class="page-head__sub">
+      A canonical code is what lets the same release from MT5, ForexFactory and
+      a statistical agency become one row instead of three. Assigning them is
+      manual on purpose — this mapping is the most error-prone artifact in the
+      project, so it gets a screen rather than a guess.
+    </p>
+  </div>
+</div>
+
+<div class="stats" style="margin-bottom:16px;">
+  <div class="stat"><span class="stat__k">Total</span><span class="stat__v">{{ counts.total }}</span></div>
+  <div class="stat"><span class="stat__k">Mapped</span><span class="stat__v">{{ counts.mapped }}</span>
+    <span class="stat__note">joinable across sources</span></div>
+  <div class="stat {% if unmapped %}stat--warn{% endif %}"><span class="stat__k">Unmapped</span>
+    <span class="stat__v">{{ unmapped }}</span>
+    <span class="stat__note">auto-created by an ingest</span></div>
+  <div class="stat"><span class="stat__k">Ignored</span><span class="stat__v">{{ counts.ignored }}</span>
+    <span class="stat__note">deliberately out of scope</span></div>
+</div>
+
+<form class="filters" method="get">
+  <label class="field" style="flex:1 1 220px;">
+    <span>Search</span>
+    <input type="search" name="q" value="{{ q }}" placeholder="name or code">
+  </label>
+  <label class="field">
+    <span>State</span>
+    <select name="state">
+      <option value="all" {% if state == "all" %}selected{% endif %}>all</option>
+      <option value="unmapped" {% if state == "unmapped" %}selected{% endif %}>unmapped</option>
+      <option value="mapped" {% if state == "mapped" %}selected{% endif %}>mapped</option>
+      <option value="ignored" {% if state == "ignored" %}selected{% endif %}>ignored</option>
+    </select>
+  </label>
+  <label class="field">
+    <span>Currency</span>
+    <select name="currency">
+      <option value="">all</option>
+      {% for code, label in currencies %}<option value="{{ code }}" {% if code == currency %}selected{% endif %}>{{ code }}</option>{% endfor %}
+    </select>
+  </label>
+  <button class="btn btn--primary" type="submit">Apply</button>
+  <a class="btn btn--ghost" href="{% url 'calendar_data:indicators' %}">Reset</a>
+</form>
+
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t">
+      <thead>
+        <tr><th style="width:5%">Ccy</th><th style="width:26%">Name</th>
+            <th class="num" style="width:8%">Releases</th><th class="num" style="width:7%">Aliases</th>
+            <th style="width:46%">Canonical mapping</th><th style="width:8%"></th></tr>
+      </thead>
+      <tbody>
+      {% for ind in page %}
+        <tr>
+          <td class="mono small">{{ ind.currency }}</td>
+          <td>
+            <a href="{% url 'calendar_data:indicator' ind.pk %}">{{ ind.name }}</a>
+            {% if not ind.canonical_code %}<span class="sub"><span class="badge badge--warn">unmapped</span></span>{% endif %}
+          </td>
+          <td class="num">{{ ind.release_count }}</td>
+          <td class="num">{{ ind.alias_count }}</td>
+          <td>
+            <form method="post" action="{% url 'calendar_data:indicator_update' ind.pk %}" class="rowform">
+              {% csrf_token %}
+              <input type="hidden" name="next" value="{{ request.get_full_path }}">
+              <input type="text" name="canonical_code" value="{{ ind.canonical_code|default:'' }}"
+                     placeholder="US_NFP" title="Internal code — uppercased automatically">
+              <select name="importance" title="Importance tier">
+                {% for value, label in importances %}
+                  <option value="{{ value }}" {% if value == ind.importance %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+              <select name="release_group" title="Same-instant release group">
+                <option value="">no group</option>
+                {% for g in groups %}
+                  <option value="{{ g.pk }}" {% if g.pk == ind.release_group_id %}selected{% endif %}>{{ g.key }}</option>
+                {% endfor %}
+              </select>
+              <select name="mapping_status" title="Mapping state">
+                {% for value, label in mapping_states %}
+                  <option value="{{ value }}" {% if value == ind.mapping_status %}selected{% endif %}>{{ value }}</option>
+                {% endfor %}
+              </select>
+              <button class="btn btn--sm" type="submit">Save</button>
+            </form>
+          </td>
+          <td class="right"><a class="tiny" href="{% url 'calendar_data:indicator' ind.pk %}">open</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="6">
+          <div class="empty">
+            <div class="empty__t">No indicators match.</div>
+            <p class="tiny">Indicators appear automatically the first time a source mentions them.</p>
+          </div>
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% include "_pager.html" with page=page querystring=querystring %}
+
+<p class="note" style="margin-top:16px;">
+  Setting a group matters for releases published at one instant — the US
+  Employment Situation is payrolls, the unemployment rate and average hourly
+  earnings at 08:30 New York. Those are perfectly collinear regressors, so the
+  price move is attributed to the group, never to one member.
+</p>
+{% endblock %}

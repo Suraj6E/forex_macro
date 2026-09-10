@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}{{ indicator.name }} — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>{{ indicator.name }}</h1>
+    <p class="page-head__sub">
+      <span class="mono">{{ indicator.currency }}</span> ·
+      {% if indicator.canonical_code %}
+        canonical code <span class="mono">{{ indicator.canonical_code }}</span>
+      {% else %}
+        <span class="badge badge--warn">no canonical code</span> — cannot be joined across sources yet
+      {% endif %}
+      · {{ release_total|intcomma }} release{{ release_total|pluralize }} held
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <a class="btn btn--ghost" href="{% url 'calendar_data:indicators' %}">All indicators</a>
+  </div>
+</div>
+
+<div class="cols cols--2">
+  <section class="card">
+    <h3>Mapping</h3>
+    <form method="post" action="{% url 'calendar_data:indicator_update' indicator.pk %}" style="margin-top:12px;">
+      {% csrf_token %}
+      <input type="hidden" name="next" value="{{ request.get_full_path }}">
+      <div class="cols cols--3" style="gap:12px;">
+        <label class="field"><span>Canonical code</span>
+          <input type="text" name="canonical_code" value="{{ indicator.canonical_code|default:'' }}" placeholder="US_NFP"></label>
+        <label class="field"><span>Importance</span>
+          <select name="importance">
+            {% for value, label in importances %}<option value="{{ value }}" {% if value == indicator.importance %}selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select></label>
+        <label class="field"><span>Release group</span>
+          <select name="release_group">
+            <option value="">no group</option>
+            {% for g in groups %}<option value="{{ g.pk }}" {% if g.pk == indicator.release_group_id %}selected{% endif %}>{{ g.name }}</option>{% endfor %}
+          </select></label>
+        <label class="field"><span>State</span>
+          <select name="mapping_status">
+            {% for value, label in mapping_states %}<option value="{{ value }}" {% if value == indicator.mapping_status %}selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select></label>
+      </div>
+      <div class="btnrow" style="margin-top:12px;">
+        <button class="btn btn--primary" type="submit">Save mapping</button>
+        <span class="tiny faint">Codes are uppercased and spaces become underscores.</span>
+      </div>
+    </form>
+  </section>
+
+  <section class="card card--flush">
+    <div class="card__head"><h3>Source aliases</h3></div>
+    <div class="tablewrap">
+      <table class="t t--dense">
+        <thead><tr><th>Source</th><th>Its name for this</th><th class="num">Seen</th></tr></thead>
+        <tbody>
+        {% for a in aliases %}
+          <tr>
+            <td class="small">{{ a.source.name }}</td>
+            <td class="small mono muted">{{ a.source_key }}</td>
+            <td class="num">{{ a.times_seen }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="3"><div class="empty tiny">No aliases.</div></td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card__foot">
+      Each source names this release its own way. A title change at the source
+      forks a new alias rather than silently corrupting the existing one.
+    </div>
+  </section>
+</div>
+
+<h2>Releases</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Scheduled (UTC)</th><th>Period</th><th class="num">Actual</th>
+                 <th class="num">Forecast</th><th class="num">Previous</th><th>Provenance</th><th></th></tr></thead>
+      <tbody>
+      {% for e in releases %}
+        <tr>
+          <td class="mono small nowrap">{{ e.scheduled_time_utc|date:"Y-m-d H:i"|default:"—" }}</td>
+          <td class="mono small muted">{{ e.reference_period }}</td>
+          <td class="num small">{{ e.actual|default:"—" }}</td>
+          <td class="num small">{{ e.forecast|default:"—" }}</td>
+          <td class="num small">{{ e.previous|default:"—" }}</td>
+          <td class="small faint">{{ e.get_forecast_provenance_display|truncatewords:3 }}</td>
+          <td class="right"><a class="tiny" href="{% url 'calendar_data:event' e.pk %}">open</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="7"><div class="empty tiny">No releases held.</div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

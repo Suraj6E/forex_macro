@@ -1,0 +1,264 @@
+"""Reference data — the source register, instruments, release groups and known
+dislocations.
+
+planning.md §5 (source register), locked decision 6 (majors only), §4.6 (what
+a 2007 start actually contains).
+
+Lives here rather than in the management command so the console button and the
+CLI run the same code.  Idempotent: re-running updates descriptive fields and
+leaves health, history and hand-edited mappings alone.
+"""
+
+from datetime import datetime, timezone
+from decimal import Decimal
+
+from calendar_data.models import ReleaseGroup
+from prices.models import MAJORS, Instrument, MarketEvent, MarketEventKind
+from quality.enums import Regime
+from sources.models import RobotsStatus, Source, SourceKind
+
+SOURCES = [
+    dict(
+        key="mt5_calendar",
+        name="MetaTrader 5 calendar",
+        kind=SourceKind.CALENDAR,
+        base_url="",
+        gives="forecast, actual, previous, revised-previous, revision no., impact, period, event time",
+        depth_note="2007+ or 2017+ — terminal-dependent, measure it (P0.5 Q1)",
+        role="Primary. The only free source with all four value fields at depth.",
+        timezone_rule="MT5 trade server time (TimeTradeServer); broker-dependent, "
+        "usually EET/EEST, and server DST rules have changed over the years. "
+        "Needs TimeServerDST-style correction over a 2007 start (§4.1).",
+        robots_status=RobotsStatus.NOT_APPLICABLE,
+        terms_note="Local terminal. Bridge is an MQL5 script writing UTF-8 CSV to "
+        "MQL5\\Files — the Python MetaTrader5 package has no calendar function (§4.2).",
+        fetch_policy_json={"transport": "mql5_csv", "encoding": "utf-8"},
+        supports_date_range=True,
+    ),
+    dict(
+        key="forexfactory_weekly",
+        name="ForexFactory weekly feed",
+        kind=SourceKind.CALENDAR,
+        base_url="https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+        gives="forecast, previous, impact, currency",
+        depth_note="current week only",
+        role="Forward point-in-time capture (§7.3). No actuals in the feed.",
+        timezone_rule="Explicit UTC offset in the payload (US Eastern). Verify "
+        "against a known release before trusting (§4.1).",
+        robots_status=RobotsStatus.RESTRICTED,
+        terms_note="Verified: polling hard gets you blocked quickly. Community "
+        "guidance is once a week, cached (§4.2 Route B).",
+        fetch_policy_json={"cadence": "weekly", "min_interval_hours": 24},
+        supports_date_range=False,
+    ),
+    dict(
+        key="forexfactory_pages",
+        name="ForexFactory calendar pages",
+        kind=SourceKind.CALENDAR,
+        base_url="https://www.forexfactory.com/calendar",
+        gives="forecast, previous, actual, revised",
+        depth_note="deep",
+        role="2007–2017 backfill *if* MT5 falls short. Brittle; phase 3 at the earliest.",
+        timezone_rule="Site-configured display timezone. Must be pinned before parsing.",
+        robots_status=RobotsStatus.RESTRICTED,
+        terms_note="HTML crawl. §5.4: scrapers break on redesign, silently, and "
+        "usually emit plausible-looking wrong data rather than an error.",
+        fetch_policy_json={"cadence": "manual", "requests_per_minute": 4},
+    ),
+    dict(
+        key="alfred",
+        name="ALFRED (FRED archival)",
+        kind=SourceKind.ACTUALS,
+        base_url="https://api.stlouisfed.org/fred/",
+        gives="actual vintages (first prints)",
+        depth_note="very deep",
+        role="Ground truth for actual_first_print, US.",
+        timezone_rule="Reference periods, not release instants.",
+        robots_status=RobotsStatus.ALLOWED,
+        terms_note="Free API key required.",
+    ),
+    dict(
+        key="dbnomics",
+        name="DBnomics",
+        kind=SourceKind.ACTUALS,
+        base_url="https://api.db.nomics.world/v22/",
+        gives="actuals across agencies, one unified API, values unmodified",
+        depth_note="deep",
+        role="Actuals backbone for all 8 economies (§4.2 Route D).",
+        timezone_rule="Indexed by reference period, not release event — validates "
+        "and fills `actual`, does not replace the calendar.",
+        robots_status=RobotsStatus.ALLOWED,
+    ),
+    dict(
+        key="agency_schedule",
+        name="Official agencies",
+        kind=SourceKind.CALENDAR,
+        base_url="",
+        gives="actuals + official release schedule",
+        depth_note="deep",
+        role="Authoritative release timestamps for tier-1 (§4.2 Route C).",
+        timezone_rule="Local time with local DST — use IANA zones, never a fixed offset.",
+        robots_status=RobotsStatus.ALLOWED,
+        terms_note="BLS, BEA, Census, Eurostat, ECB, ONS, BoE, Destatis, BoJ, RBA, BoC, SNB, RBNZ.",
+    ),
+    dict(
+        key="philly_fed_spf",
+        name="Philadelphia Fed — Survey of Professional Forecasters",
+        kind=SourceKind.REFERENCE,
+        base_url="https://www.philadelphiafed.org/surveys-and-data/",
+        gives="true survey consensus, quarterly",
+        depth_note="1968+",
+        role="Independent cross-check on MT5's forecast values.",
+        robots_status=RobotsStatus.ALLOWED,
+    ),
+    dict(
+        key="histdata",
+        name="HistData.com",
+        kind=SourceKind.PRICE,
+        base_url="https://www.histdata.com/",
+        gives="M1 OHLC, bid only",
+        depth_note="2000+ — ~1,600 monthly zips for 7 pairs × 19 years",
+        role="Bulk M1 backbone.",
+        timezone_rule="Eastern Standard Time with NO DST adjustment. Fixed UTC-5 "
+        "year-round. Do NOT use America/New_York — it would shift half the "
+        "history by an hour (§4.1).",
+        robots_status=RobotsStatus.RESTRICTED,
+        terms_note="M1 bars are bid-only; ask appears in tick data only, so "
+        "HistData alone cannot give spread (§4.7).",
+    ),
+    dict(
+        key="dukascopy",
+        name="Dukascopy",
+        kind=SourceKind.PRICE,
+        base_url="https://datafeed.dukascopy.com/",
+        gives="tick bid/ask + volumes",
+        depth_note="~2003+",
+        role="Event-window ticks, spread, cross-validation. Bulk tick is off the "
+        "table — 19y × 7 pairs is roughly 800 GB (§4.5).",
+        timezone_rule="UTC / GMT — verify against a known release before trusting.",
+        robots_status=RobotsStatus.RESTRICTED,
+    ),
+    dict(
+        key="mt5_prices",
+        name="MetaTrader 5 terminal (prices)",
+        kind=SourceKind.PRICE,
+        base_url="",
+        gives="M1 via the Python API",
+        depth_note="broker-dependent",
+        role="Third opinion; not for depth.",
+        timezone_rule="Trade server time.",
+        robots_status=RobotsStatus.NOT_APPLICABLE,
+    ),
+]
+
+#: §4.6.  Instants are best-known, not verified — every one carries a note
+#: saying so, because a confidently wrong timestamp is worse than a flagged one.
+MARKET_EVENTS = [
+    dict(
+        ts_utc=datetime(2008, 9, 15, 0, 0, tzinfo=timezone.utc),
+        end_ts_utc=datetime(2009, 6, 30, 0, 0, tzinfo=timezone.utc),
+        label="Global financial crisis",
+        kind=MarketEventKind.CRISIS,
+        regime=Regime.CRISIS,
+        note="Volatility regime unlike anything since. Period boundaries are a "
+        "convention, not a measurement.",
+    ),
+    dict(
+        ts_utc=datetime(2015, 1, 15, 9, 30, tzinfo=timezone.utc),
+        label="SNB removes the EUR/CHF floor",
+        kind=MarketEventKind.POLICY_SHOCK,
+        regime=Regime.NORMALISATION,
+        note="Not an economic release, but it lands inside event windows and will "
+        "dominate any USDCHF variance calculation it is included in. "
+        "Instant approximate — verify against the price series (§4.1 vol-check).",
+    ),
+    dict(
+        ts_utc=datetime(2016, 10, 6, 23, 7, tzinfo=timezone.utc),
+        label="GBP flash crash",
+        kind=MarketEventKind.DISLOCATION,
+        regime=Regime.NORMALISATION,
+        note="Provider-dependent: different feeds show different extremes because "
+        "there was no consolidated price. A concrete reason to cross-validate "
+        "HistData against Dukascopy (§4.6). Instant approximate.",
+    ),
+    dict(
+        ts_utc=datetime(2019, 1, 2, 22, 30, tzinfo=timezone.utc),
+        label="JPY flash crash",
+        kind=MarketEventKind.DISLOCATION,
+        regime=Regime.NORMALISATION,
+        note="Provider-dependent, as above. Instant approximate — verify.",
+    ),
+    dict(
+        ts_utc=datetime(2020, 3, 1, 0, 0, tzinfo=timezone.utc),
+        end_ts_utc=datetime(2021, 12, 31, 0, 0, tzinfo=timezone.utc),
+        label="COVID",
+        kind=MarketEventKind.CRISIS,
+        regime=Regime.COVID,
+        note="Period, not an instant.",
+    ),
+    dict(
+        ts_utc=datetime(2022, 1, 1, 0, 0, tzinfo=timezone.utc),
+        end_ts_utc=datetime(2023, 12, 31, 0, 0, tzinfo=timezone.utc),
+        label="Inflation shock and hiking cycle",
+        kind=MarketEventKind.CRISIS,
+        regime=Regime.INFLATION,
+        note="Period, not an instant.",
+    ),
+]
+
+RELEASE_GROUPS = [
+    dict(
+        key="us_employment_situation",
+        name="US Employment Situation",
+        country="United States",
+        currency="USD",
+        description="Nonfarm payrolls + unemployment rate + average hourly earnings, "
+        "published at one instant (08:30 New York). §3.3 Case B: three numbers, one "
+        "timestamp, perfectly collinear regressors. The move is attributed to the "
+        "report, never to the unemployment rate alone.",
+    ),
+]
+
+
+def seed_reference(log=lambda msg: None) -> dict:
+    created = updated = 0
+    for spec in SOURCES:
+        _, was_created = Source.objects.update_or_create(
+            key=spec["key"], defaults={k: v for k, v in spec.items() if k != "key"}
+        )
+        created += was_created
+        updated += not was_created
+        log(f"{'created' if was_created else 'updated'} source {spec['key']}")
+
+    for symbol, base, quote, pip in MAJORS:
+        Instrument.objects.update_or_create(
+            symbol=symbol,
+            defaults={"base_ccy": base, "quote_ccy": quote, "pip_size": Decimal(pip)},
+        )
+
+    for spec in RELEASE_GROUPS:
+        ReleaseGroup.objects.update_or_create(
+            key=spec["key"], defaults={k: v for k, v in spec.items() if k != "key"}
+        )
+
+    for spec in MARKET_EVENTS:
+        MarketEvent.objects.update_or_create(
+            label=spec["label"],
+            ts_utc=spec["ts_utc"],
+            defaults={k: v for k, v in spec.items() if k not in ("label", "ts_utc")},
+        )
+
+    summary = (
+        f"{len(SOURCES)} sources ({created} created, {updated} updated), "
+        f"{len(MAJORS)} instruments, {len(RELEASE_GROUPS)} release groups, "
+        f"{len(MARKET_EVENTS)} market events"
+    )
+    log(summary)
+    return {
+        "sources": len(SOURCES),
+        "sources_created": created,
+        "instruments": len(MAJORS),
+        "release_groups": len(RELEASE_GROUPS),
+        "market_events": len(MARKET_EVENTS),
+        "summary": summary,
+    }

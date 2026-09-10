@@ -1,0 +1,94 @@
+{% load humanize %}
+<h2>{{ title }}</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t">
+      <thead>
+        <tr>
+          <th style="width:22%">Source</th>
+          <th style="width:20%">Gives</th>
+          <th style="width:20%">Clock</th>
+          <th style="width:16%">Held here</th>
+          <th style="width:9%">Health</th>
+          <th style="width:13%">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for s in rows %}
+        <tr {% if not s.enabled %}style="opacity:.5"{% endif %}>
+          <td>
+            <strong>{{ s.name }}</strong>
+            <span class="sub mono">{{ s.key }}</span>
+            {% if s.role %}<span class="sub">{{ s.role }}</span>{% endif %}
+          </td>
+          <td class="small muted">
+            {{ s.gives|default:"—" }}
+            {% if s.depth_note %}<span class="sub">depth: {{ s.depth_note }}</span>{% endif %}
+          </td>
+          <td class="small muted">{{ s.timezone_rule|default:"—" }}</td>
+          <td class="small">
+            {% if s.contribution %}
+              <span class="num">{{ s.contribution.observations|intcomma }}</span> observations
+              <span class="sub">{{ s.contribution.releases|intcomma }} releases · {{ s.contribution.indicators }} indicators</span>
+              <span class="sub">{{ s.contribution.earliest|date:"j M Y" }} → {{ s.contribution.latest|date:"j M Y" }}</span>
+            {% elif s.has_collector %}
+              <span class="faint">nothing yet</span>
+            {% else %}
+              <span class="faint">collector not built</span>
+            {% endif %}
+            {% if s.snapshot_count %}<span class="sub">{{ s.snapshot_count }} raw snapshot{{ s.snapshot_count|pluralize }}</span>{% endif %}
+          </td>
+          <td>
+            {% include "sources/_status.html" with status=s.health label=s.get_health_display %}
+            {% if s.consecutive_failures %}<span class="sub">{{ s.consecutive_failures }} consecutive failure{{ s.consecutive_failures|pluralize }}</span>{% endif %}
+            {% if s.latest_run %}
+              <span class="sub"><a href="{% url 'sources:run_detail' s.latest_run.pk %}">last run {{ s.latest_run.started_at|date:"j M H:i" }}Z</a></span>
+            {% endif %}
+          </td>
+          <td>
+            {% if s.has_collector %}
+              <form method="post" action="{% url 'sources:fetch' s.key %}" class="rowform">
+                {% csrf_token %}
+                {% if s.supports_date_range %}
+                  <input type="date" name="date_from" title="from (optional)" style="width:120px">
+                  <input type="date" name="date_to" title="to (optional)" style="width:120px">
+                {% endif %}
+                <button class="btn btn--primary btn--sm" type="submit" {% if not s.enabled %}disabled{% endif %}>Fetch</button>
+                {% if s.cooldown %}
+                  <label class="check" title="Overrides the stored fetch policy">
+                    <input type="checkbox" name="force" value="1"> force
+                  </label>
+                {% endif %}
+              </form>
+              {% if s.cooldown %}
+                <span class="sub">policy cooldown — {{ s.cooldown }} left</span>
+              {% endif %}
+              {% if s.snapshot_count %}
+                <form method="post" action="{% url 'sources:reparse' s.key %}" style="margin-top:6px;">
+                  {% csrf_token %}
+                  <button class="btn btn--sm" type="submit">Re-parse latest</button>
+                </form>
+              {% endif %}
+            {% else %}
+              <span class="faint tiny">awaiting a collector</span>
+            {% endif %}
+            <form method="post" action="{% url 'sources:toggle' s.key %}" style="margin-top:6px;">
+              {% csrf_token %}
+              <button class="btn btn--ghost btn--sm" type="submit">{% if s.enabled %}Disable{% else %}Enable{% endif %}</button>
+            </form>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="6">
+          <div class="empty">
+            <div class="empty__t">No sources registered.</div>
+            <form method="post" action="{% url 'sources:seed' %}">{% csrf_token %}
+              <button class="btn btn--primary btn--sm" type="submit">Seed the register</button>
+            </form>
+          </div>
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>

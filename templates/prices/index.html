@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}Instruments — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Instruments &amp; price coverage</h1>
+    <p class="page-head__sub">
+      Seven majors, one-minute resolution, 2007 to now — about 50 million bars,
+      which is small for Parquet and unpleasant in SQLite, so the bars live on
+      disk and this table is the ledger of what exists.
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <a class="btn btn--ghost" href="{% url 'sources:console' %}">Price sources</a>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><span class="stat__k">Instruments</span><span class="stat__v">{{ instruments|length }}</span></div>
+  <div class="stat"><span class="stat__k">Months covered</span><span class="stat__v">{{ totals.months|default:0 }}</span></div>
+  <div class="stat"><span class="stat__k">M1 bars</span><span class="stat__v">{{ totals.bars|default:0|intcomma }}</span>
+    <span class="stat__note">target is ~50M across 19 years</span></div>
+  <div class="stat"><span class="stat__k">Known gaps</span><span class="stat__v">{{ totals.gaps|default:0|intcomma }}</span></div>
+</div>
+
+<h2>Majors</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t">
+      <thead><tr><th>Symbol</th><th>Base</th><th>Quote</th><th class="num">Pip size</th>
+                 <th class="num">Months</th><th class="num">Bars</th><th>State</th></tr></thead>
+      <tbody>
+      {% for i in instruments %}
+        <tr>
+          <td class="mono"><strong>{{ i.symbol }}</strong></td>
+          <td class="mono small">{{ i.base_ccy }}</td>
+          <td class="mono small">{{ i.quote_ccy }}</td>
+          <td class="num small">{{ i.pip_size }}</td>
+          <td class="num">{{ i.months }}</td>
+          <td class="num">{{ i.bars|default:0|intcomma }}</td>
+          <td>{% if i.bars %}<span class="badge">loaded</span>{% else %}<span class="badge badge--ghost faint">no data</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    HistData supplies the bulk M1 backbone but its bars are <strong>bid only</strong>,
+    so it cannot give spread. Dukascopy supplies bid/ask ticks for event windows
+    and acts as the independent second opinion — two free sources means
+    cross-validation, which turns a limitation into a quality feature.
+  </div>
+</section>
+
+{% if coverage %}
+<h2>Coverage ledger</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Instrument</th><th>Source</th><th>Month</th><th class="num">Bars</th>
+                 <th class="num">Expected</th><th class="num">Gaps</th><th>Stored at</th></tr></thead>
+      <tbody>
+      {% for c in coverage %}
+        <tr>
+          <td class="mono small">{{ c.instrument.symbol }}</td>
+          <td class="small">{{ c.source.key }}</td>
+          <td class="small">{{ c.month|date:"Y-m" }}</td>
+          <td class="num">{{ c.bar_count|intcomma }}</td>
+          <td class="num faint">{{ c.expected_bar_count|intcomma }}</td>
+          <td class="num">{{ c.gap_count }}</td>
+          <td class="mono tiny faint">{{ c.parquet_path }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% else %}
+<section class="card" style="margin-top:16px;">
+  <div class="empty">
+    <div class="empty__t">No price data loaded yet.</div>
+    <p class="tiny" style="max-width:60ch; margin:0 auto;">
+      HistData is roughly 1,600 monthly zip files for seven pairs over nineteen
+      years — a job that runs for a while, which is exactly why there is a job
+      runner rather than a request-cycle download. Bulk Dukascopy tick is off
+      the table: nineteen years across seven pairs would be around 800&nbsp;GB, so
+      ticks are fetched only for event windows.
+    </p>
+  </div>
+</section>
+{% endif %}
+
+<h2>Known dislocations <span class="h2sub">annotated, not rediscovered as odd dots on a scatter plot</span></h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>When (UTC)</th><th>Event</th><th>Kind</th><th>Regime</th><th>Note</th></tr></thead>
+      <tbody>
+      {% for m in market_events %}
+        <tr>
+          <td class="mono small nowrap">
+            {{ m.ts_utc|date:"Y-m-d H:i" }}
+            {% if m.end_ts_utc %}<span class="sub">→ {{ m.end_ts_utc|date:"Y-m-d" }}</span>{% endif %}
+          </td>
+          <td class="small"><strong>{{ m.label }}</strong></td>
+          <td class="small muted">{{ m.get_kind_display }}</td>
+          <td class="small muted">{{ m.get_regime_display|default:"—" }}</td>
+          <td class="small muted">{{ m.note }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="5"><div class="empty tiny">None seeded.</div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    Outlier policy defaults to <em>flag</em>, never to silent exclusion. The 2015
+    SNB floor removal is not an economic release, but it lands inside event
+    windows and will dominate any USDCHF variance calculation that includes it.
+  </div>
+</section>
+{% endblock %}

@@ -1,31 +1,104 @@
 {% load static %}<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}fxmacro{% endblock %}</title>
+  <script>
+    /* Set before first paint so the page never flashes the wrong theme. */
+    (function () {
+      try {
+        var t = localStorage.getItem("fx-theme");
+        if (t) document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="{% static 'app.css' %}">
   <script src="{% static 'vendor/htmx.min.js' %}"></script>
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="{% url 'sources:console' %}">fxmacro</a>
-  <nav>
-    <a href="{% url 'sources:console' %}">Sources</a>
-    <a href="{% url 'sources:unmapped' %}">Unmapped</a>
-    <a href="/admin/">Admin</a>
-  </nav>
-  <span class="clock">all times UTC</span>
-</header>
+<div class="shell">
 
-{% if messages %}
-<ul class="messages">
-  {% for message in messages %}<li class="msg msg--{{ message.tags }}">{{ message }}</li>{% endfor %}
-</ul>
-{% endif %}
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand__name">fxmacro</span>
+      <span class="brand__ver">P0</span>
+    </div>
 
-<main>
-  {% block content %}{% endblock %}
-</main>
+    <div class="navgroup">
+      <div class="navgroup__title">Overview</div>
+      <a class="navlink {% if nav == 'dashboard' %}is-active{% endif %}" href="{% url 'dashboard:index' %}">Dashboard</a>
+      <a class="navlink {% if nav == 'quality' %}is-active{% endif %}" href="{% url 'quality:index' %}">
+        Data quality
+        {% if nav_counts.quality_flags %}<span class="navlink__count">{{ nav_counts.quality_flags }}</span>{% endif %}
+      </a>
+    </div>
+
+    <div class="navgroup">
+      <div class="navgroup__title">Dataset</div>
+      <a class="navlink {% if nav == 'calendar' %}is-active{% endif %}" href="{% url 'calendar_data:browser' %}">
+        Calendar <span class="navlink__count">{{ nav_counts.releases }}</span>
+      </a>
+      <a class="navlink {% if nav == 'indicators' %}is-active{% endif %}" href="{% url 'calendar_data:indicators' %}">
+        Indicators <span class="navlink__count">{{ nav_counts.indicators }}</span>
+      </a>
+      <a class="navlink {% if nav == 'instruments' %}is-active{% endif %}" href="{% url 'prices:index' %}">
+        Instruments <span class="navlink__count">{{ nav_counts.instruments }}</span>
+      </a>
+    </div>
+
+    <div class="navgroup">
+      <div class="navgroup__title">Ingestion</div>
+      <a class="navlink {% if nav == 'sources' %}is-active{% endif %}" href="{% url 'sources:console' %}">
+        Sources <span class="navlink__count">{{ nav_counts.sources }}</span>
+      </a>
+      <a class="navlink {% if nav == 'jobs' %}is-active{% endif %}" href="{% url 'sources:jobs' %}">
+        Jobs & runs
+        {% if nav_counts.jobs_active %}<span class="navlink__count">{{ nav_counts.jobs_active }} live</span>{% endif %}
+      </a>
+    </div>
+
+    <div class="navgroup">
+      <div class="navgroup__title">Analysis</div>
+      <a class="navlink {% if nav == 'studies' %}is-active{% endif %}" href="{% url 'studies:index' %}">Studies</a>
+    </div>
+
+    <div class="sidebar__foot">
+      <button class="btn btn--ghost btn--sm" type="button" onclick="fxToggleTheme()" style="width:100%; justify-content:center;">
+        <span id="fx-theme-label">Light mode</span>
+      </button>
+      <p class="tiny" style="margin:10px 0 0;">
+        Local single-user tool. No login, no accounts —
+        every screen is open because nothing here is shared.
+      </p>
+    </div>
+  </aside>
+
+  <main>
+    {% if messages %}
+    <ul class="messages">
+      {% for message in messages %}<li class="msg msg--{{ message.tags }}">{{ message }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+
+</div>
+
+<script>
+  function fxToggleTheme() {
+    var root = document.documentElement;
+    var next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("fx-theme", next); } catch (e) {}
+    fxSyncThemeLabel();
+  }
+  function fxSyncThemeLabel() {
+    var el = document.getElementById("fx-theme-label");
+    if (el) el.textContent =
+      document.documentElement.getAttribute("data-theme") === "light" ? "Dark mode" : "Light mode";
+  }
+  fxSyncThemeLabel();
+</script>
 </body>
 </html>

@@ -1,0 +1,16 @@
+{% comment %}
+Status chip. Colour is redundant here, never load-bearing: every state also
+carries its own word, so the monochrome and the amber/red variants read the
+same to anyone.
+{% endcomment %}
+{% if status == "failed" or status == "failing" or status == "disallowed" %}
+  <span class="badge badge--err"><span class="badge__dot"></span>{{ label|default:status }}</span>
+{% elif status == "degraded" or status == "restricted" or status == "cancelled" %}
+  <span class="badge badge--warn"><span class="badge__dot"></span>{{ label|default:status }}</span>
+{% elif status == "success" or status == "ok" %}
+  <span class="badge"><span class="badge__dot"></span>{{ label|default:status }}</span>
+{% elif status == "running" or status == "queued" %}
+  <span class="badge badge--solid">{{ label|default:status }}</span>
+{% else %}
+  <span class="badge badge--ghost faint">{{ label|default:status }}</span>
+{% endif %}

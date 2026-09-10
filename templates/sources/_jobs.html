@@ -1,26 +1,34 @@
 {% if jobs %}
-<table class="grid grid--tight">
-  <thead><tr><th>#</th><th>Kind</th><th>Status</th><th>Progress</th><th>Message</th><th>Queued</th><th>Took</th></tr></thead>
-  <tbody>
-  {% for job in jobs %}
-    <tr>
-      <td><a href="{% url 'sources:job_detail' job.pk %}">{{ job.pk }}</a></td>
-      <td class="mono small">{{ job.kind }}</td>
-      <td><span class="pill pill--{{ job.status }}">{{ job.get_status_display }}</span></td>
-      <td class="bar-cell">
-        <div class="bar"><div class="bar__fill" style="width: {{ job.progress_percent }}%"></div></div>
-        <span class="small dim">{{ job.progress_percent }}%</span>
-      </td>
-      <td class="small">{{ job.message|default:"—" }}{% if job.error_text %}<div class="err">failed — see job detail</div>{% endif %}</td>
-      <td class="small dim">{{ job.created_at|date:"H:i:s" }}Z</td>
-      <td class="small dim">{% if job.duration_seconds %}{{ job.duration_seconds|floatformat:1 }}s{% else %}—{% endif %}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p class="dim">No jobs yet.</p>
+<section class="card card--flush" style="margin-bottom:16px;">
+  <div class="card__head">
+    <h3>Activity</h3>
+    <span class="spacer"></span>
+    <span class="badge badge--ghost tiny">refreshes every 2s</span>
+  </div>
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <tbody>
+      {% for job in jobs %}
+        <tr>
+          <td class="mono small nowrap" style="width:74px;">#{{ job.pk }}</td>
+          <td class="mono small nowrap" style="width:150px;">{{ job.kind }}</td>
+          <td style="width:110px;">{% include "sources/_status.html" with status=job.status label=job.get_status_display %}</td>
+          <td style="width:170px;">
+            <div class="meter"><div class="meter__fill" style="width: {{ job.progress_percent }}%"></div></div>
+          </td>
+          <td class="num small faint" style="width:48px;">{{ job.progress_percent }}%</td>
+          <td class="small muted">
+            {{ job.message|default:"—" }}
+            {% if job.error_text %}<span class="sub" style="color:var(--err)">failed — open the job for the traceback</span>{% endif %}
+          </td>
+          <td class="num small faint nowrap" style="width:70px;">
+            {% if job.duration_seconds %}{{ job.duration_seconds|floatformat:1 }}s{% else %}—{% endif %}
+          </td>
+          <td class="right" style="width:60px;"><a class="tiny" href="{% url 'sources:job_detail' job.pk %}">open</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
 {% endif %}
-
-{% comment %}Out-of-band: refresh the counters on the same 2s poll.{% endcomment %}
-<div id="dataset-summary" hx-swap-oob="true">{% include "sources/_summary.html" %}</div>

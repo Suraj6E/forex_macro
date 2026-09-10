@@ -130,6 +130,35 @@ def fetch_source(job: Job) -> dict:
     }
 
 
+@jobs.handler("seed_reference")
+def seed_reference_job(job: Job) -> dict:
+    """The §5 register, the 7 majors, release groups and known dislocations."""
+    from sources.seeding import seed_reference
+
+    jobs.set_progress(job, 0.2, "seeding reference data")
+    result = seed_reference(log=job.append_log)
+    jobs.set_progress(job, 1.0, result["summary"])
+    return result
+
+
+@jobs.handler("reparse_snapshot")
+def reparse_snapshot_job(job: Job) -> dict:
+    """Re-run the current normaliser over stored bytes — no network call (§5.4)."""
+    from sources.models import RawSnapshot
+    from sources.reparsing import reparse_snapshot
+
+    params = dict(job.params_json or {})
+    source = Source.objects.get(key=params["source_key"])
+    snapshot = None
+    if params.get("snapshot_id"):
+        snapshot = RawSnapshot.objects.filter(pk=params["snapshot_id"]).first()
+
+    jobs.set_progress(job, 0.2, "reading snapshot")
+    result = reparse_snapshot(source, snapshot, log=job.append_log)
+    jobs.set_progress(job, 1.0, result["summary"])
+    return result
+
+
 def _fail(run: FetchRun, source: Source, message: str):
     run.status = JobStatus.FAILED
     run.finished_at = timezone.now()

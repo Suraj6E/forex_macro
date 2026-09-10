@@ -2,22 +2,54 @@
 {% block title %}Job #{{ job.pk }} — fxmacro{% endblock %}
 
 {% block content %}
-<h1>Job #{{ job.pk }} <span class="pill pill--{{ job.status }}">{{ job.get_status_display }}</span></h1>
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Job #{{ job.pk }} <span class="mono muted" style="font-size:15px">{{ job.kind }}</span></h1>
+    <p class="page-head__sub">
+      {% include "sources/_status.html" with status=job.status label=job.get_status_display %}
+      {% if job.message %}<span class="muted"> — {{ job.message }}</span>{% endif %}
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <form method="post" action="{% url 'sources:rerun_job' job.pk %}">
+      {% csrf_token %}
+      <button class="btn" type="submit">Run again</button>
+    </form>
+    <a class="btn btn--ghost" href="{% url 'sources:jobs' %}">All jobs</a>
+  </div>
+</div>
 
-<dl class="kv">
-  <dt>Kind</dt><dd class="mono">{{ job.kind }}</dd>
-  <dt>Params</dt><dd class="mono small">{{ job.params_json }}</dd>
-  <dt>Queued</dt><dd>{{ job.created_at|date:"Y-m-d H:i:s" }}Z</dd>
-  <dt>Started</dt><dd>{{ job.started_at|date:"Y-m-d H:i:s"|default:"—" }}</dd>
-  <dt>Finished</dt><dd>{{ job.finished_at|date:"Y-m-d H:i:s"|default:"—" }}</dd>
-  <dt>Progress</dt><dd>{{ job.progress_percent }}% — {{ job.message|default:"—" }}</dd>
-  {% if job.fetch_run %}<dt>Fetch run</dt><dd><a href="{% url 'sources:run_detail' job.fetch_run.pk %}">#{{ job.fetch_run.pk }} {{ job.fetch_run.source.key }}</a></dd>{% endif %}
-</dl>
+<div class="cols cols--2">
+  <section class="card">
+    <h3>Details</h3>
+    <dl class="kv" style="margin-top:10px;">
+      <dt>Params</dt><dd class="mono small">{{ job.params_json|default:"—" }}</dd>
+      <dt>Queued</dt><dd class="small">{{ job.created_at|date:"Y-m-d H:i:s" }}Z</dd>
+      <dt>Started</dt><dd class="small">{{ job.started_at|date:"Y-m-d H:i:s"|default:"—" }}</dd>
+      <dt>Finished</dt><dd class="small">{{ job.finished_at|date:"Y-m-d H:i:s"|default:"—" }}</dd>
+      <dt>Duration</dt><dd class="small">{% if job.duration_seconds %}{{ job.duration_seconds|floatformat:2 }}s{% else %}—{% endif %}</dd>
+      <dt>Progress</dt><dd>
+        <div class="meter" style="max-width:220px"><div class="meter__fill" style="width: {{ job.progress_percent }}%"></div></div>
+      </dd>
+      {% if job.fetch_run %}
+        <dt>Fetch run</dt><dd class="small"><a href="{% url 'sources:run_detail' job.fetch_run.pk %}">#{{ job.fetch_run.pk }} — {{ job.fetch_run.source.name }}</a></dd>
+      {% endif %}
+    </dl>
+  </section>
 
-{% if job.result_json %}
-<h2>Result</h2>
-<pre class="pre">{{ job.result_json|pprint }}</pre>
-{% endif %}
+  <section class="card">
+    <h3>Result</h3>
+    {% if job.result_json %}
+      <dl class="kv" style="margin-top:10px;">
+        {% for key, value in job.result_json.items %}
+          <dt class="mono">{{ key }}</dt><dd class="small">{{ value }}</dd>
+        {% endfor %}
+      </dl>
+    {% else %}
+      <div class="empty tiny">No result recorded.</div>
+    {% endif %}
+  </section>
+</div>
 
 {% if job.error_text %}
 <h2>Error</h2>
@@ -26,6 +58,4 @@
 
 <h2>Log</h2>
 <pre class="pre">{{ job.log|default:"(empty)" }}</pre>
-
-<p><a href="{% url 'sources:console' %}">&larr; console</a></p>
 {% endblock %}

@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Studies — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Studies</h1>
+    <p class="page-head__sub">
+      The product is a place to ask questions, not a report that answers one. A
+      study is a saved specification — event selector, instruments, windows,
+      baseline, controls, filters, mode — that you edit in a form and re-run.
+      Adding a new question must never mean editing Python.
+    </p>
+  </div>
+</div>
+
+<p class="msg msg--warning">
+  <strong>The study engine is P4.</strong> The tables exist and the analytics
+  layer is importable from a notebook, but nothing can be run yet — there is no
+  price data to measure against. This page documents the shape rather than
+  pretending to a capability.
+</p>
+
+<div class="stats">
+  <div class="stat"><span class="stat__k">Saved specifications</span><span class="stat__v">{{ specs|length }}</span></div>
+  <div class="stat"><span class="stat__k">Runs</span><span class="stat__v">{{ runs|length }}</span></div>
+  <div class="stat"><span class="stat__k">Event impacts stored</span><span class="stat__v">{{ impacts }}</span>
+    <span class="stat__note">one row per event × instrument × horizon</span></div>
+  <div class="stat"><span class="stat__k">Decay curves</span><span class="stat__v">{{ curves }}</span>
+    <span class="stat__note">the headline output</span></div>
+</div>
+
+<div class="cols cols--2" style="margin-top:16px;">
+  <section class="card card--flush">
+    <div class="card__head"><h3>The study specification</h3></div>
+    <div class="tablewrap">
+      <table class="t t--dense">
+        <tbody>
+        {% for name, detail in spec_fields %}
+          <tr><td class="mono small" style="width:130px;">{{ name }}</td>
+              <td class="small muted">{{ detail }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card__foot">
+      Defaults produce a sensible study with zero configuration; every field is
+      exposed for when you want to vary it. Editing a field forks a new version
+      and invalidates the cache rather than silently mixing generations.
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>The horizon ladder</h3>
+    <p class="prose" style="margin:8px 0 12px;">
+      Every event is measured at every horizon, pre and post. The primary output
+      is the decay curve — effect size and R² plotted against horizon — because
+      that single chart answers “for how long” better than any table.
+    </p>
+    <div class="btnrow">
+      {% for h in ladder %}
+        <span class="badge {% if h.is_pre %}badge--ghost{% endif %} mono">{{ h.label }}</span>
+      {% endfor %}
+    </div>
+    <p class="note" style="margin-top:14px;">
+      <code class="mono">+1d</code> is <code class="mono">t0 + 24h</code>, never “the next daily bar”.
+      Daily bars inherit the 17:00 New York rollover, which moves in UTC terms
+      twice a year; a fixed offset does not.
+    </p>
+  </section>
+</div>
+
+<div class="cols cols--2" style="margin-top:16px;">
+  <section class="card">
+    <h3>Window schemes</h3>
+    <dl class="kv" style="margin-top:10px;">
+      {% for value, label in window_schemes %}
+        <dt class="mono">{{ value }}</dt><dd class="small muted">{{ label }}</dd>
+      {% endfor %}
+    </dl>
+    <p class="note" style="margin-top:12px;">
+      Variable-length windows contain variable amounts of noise, so every result
+      from one is normalised by √(window length) and reports that length. A study
+      that skipped this would show long windows as more impactful purely for
+      being longer.
+    </p>
+  </section>
+
+  <section class="card">
+    <h3>What the tool will and will not claim</h3>
+    <dl class="kv" style="margin-top:10px;">
+      <dt><span class="badge badge--solid">CAN</span></dt>
+      <dd class="small muted">That a class of event is followed by a measurably abnormal
+        move, of a given size, direction consistency and decay profile, relative to
+        matched normal periods.</dd>
+      <dt><span class="badge badge--solid">CAN</span></dt>
+      <dd class="small muted">Rank event types by measured impact and compare that
+        ranking to the traffic-light ratings the calendar sites publish.</dd>
+      <dt><span class="badge badge--warn">CANNOT</span></dt>
+      <dd class="small muted">Establish causation. Simultaneity, common drivers and
+        unobserved news are always available alternative explanations. The honest
+        claim is association under controls.</dd>
+      <dt><span class="badge badge--warn">CANNOT</span></dt>
+      <dd class="small muted">Separate releases published at the identical instant.
+        Perfectly collinear regressors; no amount of data fixes it.</dd>
+      <dt><span class="badge badge--warn">CANNOT</span></dt>
+      <dd class="small muted">Tell you a pattern will persist. That stays a hypothesis,
+        permanently.</dd>
+    </dl>
+  </section>
+</div>
+
+<h2>Run history</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <tbody>
+      {% for run in runs %}
+        <tr>
+          <td class="small">{{ run.study_spec }}</td>
+          <td class="small muted">{{ run.sample }}</td>
+          <td class="num">{{ run.n_observations }}</td>
+          <td class="small faint">{{ run.started_at|date:"Y-m-d H:i" }}Z</td>
+        </tr>
+      {% empty %}
+        <tr><td>
+          <div class="empty">
+            <div class="empty__t">No studies have been run.</div>
+            <p class="tiny">Run history is worth leaving on regardless of any statistics
+              argument — it is how you reproduce a chart you made three weeks ago.</p>
+          </div>
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

@@ -1,43 +1,66 @@
 {% extends "base.html" %}
-{% block title %}Fetch run #{{ run.pk }} — fxmacro{% endblock %}
+{% load humanize %}
+{% block title %}Run #{{ run.pk }} — fxmacro{% endblock %}
 
 {% block content %}
-<h1>{{ run.source.name }} — run #{{ run.pk }}
-  <span class="pill pill--{{ run.status }}">{{ run.get_status_display }}</span></h1>
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>{{ run.source.name }} <span class="mono muted" style="font-size:15px">run #{{ run.pk }}</span></h1>
+    <p class="page-head__sub">
+      {% include "sources/_status.html" with status=run.status label=run.get_status_display %}
+      <span class="muted"> — started {{ run.started_at|date:"j M Y H:i:s" }}Z</span>
+    </p>
+  </div>
+  <div class="page-head__actions">
+    {% if run.job %}<a class="btn btn--ghost" href="{% url 'sources:job_detail' run.job.pk %}">Job #{{ run.job.pk }}</a>{% endif %}
+    <a class="btn btn--ghost" href="{% url 'sources:console' %}">Sources</a>
+  </div>
+</div>
 
-<dl class="kv">
-  <dt>Started</dt><dd>{{ run.started_at|date:"Y-m-d H:i:s" }}Z</dd>
-  <dt>Finished</dt><dd>{{ run.finished_at|date:"Y-m-d H:i:s"|default:"—" }}</dd>
-  <dt>Params</dt><dd class="mono small">{{ run.params_json }}</dd>
-  <dt>Parser version</dt><dd class="mono">{{ run.parser_version|default:"—" }}</dd>
-  <dt>Rows</dt><dd>{{ run.rows_seen }} seen · {{ run.rows_new }} new · {{ run.rows_changed }} changed · {{ run.rows_unmapped }} newly unmapped</dd>
-  {% if run.job %}<dt>Job</dt><dd><a href="{% url 'sources:job_detail' run.job.pk %}">#{{ run.job.pk }}</a></dd>{% endif %}
-</dl>
+<div class="stats">
+  <div class="stat"><span class="stat__k">Rows seen</span><span class="stat__v">{{ run.rows_seen|intcomma }}</span></div>
+  <div class="stat"><span class="stat__k">New</span><span class="stat__v">{{ run.rows_new|intcomma }}</span></div>
+  <div class="stat"><span class="stat__k">Changed</span><span class="stat__v">{{ run.rows_changed|intcomma }}</span>
+    <span class="stat__note">a source revising its own number</span></div>
+  <div class="stat {% if run.rows_unmapped %}stat--warn{% endif %}"><span class="stat__k">Newly unmapped</span>
+    <span class="stat__v">{{ run.rows_unmapped|intcomma }}</span>
+    <span class="stat__note">indicators with no canonical code yet</span></div>
+  <div class="stat"><span class="stat__k">Raw payloads</span><span class="stat__v">{{ snapshot_count }}</span>
+    <span class="stat__note">{{ snapshot_bytes|filesizeformat }}</span></div>
+</div>
 
-{% if run.notes %}<p class="note">{{ run.notes }}</p>{% endif %}
-{% if run.error_text %}<pre class="pre pre--err">{{ run.error_text }}</pre>{% endif %}
+{% if run.notes %}<p class="note" style="margin-top:16px;">{{ run.notes }}</p>{% endif %}
+{% if run.error_text %}<h2>Error</h2><pre class="pre pre--err">{{ run.error_text }}</pre>{% endif %}
 
-<h2>Raw snapshots</h2>
-<p class="lede small">
-  Immutable, content-hashed, kept on disk (§5.4) — so a parser fix is a
-  re-parse, not a re-crawl.
-</p>
-<table class="grid grid--tight">
-  <thead><tr><th>Fetched</th><th>URL</th><th>Path</th><th>sha256</th><th>Bytes</th><th>HTTP</th><th>ms</th></tr></thead>
-  <tbody>
-  {% for snap in run.snapshots.all %}
-    <tr>
-      <td class="small">{{ snap.fetched_at|date:"Y-m-d H:i:s" }}Z</td>
-      <td class="small mono">{{ snap.url|truncatechars:60 }}</td>
-      <td class="small mono">{{ snap.path }}</td>
-      <td class="small mono dim">{{ snap.sha256|slice:":16" }}…</td>
-      <td class="small">{{ snap.size_bytes }}</td>
-      <td class="small">{{ snap.http_status|default:"—" }}</td>
-      <td class="small">{{ snap.duration_ms|default:"—" }}</td>
-    </tr>
-  {% empty %}<tr><td colspan="7" class="dim">No snapshots.</td></tr>{% endfor %}
-  </tbody>
-</table>
-
-<p><a href="{% url 'sources:console' %}">&larr; console</a></p>
+<h2>Raw snapshots <span class="h2sub">immutable, content-hashed, kept on disk</span></h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead>
+        <tr><th>Fetched</th><th>URL</th><th>Stored at</th><th>sha256</th>
+            <th class="num">Bytes</th><th class="num">HTTP</th><th class="num">ms</th></tr>
+      </thead>
+      <tbody>
+      {% for snap in run.snapshots.all %}
+        <tr>
+          <td class="small nowrap">{{ snap.fetched_at|date:"Y-m-d H:i:s" }}Z</td>
+          <td class="small mono muted">{{ snap.url|truncatechars:52 }}</td>
+          <td class="small mono muted">{{ snap.path }}</td>
+          <td class="small mono faint">{{ snap.sha256|slice:":16" }}…</td>
+          <td class="num small">{{ snap.size_bytes|intcomma }}</td>
+          <td class="num small">{{ snap.http_status|default:"—" }}</td>
+          <td class="num small">{{ snap.duration_ms|default:"—" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="7"><div class="empty tiny">No payload — this run re-parsed an existing snapshot.</div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    Parser <code class="mono">{{ run.parser_version|default:"—" }}</code>. Payloads are kept so a
+    parser fix is a re-parse, not a re-crawl — HTML scrapers break silently and
+    usually emit plausible-looking wrong data rather than an error.
+  </div>
+</section>
 {% endblock %}

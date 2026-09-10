@@ -23,14 +23,20 @@ SECRET_KEY = os.environ.get(
 DEBUG = os.environ.get("FXMACRO_DEBUG", "1") == "1"
 ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
 
+# The Django admin is a generic table editor behind a login. On a single-user
+# local tool that login protects nothing, so it is off unless asked for; the
+# screens the project needs are first-class pages instead.
+ADMIN_ENABLED = os.environ.get("FXMACRO_ADMIN", "0") == "1"
+
 INSTALLED_APPS = [
-    "django.contrib.admin",
+    *(["django.contrib.admin"] if ADMIN_ENABLED else []),
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django.contrib.humanize",
+    "dashboard",
     "sources",
     "calendar_data",
     "prices",
@@ -61,6 +67,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "dashboard.context.nav_counts",
             ],
         },
     },
