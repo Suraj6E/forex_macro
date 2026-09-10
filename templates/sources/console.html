@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Sources console — fxmacro{% endblock %}
+
+{% block content %}
+<h1>Sources console</h1>
+<p class="lede">
+  Collection is manual and button-triggered (locked decision 8). The one
+  exception is the weekly forward capture of §7.3, which cannot be manual
+  because a missed week is permanently lost.
+</p>
+
+<div id="dataset-summary">{% include "sources/_summary.html" %}</div>
+
+<table class="grid">
+  <thead>
+    <tr>
+      <th>Source</th><th>Kind</th><th>Gives</th><th>Clock</th>
+      <th>Health</th><th>Last fetch</th><th>Runs</th><th>Fetch</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for source in sources %}
+    <tr class="{% if not source.enabled %}row--off{% endif %}">
+      <td>
+        <strong>{{ source.name }}</strong>
+        <div class="mono dim">{{ source.key }}</div>
+        {% if source.role %}<div class="dim">{{ source.role }}</div>{% endif %}
+      </td>
+      <td>{{ source.get_kind_display }}</td>
+      <td class="small">{{ source.gives|default:"—" }}<div class="dim">{{ source.depth_note }}</div></td>
+      <td class="small">{{ source.timezone_rule|default:"—" }}</td>
+      <td><span class="pill pill--{{ source.health }}">{{ source.get_health_display }}</span>
+        {% if source.consecutive_failures %}<div class="dim small">{{ source.consecutive_failures }} consecutive failures</div>{% endif %}
+      </td>
+      <td class="small">
+        {% if source.latest_run %}
+          <a href="{% url 'sources:run_detail' source.latest_run.pk %}">{{ source.latest_run.started_at|date:"Y-m-d H:i" }}Z</a>
+          <div class="dim">{{ source.latest_run.rows_seen }} seen / {{ source.latest_run.rows_new }} new</div>
+        {% else %}<span class="dim">never</span>{% endif %}
+      </td>
+      <td>{{ source.run_count }}</td>
+      <td>
+        {% if source.has_collector and source.enabled %}
+        <form method="post" action="{% url 'sources:fetch' source.key %}" class="fetchform">
+          {% csrf_token %}
+          {% if source.supports_date_range %}
+            <input type="date" name="date_from" title="from (optional)">
+            <input type="date" name="date_to" title="to (optional)">
+          {% endif %}
+          <button type="submit">Fetch</button>
+          {% if source.cooldown %}
+            <label class="small dim" title="Fetch policy cooldown — §5.4">
+              <input type="checkbox" name="force" value="1"> force
+            </label>
+          {% endif %}
+        </form>
+        {% if source.cooldown %}<div class="dim small">cooling down — {{ source.cooldown }} left</div>{% endif %}
+        {% elif not source.enabled %}
+          <span class="dim small">disabled</span>
+        {% else %}
+          <span class="dim small">collector not built</span>
+        {% endif %}
+      </td>
+    </tr>
+  {% empty %}
+    <tr><td colspan="8" class="dim">No sources registered. Run <code class="mono">manage.py seed_reference</code>.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Jobs</h2>
+<div id="jobs-panel"
+     hx-get="{% url 'sources:jobs_panel' %}"
+     hx-trigger="load, every 2s"
+     hx-swap="innerHTML">
+  <p class="dim">loading…</p>
+</div>
+{% endblock %}

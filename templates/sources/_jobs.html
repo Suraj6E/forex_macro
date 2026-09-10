@@ -1,0 +1,26 @@
+{% if jobs %}
+<table class="grid grid--tight">
+  <thead><tr><th>#</th><th>Kind</th><th>Status</th><th>Progress</th><th>Message</th><th>Queued</th><th>Took</th></tr></thead>
+  <tbody>
+  {% for job in jobs %}
+    <tr>
+      <td><a href="{% url 'sources:job_detail' job.pk %}">{{ job.pk }}</a></td>
+      <td class="mono small">{{ job.kind }}</td>
+      <td><span class="pill pill--{{ job.status }}">{{ job.get_status_display }}</span></td>
+      <td class="bar-cell">
+        <div class="bar"><div class="bar__fill" style="width: {{ job.progress_percent }}%"></div></div>
+        <span class="small dim">{{ job.progress_percent }}%</span>
+      </td>
+      <td class="small">{{ job.message|default:"—" }}{% if job.error_text %}<div class="err">failed — see job detail</div>{% endif %}</td>
+      <td class="small dim">{{ job.created_at|date:"H:i:s" }}Z</td>
+      <td class="small dim">{% if job.duration_seconds %}{{ job.duration_seconds|floatformat:1 }}s{% else %}—{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="dim">No jobs yet.</p>
+{% endif %}
+
+{% comment %}Out-of-band: refresh the counters on the same 2s poll.{% endcomment %}
+<div id="dataset-summary" hx-swap-oob="true">{% include "sources/_summary.html" %}</div>

@@ -1,0 +1,31 @@
+{% load static %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}fxmacro{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'app.css' %}">
+  <script src="{% static 'vendor/htmx.min.js' %}"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="{% url 'sources:console' %}">fxmacro</a>
+  <nav>
+    <a href="{% url 'sources:console' %}">Sources</a>
+    <a href="{% url 'sources:unmapped' %}">Unmapped</a>
+    <a href="/admin/">Admin</a>
+  </nav>
+  <span class="clock">all times UTC</span>
+</header>
+
+{% if messages %}
+<ul class="messages">
+  {% for message in messages %}<li class="msg msg--{{ message.tags }}">{{ message }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+<main>
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

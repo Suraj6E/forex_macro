@@ -1,0 +1,20 @@
+# Direct dependencies. Transitive versions are whatever pip resolves.
+# Python 3.13 — planning.md §8 says 3.12 for the MetaTrader5 package, but §4.2
+# establishes that package has no calendar function anyway, so the calendar
+# bridge is an MQL5 script writing CSV and the constraint does not bind. If the
+# price-side MT5 Python API is ever needed, check its wheel support first.
+
+Django==5.2.17
+requests==2.34.2
+
+# analytics/ — pandas + DuckDB over Parquet (§8)
+pandas==3.0.5
+numpy==2.5.3
+pyarrow==25.0.1
+duckdb==1.5.5
+statsmodels==0.15.0
+python-dateutil==2.9.0.post0
+
+# IANA zone data. §4.1 depends on America/New_York being correct across 19
+# years of DST rule changes; do not rely on the OS database on Windows.
+tzdata==2026.3
