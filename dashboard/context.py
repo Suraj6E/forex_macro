@@ -5,12 +5,21 @@ state of the dataset — planning.md §5.3: quality is a visible field, not a
 report you have to go looking for.
 """
 
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Sum
 
 from calendar_data.models import EventRelease, Indicator
-from prices.models import Instrument
+from prices.models import Instrument, PriceCoverage
 from quality.enums import CrossSource
 from sources.models import Job, JobStatus, Source
+
+
+def _compact(value: int) -> str:
+    """Counts in a 40px chip: 857,805 is unreadable, 858k is not."""
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.0f}k"
+    return str(value)
 
 
 def nav_counts(request):
@@ -32,6 +41,9 @@ def nav_counts(request):
             "releases_short": f"{total / 1000:.0f}k" if total >= 10_000 else total,
             "indicators": indicators["total"],
             "instruments": Instrument.objects.count(),
+            "price_bars": _compact(
+                PriceCoverage.objects.aggregate(n=Sum("bar_count"))["n"] or 0
+            ),
             "sources": Source.objects.count(),
             "jobs_active": Job.objects.filter(
                 status__in=[JobStatus.QUEUED, JobStatus.RUNNING]

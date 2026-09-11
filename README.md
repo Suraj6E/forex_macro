@@ -58,7 +58,8 @@ then create a login with `manage.py createsuperuser`.
 | **Calendar** | Every release held, filterable, with per-field provenance. |
 | **Event detail** | One release: each field with its supplying source, what every source said verbatim, the revision log, co-timed releases. |
 | **Indicators** | Assign canonical codes, importance and release groups — the §9 mapping surface. |
-| **Instruments** | Price coverage ledger and known dislocations (§4.6). Empty until P1. |
+| **Prices** | Coverage ledger per instrument, bar size and month, plus known dislocations (§4.6). |
+| **Price chart** | **Candlesticks with calendar releases marked on them** (TradingView `lightweight-charts`, vendored). Overlay up to 4 indicators, filtered by impact and currency. Scroll left to load earlier history. Jump straight from any release to the chart centred on it. |
 | **Sources** | The register, and every collection button. Each source has a detail page with its editable configuration. |
 | **Run detail** | A sample of the actual rows fetched, plus every raw payload — each one inspectable byte-for-byte or downloadable. |
 | **Jobs & runs** | Every button press, with progress, log and result. |
@@ -156,6 +157,12 @@ Suggested cadence: Sunday before the week opens.
   status chips always carry their word.
 - Tables sort by clicking a column header. Sorting is done in SQL against a
   whitelist, so a hand-edited query string cannot inject an ordering.
+- **Chart markers identify their indicator by a printed code, not by colour.**
+  The candles already use the only two well-separated hues; a marker palette
+  beside them fails validation (orange vs the red down-candle measures ΔE 7.1
+  in normal vision, violet vs the blue up-candle ΔE 1.9 under protanopia). The
+  shape carries beat/missed and the label carries which series, so neither
+  depends on hue.
 - Series longer than ~420 points are thinned for display (endpoints always
   kept) — a 720px plot cannot resolve more.
 - **Raw payloads have been pruned.** Fetch-run provenance is intact (what was

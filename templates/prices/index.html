@@ -1,102 +1,117 @@
 {% extends "base.html" %}
 {% load humanize %}
-{% block title %}Instruments — fxmacro{% endblock %}
+{% block title %}Prices — fxmacro{% endblock %}
 
 {% block content %}
 <div class="page-head">
   <div class="page-head__text">
-    <h1>Instruments &amp; price coverage</h1>
+    <h1>Prices</h1>
     <p class="page-head__sub">
-      Seven majors, one-minute resolution, 2007 to now — about 50 million bars,
-      which is small for Parquet and unpleasant in SQLite, so the bars live on
-      disk and this table is the ledger of what exists.
+      Seven majors. Bars live in Parquet on disk; this is the ledger of which
+      months exist and how complete each one is.
     </p>
   </div>
   <div class="page-head__actions">
-    <a class="btn btn--ghost" href="{% url 'sources:console' %}">Price sources</a>
+    <a class="btn btn--primary" href="{% url 'prices:chart' %}">Open chart</a>
   </div>
 </div>
 
 <div class="stats">
-  <div class="stat"><span class="stat__k">Instruments</span><span class="stat__v">{{ instruments|length }}</span></div>
-  <div class="stat"><span class="stat__k">Months covered</span><span class="stat__v">{{ totals.months|default:0 }}</span></div>
-  <div class="stat"><span class="stat__k">M1 bars</span><span class="stat__v">{{ totals.bars|default:0|intcomma }}</span>
-    <span class="stat__note">target is ~50M across 19 years</span></div>
-  <div class="stat"><span class="stat__k">Known gaps</span><span class="stat__v">{{ totals.gaps|default:0|intcomma }}</span></div>
+  <div class="stat"><span class="stat__k">Bars stored</span>
+    <span class="stat__v">{{ totals.bars|default:0|intcomma }}</span></div>
+  <div class="stat"><span class="stat__k">Completeness</span>
+    <span class="stat__v">{% if completeness %}{{ completeness|floatformat:1 }}<small>%</small>{% else %}—{% endif %}</span>
+    <span class="stat__note">against the FX week, not the calendar week</span></div>
+  <div class="stat"><span class="stat__k">Instrument-months</span>
+    <span class="stat__v">{{ totals.months|default:0|intcomma }}</span></div>
+  <div class="stat"><span class="stat__k">Missing minutes</span>
+    <span class="stat__v">{{ totals.gaps|default:0|intcomma }}</span>
+    <span class="stat__note">inside months that are stored</span></div>
 </div>
 
-<h2>Majors</h2>
+<h2>Instruments</h2>
 <section class="card card--flush">
   <div class="tablewrap">
     <table class="t">
-      <thead><tr><th>Symbol</th><th>Base</th><th>Quote</th><th class="num">Pip size</th>
-                 <th class="num">Months</th><th class="num">Bars</th><th>State</th></tr></thead>
+      <thead><tr><th>Symbol</th><th class="num">Pip</th><th class="num">Months</th>
+                 <th class="num">Bars</th><th>Span</th><th></th></tr></thead>
       <tbody>
       {% for i in instruments %}
         <tr>
           <td class="mono"><strong>{{ i.symbol }}</strong></td>
-          <td class="mono small">{{ i.base_ccy }}</td>
-          <td class="mono small">{{ i.quote_ccy }}</td>
-          <td class="num small">{{ i.pip_size }}</td>
+          <td class="num small muted">{{ i.pip_size }}</td>
           <td class="num">{{ i.months }}</td>
           <td class="num">{{ i.bars|default:0|intcomma }}</td>
-          <td>{% if i.bars %}<span class="badge">loaded</span>{% else %}<span class="badge badge--ghost faint">no data</span>{% endif %}</td>
+          <td class="small muted nowrap">
+            {% if i.first %}{{ i.first|date:"M Y" }} → {{ i.last|date:"M Y" }}{% else %}—{% endif %}
+          </td>
+          <td class="right">
+            {% if i.bars %}
+              <a class="tiny" href="{% url 'prices:chart' %}?symbol={{ i.symbol }}">chart →</a>
+            {% else %}<span class="faint tiny">no data</span>{% endif %}
+          </td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
   </div>
   <div class="card__foot">
-    HistData supplies the bulk M1 backbone but its bars are <strong>bid only</strong>,
-    so it cannot give spread. Dukascopy supplies bid/ask ticks for event windows
-    and acts as the independent second opinion — two free sources means
-    cross-validation, which turns a limitation into a quality feature.
+    Expected bar counts come from the FX week anchored to 17:00 New York, so
+    they move with daylight saving rather than assuming a fixed week.
   </div>
 </section>
 
-{% if coverage %}
-<h2>Coverage ledger</h2>
-<section class="card card--flush">
-  <div class="tablewrap">
-    <table class="t t--dense">
-      <thead><tr><th>Instrument</th><th>Source</th><th>Month</th><th class="num">Bars</th>
-                 <th class="num">Expected</th><th class="num">Gaps</th><th>Stored at</th></tr></thead>
-      <tbody>
-      {% for c in coverage %}
-        <tr>
-          <td class="mono small">{{ c.instrument.symbol }}</td>
-          <td class="small">{{ c.source.key }}</td>
-          <td class="small">{{ c.month|date:"Y-m" }}</td>
-          <td class="num">{{ c.bar_count|intcomma }}</td>
-          <td class="num faint">{{ c.expected_bar_count|intcomma }}</td>
-          <td class="num">{{ c.gap_count }}</td>
-          <td class="mono tiny faint">{{ c.parquet_path }}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
-{% else %}
-<section class="card" style="margin-top:16px;">
-  <div class="empty">
-    <div class="empty__t">No price data loaded yet.</div>
-    <p class="tiny" style="max-width:60ch; margin:0 auto;">
-      HistData is roughly 1,600 monthly zip files for seven pairs over nineteen
-      years — a job that runs for a while, which is exactly why there is a job
-      runner rather than a request-cycle download. Bulk Dukascopy tick is off
-      the table: nineteen years across seven pairs would be around 800&nbsp;GB, so
-      ticks are fetched only for event windows.
-    </p>
-  </div>
-</section>
-{% endif %}
+<div class="cols cols--2" style="margin-top:16px;">
+  <section class="card card--flush">
+    <div class="card__head"><h3>By bar size</h3></div>
+    <div class="tablewrap">
+      <table class="t t--dense">
+        <thead><tr><th>Timeframe</th><th class="num">Months</th><th class="num">Bars</th></tr></thead>
+        <tbody>
+        {% for row in by_timeframe %}
+          <tr><td class="mono small">{{ row.timeframe }}</td>
+              <td class="num">{{ row.n|intcomma }}</td>
+              <td class="num">{{ row.bars|intcomma }}</td></tr>
+        {% empty %}
+          <tr><td colspan="3"><div class="empty tiny">Nothing stored.</div></td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card card--flush">
+    <div class="card__head"><h3>Least complete months</h3></div>
+    <div class="tablewrap">
+      <table class="t t--dense">
+        <tbody>
+        {% for c in thin %}
+          <tr>
+            <td class="mono small">{{ c.instrument.symbol }}</td>
+            <td class="small">{{ c.month|date:"Y-m" }}</td>
+            <td class="num small">{{ c.bar_count|intcomma }} / {{ c.expected_bar_count|intcomma }}</td>
+            <td style="width:110px;">
+              <div class="meter"><div class="meter__fill" style="width: {% widthratio c.bar_count c.expected_bar_count 100 %}%"></div></div>
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td><div class="empty tiny">Nothing stored.</div></td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card__foot">
+      A shortfall here silently shortens any window that crosses it, and a
+      shortened window reads as a smaller effect.
+    </div>
+  </section>
+</div>
 
 <h2>Known dislocations <span class="h2sub">annotated, not rediscovered as odd dots on a scatter plot</span></h2>
 <section class="card card--flush">
   <div class="tablewrap">
     <table class="t t--dense">
-      <thead><tr><th>When (UTC)</th><th>Event</th><th>Kind</th><th>Regime</th><th>Note</th></tr></thead>
+      <thead><tr><th>When (UTC)</th><th>Event</th><th>Kind</th><th>Note</th></tr></thead>
       <tbody>
       {% for m in market_events %}
         <tr>
@@ -106,19 +121,13 @@
           </td>
           <td class="small"><strong>{{ m.label }}</strong></td>
           <td class="small muted">{{ m.get_kind_display }}</td>
-          <td class="small muted">{{ m.get_regime_display|default:"—" }}</td>
-          <td class="small muted">{{ m.note }}</td>
+          <td class="small muted">{{ m.note|truncatechars:110 }}</td>
         </tr>
       {% empty %}
-        <tr><td colspan="5"><div class="empty tiny">None seeded.</div></td></tr>
+        <tr><td colspan="4"><div class="empty tiny">None seeded.</div></td></tr>
       {% endfor %}
       </tbody>
     </table>
-  </div>
-  <div class="card__foot">
-    Outlier policy defaults to <em>flag</em>, never to silent exclusion. The 2015
-    SNB floor removal is not an economic release, but it lands inside event
-    windows and will dominate any USDCHF variance calculation that includes it.
   </div>
 </section>
 {% endblock %}

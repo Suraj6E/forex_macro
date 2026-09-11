@@ -30,7 +30,17 @@
     </div>
 
     <div class="navgroup">
-      <div class="navgroup__title">Explore</div>
+      <div class="navgroup__title">Prices</div>
+      <a class="navlink {% if nav == 'chart' %}is-active{% endif %}" href="{% url 'prices:chart' %}">
+        Chart <span class="navlink__count">candles</span>
+      </a>
+      <a class="navlink {% if nav == 'instruments' %}is-active{% endif %}" href="{% url 'prices:index' %}">
+        Coverage <span class="navlink__count">{{ nav_counts.price_bars }}</span>
+      </a>
+    </div>
+
+    <div class="navgroup">
+      <div class="navgroup__title">Calendar</div>
       <a class="navlink {% if nav == 'indicators' %}is-active{% endif %}" href="{% url 'calendar_data:indicators' %}">
         Indicators <span class="navlink__count">{{ nav_counts.indicators }}</span>
       </a>
@@ -55,9 +65,10 @@
     </div>
 
     <div class="navgroup">
-      <div class="navgroup__title">Not built yet</div>
-      <a class="navlink {% if nav == 'instruments' %}is-active{% endif %}" href="{% url 'prices:index' %}">Prices</a>
-      <a class="navlink {% if nav == 'studies' %}is-active{% endif %}" href="{% url 'studies:index' %}">Studies</a>
+      <div class="navgroup__title">Analysis</div>
+      <a class="navlink {% if nav == 'studies' %}is-active{% endif %}" href="{% url 'studies:index' %}">
+        Studies <span class="navlink__count">planned</span>
+      </a>
     </div>
 
     <div class="sidebar__foot">

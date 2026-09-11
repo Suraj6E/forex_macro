@@ -209,12 +209,21 @@ def event(request, pk: int):
             .exclude(pk=release.pk)
         )
 
+    # Pairs that carry this release's currency — the only ones that can react
+    # to it through that leg — listed before the rest.
+    from prices.models import Instrument
+
+    currency = release.indicator.currency
+    pairs = list(Instrument.objects.filter(enabled=True).values_list("symbol", flat=True))
+    related_pairs = [s for s in pairs if currency in s] or pairs
+
     return render(
         request,
         "calendar_data/event.html",
         {
             "nav": "calendar",
             "release": release,
+            "related_pairs": related_pairs,
             "fields": fields,
             "observations": observations,
             "revisions": revisions,

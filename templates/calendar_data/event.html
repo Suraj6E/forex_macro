@@ -160,16 +160,25 @@
   </div>
 </section>
 
-<h2>Price around t0</h2>
+<h2>Price around this release</h2>
 <section class="card">
-  <div class="empty">
-    <div class="empty__t">No price data yet.</div>
-    <p class="tiny">
-      The chart centred on t0 with the horizon windows shaded arrives in P1,
-      once the M1 backbone is loaded. Until then this screen shows the calendar
-      side only — which is honest: there is nothing to plot.
+  {% if release.release_time_utc %}
+    <p class="prose" style="margin:0 0 12px;">
+      Open the chart centred on this release, with the pair of your choice. Only
+      pairs carrying {{ release.indicator.currency }} can respond through that
+      leg, so those are listed first.
     </p>
-    <a class="btn btn--ghost btn--sm" href="{% url 'prices:index' %}">Price coverage</a>
-  </div>
+    <div class="btnrow">
+      {% for symbol in related_pairs %}
+        <a class="btn btn--sm" href="{% url 'prices:chart' %}?symbol={{ symbol }}&tf=h1&indicator={{ release.indicator.pk }}&focus={{ release.pk }}">{{ symbol }}</a>
+      {% endfor %}
+      <a class="btn btn--ghost btn--sm" href="{% url 'calendar_data:indicator' release.indicator.pk %}">Indicator history</a>
+    </div>
+  {% else %}
+    <div class="empty">
+      <div class="empty__t">This release has no timestamp, so it cannot anchor a chart.</div>
+      <p class="tiny">Period-indexed rows fill an <em>actual</em>; they can never be a t0.</p>
+    </div>
+  {% endif %}
 </section>
 {% endblock %}

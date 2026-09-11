@@ -1,0 +1,463 @@
+{% extends "base.html" %}
+{% load static humanize %}
+{% block title %}{{ instrument.symbol }} chart — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>{{ instrument.symbol }} <span class="muted" style="font-size:15px">candles</span></h1>
+    <p class="page-head__sub">
+      Price with releases marked on it. Tick up to {{ max_overlays }} indicators
+      to overlay — the question “what did this pair do when that number came
+      out”, answered by looking.
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <a class="btn btn--ghost" href="{% url 'prices:index' %}">Coverage</a>
+  </div>
+</div>
+
+{% if not has_data %}
+  <section class="card">
+    <div class="empty">
+      <div class="empty__t">No price data stored for {{ instrument.symbol }}.</div>
+      <a class="btn btn--primary btn--sm" href="{% url 'sources:console' %}">Collect it</a>
+    </div>
+  </section>
+{% else %}
+
+<form class="filters" method="get" id="chartform">
+  <label class="field">
+    <span>Pair</span>
+    <select name="symbol" onchange="this.form.submit()">
+      {% for i in instruments %}
+        <option value="{{ i.symbol }}" {% if i.symbol == instrument.symbol %}selected{% endif %}>{{ i.symbol }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <label class="field">
+    <span>Bars</span>
+    <select name="tf" onchange="this.form.submit()">
+      {% for value, label in timeframes %}
+        <option value="{{ value }}" {% if value == timeframe %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <div class="field">
+    <span>Range</span>
+    <div class="ranges">
+      {% for value, label in spans %}
+        <a class="{% if value == span and not focus %}is-active{% endif %}"
+           href="?{{ query_base }}{% if value %}&span={{ value }}{% endif %}">{{ label }}</a>
+      {% endfor %}
+    </div>
+  </div>
+
+  <span class="tiny faint" style="margin-left:auto;">
+    {{ first|date:"M Y" }} → {{ last|date:"M Y" }} stored
+  </span>
+</form>
+
+<section class="card card--flush">
+  <div class="chartcard__head">
+    <h3>{{ instrument.symbol }}</h3>
+    <span class="spacer"></span>
+    <span id="chartmeta"><span class="faint tiny">loading…</span></span>
+  </div>
+  {% if not selected %}
+    <p class="note" style="margin:0 14px;">
+      No releases overlaid yet.
+      <a href="#overlay">Pick an indicator below</a> and its announcements appear
+      as shaded bands on the chart.
+    </p>
+  {% endif %}
+  <div id="chart" class="pricechart"></div>
+  <div class="card__foot" id="chartfoot">
+    Times are UTC. Candles are bid-side, so there is no spread here — that needs
+    tick data, fetched for event windows only.
+  </div>
+</section>
+
+<h2 id="overlay">Overlay releases
+  <span class="h2sub">
+    {% if selected %}{{ selected|length }} of {{ max_overlays }} selected{% else %}
+      nothing selected — tick an indicator to mark its releases on the chart
+    {% endif %}
+  </span>
+</h2>
+<section class="card">
+  <form method="get" id="overlayform">
+    <input type="hidden" name="symbol" value="{{ instrument.symbol }}">
+    <input type="hidden" name="tf" value="{{ timeframe }}">
+    {% if span %}<input type="hidden" name="span" value="{{ span }}">{% endif %}
+
+    <p class="prose" style="margin:0 0 10px;">
+      Only indicators in {{ instrument.base_ccy }} or {{ instrument.quote_ccy }} are
+      listed — a release in another currency cannot move this pair through a leg
+      it does not have.
+    </p>
+
+    <div class="pickerbar">
+      <label class="field" style="flex:1 1 240px;">
+        <span>Search</span>
+        <input type="search" id="overlayfilter" placeholder="e.g. unemployment">
+      </label>
+
+      <div class="field">
+        <span>Impact</span>
+        <div class="chips" id="impactfilter">
+          {% for value, label in impacts %}
+            <label class="chip"><input type="checkbox" data-impact="{{ value }}" checked> {{ label }}</label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="field">
+        <span>Currency</span>
+        <div class="chips" id="ccyfilter">
+          {% for ccy in pair_currencies %}
+            <label class="chip"><input type="checkbox" data-ccy="{{ ccy }}" checked> {{ ccy }}</label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <span class="tiny faint" id="pickercount" style="margin-left:auto;"></span>
+    </div>
+
+    <div class="overlaylist" id="overlaylist">
+      {% for id, currency, name, n, code, importance in available %}
+        <label class="overlayopt" data-label="{{ currency|lower }} {{ name|lower }}"
+               data-impact="{{ importance }}" data-ccy="{{ currency }}">
+          <input type="checkbox" name="indicator" value="{{ id }}"
+                 {% if id in selected_ids %}checked{% endif %}>
+          <span class="overlayopt__ccy mono">{{ currency }}</span>
+          <span class="overlayopt__name">{{ name }}</span>
+          {% include "calendar_data/_impact.html" with importance=importance %}
+          <span class="overlayopt__n num tiny faint">{{ n|intcomma }}</span>
+        </label>
+      {% empty %}
+        <div class="empty tiny">No indicators with timestamps for this pair.</div>
+      {% endfor %}
+    </div>
+
+    <div class="btnrow" style="margin-top:12px;">
+      <button class="btn btn--primary" type="submit">Apply overlay</button>
+      <a class="btn btn--ghost" href="?symbol={{ instrument.symbol }}&tf={{ timeframe }}{% if span %}&span={{ span }}{% endif %}">Clear</a>
+      <span class="tiny faint">Beyond {{ max_overlays }} the markers collide into an unreadable row, so extras are ignored.</span>
+    </div>
+  </form>
+</section>
+
+{% if releases %}
+<h2>Releases in view <span class="h2sub">click to centre the chart on one</span></h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Released (UTC)</th><th>Indicator</th><th class="num">Actual</th>
+                 <th class="num">Forecast</th><th>Surprise</th><th></th></tr></thead>
+      <tbody>
+      {% for r in releases %}
+        <tr>
+          <td class="mono small nowrap">{{ r.release_time_utc|date:"Y-m-d H:i" }}</td>
+          <td class="small">{{ r.indicator.currency }} {{ r.indicator.name|truncatechars:40 }}</td>
+          <td class="num small">{{ r.actual_current|default_if_none:"—" }}</td>
+          <td class="num small muted">{{ r.forecast_stored|default_if_none:"—" }}</td>
+          <td class="small">
+            {% if r.actual_current != None and r.forecast_stored != None %}
+              {% if r.actual_current > r.forecast_stored %}<span class="badge badge--ok">beat</span>
+              {% elif r.actual_current < r.forecast_stored %}<span class="badge badge--err">missed</span>
+              {% else %}<span class="badge badge--ghost">in line</span>{% endif %}
+            {% else %}<span class="faint">—</span>{% endif %}
+          </td>
+          <td class="right">
+            <a class="tiny" href="?{{ query_base }}&focus={{ r.id }}">centre →</a>
+            <a class="tiny" style="margin-left:8px" href="{% url 'calendar_data:event' r.id %}">detail</a>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+<script src="{% static 'vendor/lightweight-charts.js' %}"></script>
+<script>
+(function () {
+  var el = document.getElementById("chart");
+  var meta = document.getElementById("chartmeta");
+  var foot = document.getElementById("chartfoot");
+  if (!el || !window.LightweightCharts) return;
+
+  // Read the theme's own tokens so the chart matches the page in both modes
+  // rather than carrying a second, drifting palette.
+  function tokens() {
+    var s = getComputedStyle(document.documentElement);
+    var accent = s.getPropertyValue("--accent").trim();
+    return {
+      text: s.getPropertyValue("--text").trim(),
+      muted: s.getPropertyValue("--muted").trim(),
+      grid: s.getPropertyValue("--border").trim(),
+      up: s.getPropertyValue("--pos").trim(),
+      down: s.getPropertyValue("--neg").trim(),
+      // Bands sit behind the candles, so they must be faint enough not to
+      // compete with the price and strong enough to find.
+      band: hexToRgba(accent, 0.22)
+    };
+  }
+
+  function hexToRgba(hex, alpha) {
+    var h = (hex || "").replace("#", "");
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    if (h.length !== 6) return "rgba(128,128,128," + alpha + ")";
+    return "rgba(" + parseInt(h.slice(0, 2), 16) + "," +
+                     parseInt(h.slice(2, 4), 16) + "," +
+                     parseInt(h.slice(4, 6), 16) + "," + alpha + ")";
+  }
+
+  var t = tokens();
+  var chart = LightweightCharts.createChart(el, {
+    layout: { background: { color: "transparent" }, textColor: t.muted, fontSize: 11 },
+    grid: { vertLines: { color: t.grid }, horzLines: { color: t.grid } },
+    rightPriceScale: { borderColor: t.grid },
+    timeScale: { borderColor: t.grid, timeVisible: true, secondsVisible: false },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    localization: {
+      timeFormatter: function (ts) {
+        return new Date(ts * 1000).toISOString().slice(0, 16).replace("T", " ") + "Z";
+      }
+    },
+    autoSize: true
+  });
+
+  var candles = chart.addCandlestickSeries({
+    upColor: t.up, downColor: t.down,
+    borderUpColor: t.up, borderDownColor: t.down,
+    wickUpColor: t.up, wickDownColor: t.down
+  });
+
+  // Event bands. A small arrow above one bar out of six thousand is invisible
+  // at a year's zoom — which is indistinguishable from "no events". A
+  // full-height band on its own 0..1 overlay scale is visible at any zoom, and
+  // the arrow markers still sit on top carrying beat/missed.
+  var bands = chart.addHistogramSeries({
+    priceScaleId: "events",
+    priceFormat: { type: "volume" },
+    color: t.band,
+    base: 0,
+    lastValueVisible: false,
+    priceLineVisible: false
+  });
+  chart.priceScale("events").applyOptions({
+    scaleMargins: { top: 0, bottom: 0 },
+    visible: false
+  });
+
+  var baseFoot = foot.innerHTML;
+  var loaded = [];        // candles currently on the chart, oldest first
+  var legend = [];
+  var markers = [];
+  var earliest = null;    // oldest bar we hold, as an ISO string
+  var availableFrom = null;
+  var loading = false;
+  var exhausted = false;
+
+  function drawMarkers() {
+    // Identity is the printed code, not the colour: the candles already use
+    // the only two well-separated hues, and a marker palette beside them
+    // fails colour-vision separation. Shape carries beat/missed, text carries
+    // which indicator, so neither depends on hue.
+    candles.setMarkers(markers.map(function (m) {
+      return {
+        time: m.time,
+        position: "aboveBar",
+        color: t.text,
+        shape: m.beat === null ? "circle" : (m.beat ? "arrowUp" : "arrowDown"),
+        text: m.code
+      };
+    }));
+
+    // One band per event bar. Several releases can share a bar after
+    // aggregation, so de-duplicate or the histogram rejects the series.
+    var seen = {};
+    var points = [];
+    markers.forEach(function (m) {
+      if (seen[m.time]) return;
+      seen[m.time] = true;
+      points.push({ time: m.time, value: 1 });
+    });
+    bands.setData(points);
+  }
+
+  function describe(data) {
+    var bits = ['<span class="tiny muted">' + loaded.length.toLocaleString() +
+                " candles · " + data.resolution + "</span>"];
+    legend.forEach(function (l) {
+      bits.push('<span class="legend__key tiny"><span class="markerkey">' + l.code +
+                "</span>" + l.currency + " " + l.name + " · " + l.count + "</span>");
+    });
+    meta.innerHTML = '<span class="legend">' + bits.join("") + "</span>";
+
+    var notes = "";
+    if (data.aggregated) {
+      notes += "<strong>Showing " + data.resolution + " bars.</strong> " +
+        "This range holds more candles than a chart can resolve, so they were " +
+        "aggregated rather than thinned — dropping candles would draw gaps that " +
+        "never happened. Zoom in for finer bars. ";
+    }
+    if (exhausted) {
+      notes += "<strong>Reached the start of stored history.</strong> ";
+    } else {
+      notes += "Scroll left to load earlier bars. ";
+    }
+    foot.innerHTML = notes + baseFoot;
+  }
+
+  function request(extra) {
+    var params = new URLSearchParams(window.location.search);
+    params.set("symbol", "{{ instrument.symbol }}");
+    params.set("tf", "{{ timeframe }}");
+    Object.keys(extra || {}).forEach(function (k) { params.set(k, extra[k]); });
+    return fetch("{% url 'prices:candles_api' %}?" + params.toString())
+      .then(function (r) { return r.json(); });
+  }
+
+  request({}).then(function (data) {
+    if (!data.candles.length) {
+      meta.innerHTML = '<span class="faint tiny">' + (data.message || "no candles in range") + "</span>";
+      foot.innerHTML = baseFoot;
+      return;
+    }
+    loaded = data.candles;
+    legend = data.legend || [];
+    markers = data.markers || [];
+    earliest = data.from;
+    availableFrom = data.available_from;
+
+    candles.setData(loaded);
+    drawMarkers();
+    chart.timeScale().fitContent();
+    describe(data);
+
+    // The window is a starting view, not the whole series: scrolling past the
+    // left edge pulls in earlier bars rather than hitting a wall.
+    chart.timeScale().subscribeVisibleLogicalRangeChange(function (range) {
+      if (!range || loading || exhausted) return;
+      // Negative means the viewport has been scrolled past the first bar we
+      // hold. Testing for a small positive number instead fires immediately
+      // after fitContent, which pulls history nobody asked for on every load.
+      if (range.from > -2) return;
+      if (availableFrom && earliest <= availableFrom) { exhausted = true; describe(data); return; }
+
+      loading = true;
+      meta.insertAdjacentHTML("beforeend", '<span class="tiny faint" id="loadmore"> · loading earlier…</span>');
+
+      request({ before: earliest, extend: "1" })
+        .then(function (more) {
+          var added = (more.candles || []).filter(function (c) {
+            return c.time < loaded[0].time;
+          });
+          if (!added.length) {
+            exhausted = true;
+          } else {
+            loaded = added.concat(loaded);
+            markers = (more.markers || []).filter(function (m) {
+              return m.time < (loaded[added.length] || {}).time;
+            }).concat(markers);
+            earliest = more.from;
+            // Keep the viewport where the user left it rather than jumping.
+            var view = chart.timeScale().getVisibleLogicalRange();
+            candles.setData(loaded);
+            drawMarkers();
+            if (view) {
+              chart.timeScale().setVisibleLogicalRange({
+                from: view.from + added.length, to: view.to + added.length
+              });
+            }
+          }
+          describe(more.candles && more.candles.length ? more : data);
+        })
+        .catch(function () { exhausted = true; })
+        .finally(function () {
+          loading = false;
+          var el = document.getElementById("loadmore");
+          if (el) el.remove();
+        });
+    });
+  })
+  .catch(function (e) {
+    meta.innerHTML = '<span class="tiny" style="color:var(--err)">chart data failed: ' + e + "</span>";
+  });
+
+  new MutationObserver(function () {
+    var n = tokens();
+    chart.applyOptions({
+      layout: { textColor: n.muted },
+      grid: { vertLines: { color: n.grid }, horzLines: { color: n.grid } },
+      rightPriceScale: { borderColor: n.grid },
+      timeScale: { borderColor: n.grid }
+    });
+    candles.applyOptions({
+      upColor: n.up, downColor: n.down,
+      borderUpColor: n.up, borderDownColor: n.down,
+      wickUpColor: n.up, wickDownColor: n.down
+    });
+    bands.applyOptions({ color: n.band });
+    t = n;               // markers are redrawn from these tokens
+    drawMarkers();
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+  // Narrow a few-hundred-entry list without a round trip. A selected row is
+  // never hidden — otherwise unticking something you filtered away is
+  // impossible.
+  var search = document.getElementById("overlayfilter");
+  var opts = Array.prototype.slice.call(document.querySelectorAll("#overlaylist .overlayopt"));
+  var countEl = document.getElementById("pickercount");
+
+  function activeSet(selector, attr) {
+    return new Set(
+      Array.prototype.slice.call(document.querySelectorAll(selector + " input:checked"))
+        .map(function (i) { return i.dataset[attr]; })
+    );
+  }
+
+  function applyPicker() {
+    var needle = (search && search.value || "").toLowerCase();
+    var impacts = activeSet("#impactfilter", "impact");
+    var ccys = activeSet("#ccyfilter", "ccy");
+    var shown = 0;
+
+    opts.forEach(function (opt) {
+      var checked = opt.querySelector("input").checked;
+      var hit =
+        (!needle || opt.dataset.label.indexOf(needle) !== -1) &&
+        impacts.has(opt.dataset.impact) &&
+        ccys.has(opt.dataset.ccy);
+      opt.style.display = hit || checked ? "" : "none";
+      if (hit) shown++;
+    });
+
+    if (countEl) countEl.textContent = shown + " of " + opts.length + " shown";
+  }
+
+  if (search) search.addEventListener("input", applyPicker);
+  document.querySelectorAll("#impactfilter input, #ccyfilter input").forEach(function (i) {
+    i.addEventListener("change", applyPicker);
+  });
+  applyPicker();
+
+  // Cap the selection where the server caps it, so the limit is visible rather
+  // than silently applied after submitting.
+  var boxes = document.querySelectorAll('#overlaylist input[type=checkbox]');
+  function enforceCap() {
+    var checked = document.querySelectorAll('#overlaylist input:checked').length;
+    boxes.forEach(function (b) { b.disabled = !b.checked && checked >= {{ max_overlays }}; });
+  }
+  boxes.forEach(function (b) { b.addEventListener("change", enforceCap); });
+  enforceCap();
+})();
+</script>
+{% endif %}
+{% endblock %}
