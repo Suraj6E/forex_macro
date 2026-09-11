@@ -74,20 +74,67 @@ class Finding:
         return self.count == 0
 
 
+def _sentinel_q() -> Q:
+    condition = Q()
+    for column in VALUE_COLUMNS:
+        for sentinel in (LONG_MIN, LONG_MIN_SCALED):
+            condition |= Q(
+                **{
+                    f"{column}__gte": sentinel - SENTINEL_TOLERANCE,
+                    f"{column}__lte": sentinel + SENTINEL_TOLERANCE,
+                }
+            )
+    return condition
+
+
+def _absurd_q() -> Q:
+    condition = Q()
+    for column in VALUE_COLUMNS:
+        condition |= Q(**{f"{column}__gt": ABSURD_VALUE}) | Q(
+            **{f"{column}__lt": -ABSURD_VALUE}
+        )
+    return condition
+
+
+NO_TIMESTAMP = Q(release_time_utc__isnull=True, scheduled_time_utc__isnull=True)
+
+
+def release_counts() -> dict:
+    """Every release-table count in one scan.
+
+    Twelve checks each running their own aggregate meant twelve full passes
+    over 86,000 rows. SQLite will happily compute all of them in a single
+    scan with FILTER clauses, and the page went from seconds to well under
+    one. The individual checks below read from this dict rather than querying
+    again.
+    """
+    return EventRelease.objects.aggregate(
+        total=Count("id"),
+        no_timestamp=Count("id", filter=NO_TIMESTAMP),
+        anchorable=Count("id", filter=~NO_TIMESTAMP),
+        provisional=Count("id", filter=Q(reference_period__startswith=PERIOD_UNKNOWN_PREFIX)),
+        disagree=Count("id", filter=Q(cross_source=CrossSource.DISAGREE)),
+        sentinel=Count("id", filter=_sentinel_q()),
+        absurd=Count("id", filter=_absurd_q()),
+        no_period_start=Count("id", filter=Q(reference_period_start__isnull=True)),
+        vol_unchecked=Count("id", filter=Q(vol_check=VolCheck.NOT_CHECKED)),
+    )
+
+
 def run_checks() -> list[Finding]:
-    total = EventRelease.objects.count()
+    counts = release_counts()
     findings = [
-        _no_timestamp(total),
-        _provisional_periods(total),
+        _no_timestamp(counts),
+        _provisional_periods(counts),
         _duplicate_indicators(),
         _provisional_duplicates(),
         _unmapped_indicators(),
-        _cross_source_disagreements(total),
-        _sentinel_values(total),
-        _absurd_values(total),
-        _missing_period_start(total),
+        _cross_source_disagreements(counts),
+        _sentinel_values(counts),
+        _absurd_values(counts),
+        _missing_period_start(counts),
         _orphans(),
-        _vol_check(total),
+        _vol_check(counts),
         _price_gaps(),
     ]
     order = {BLOCKING: 0, WARNING: 1, INFO: 2, OK: 3}
@@ -97,27 +144,36 @@ def run_checks() -> list[Finding]:
 # --------------------------------------------------------------------------
 
 
-def _no_timestamp(total: int) -> Finding:
-    queryset = EventRelease.objects.filter(
-        release_time_utc__isnull=True, scheduled_time_utc__isnull=True
-    ).select_related("indicator")
-    count = queryset.count()
+def _samples(condition: Q, limit: int = 5) -> list:
+    """Rows to show beside a finding — fetched only when there is one."""
+    return list(
+        EventRelease.objects.filter(condition)
+        .select_related("indicator")
+        .order_by("-release_time_utc")[:limit]
+    )
 
-    by_source = (
-        queryset.values("observations__source__key")
-        .annotate(n=Count("id", distinct=True))
-        .order_by("-n")
-    )
-    detail = ", ".join(
-        f"{row['observations__source__key'] or 'unknown'}: {row['n']:,}" for row in by_source[:4]
-    )
+
+def _no_timestamp(counts: dict) -> Finding:
+    count = counts["no_timestamp"]
+    detail = ""
+    if count:
+        by_source = (
+            EventRelease.objects.filter(NO_TIMESTAMP)
+            .values("observations__source__key")
+            .annotate(n=Count("id", distinct=True))
+            .order_by("-n")[:4]
+        )
+        detail = ", ".join(
+            f"{row['observations__source__key'] or 'unknown'}: {row['n']:,}"
+            for row in by_source
+        )
 
     return Finding(
         code="no_timestamp",
         title="Releases with no timestamp",
         severity=WARNING if count else OK,
         count=count,
-        total=total,
+        total=counts["total"],
         detail=detail,
         why="An event study is anchored on t0. A row with no instant cannot "
         "anchor one — it can only fill the `actual` column of a row that does. "
@@ -127,20 +183,18 @@ def _no_timestamp(total: int) -> Finding:
         "release times is loaded.",
         action_label="Show them",
         link="/calendar/?flag=period_only",
-        samples=list(queryset.order_by("-reference_period_start")[:5]),
+        samples=_samples(NO_TIMESTAMP) if count else [],
     )
 
 
-def _provisional_periods(total: int) -> Finding:
-    count = EventRelease.objects.filter(
-        reference_period__startswith=PERIOD_UNKNOWN_PREFIX
-    ).count()
+def _provisional_periods(counts: dict) -> Finding:
+    count = counts["provisional"]
     return Finding(
         code="provisional_period",
         title="Releases keyed provisionally",
         severity=WARNING if count else OK,
         count=count,
-        total=total,
+        total=counts["total"],
         why="The §4.4 identity key is (currency, code, reporting period, "
         "revision). A source that supplies no reporting period — the "
         "ForexFactory weekly feed — gets a provisional key built from its "
@@ -223,65 +277,49 @@ def _unmapped_indicators() -> Finding:
     )
 
 
-def _cross_source_disagreements(total: int) -> Finding:
-    queryset = EventRelease.objects.filter(cross_source=CrossSource.DISAGREE)
+def _cross_source_disagreements(counts: dict) -> Finding:
+    count = counts["disagree"]
     return Finding(
         code="cross_source",
         title="Cross-source disagreements",
-        severity=INFO if queryset.exists() else OK,
-        count=queryset.count(),
-        total=total,
+        severity=INFO if count else OK,
+        count=count,
+        total=counts["total"],
         why="Both values are retained and nothing is silently picked. A "
         "disagreement is information: usually one source has a bug, sometimes "
         "it is a genuine revision we had not modelled.",
         link="/calendar/?flag=disagree",
-        samples=list(queryset.select_related("indicator")[:5]),
+        samples=_samples(Q(cross_source=CrossSource.DISAGREE)) if count else [],
     )
 
 
-def _sentinel_values(total: int) -> Finding:
+def _sentinel_values(counts: dict) -> Finding:
     """LONG_MIN that reached a value column, raw or scaled."""
-    condition = Q()
-    for column in VALUE_COLUMNS:
-        for sentinel in (LONG_MIN, LONG_MIN_SCALED):
-            condition |= Q(
-                **{
-                    f"{column}__gte": sentinel - SENTINEL_TOLERANCE,
-                    f"{column}__lte": sentinel + SENTINEL_TOLERANCE,
-                }
-            )
-    queryset = EventRelease.objects.filter(condition).select_related("indicator")
-    count = queryset.count()
+    count = counts["sentinel"]
     return Finding(
         code="long_min_sentinel",
         title="LONG_MIN read as a number",
         severity=BLOCKING if count else OK,
         count=count,
-        total=total,
+        total=counts["total"],
         detail=f"Detects both {LONG_MIN:.3e} and its ÷1,000,000 form.",
         why="MQL5 writes LONG_MIN for an unset field rather than null. One that "
         "escapes the null check becomes a −9.2×10¹⁸ observation that quietly "
         "destroys every standard deviation computed from the sample. The "
         "sentinel is an exact value, so this looks for it exactly instead of "
         "guessing from magnitude.",
-        samples=list(queryset[:5]),
+        samples=_samples(_sentinel_q()) if count else [],
     )
 
 
-def _absurd_values(total: int) -> Finding:
-    condition = Q()
-    for column in VALUE_COLUMNS:
-        condition |= Q(**{f"{column}__gt": ABSURD_VALUE}) | Q(
-            **{f"{column}__lt": -ABSURD_VALUE}
-        )
-    queryset = EventRelease.objects.filter(condition).select_related("indicator")
-    count = queryset.count()
+def _absurd_values(counts: dict) -> Finding:
+    count = counts["absurd"]
     return Finding(
         code="absurd_values",
         title="Values outside any plausible range",
         severity=WARNING if count else OK,
         count=count,
-        total=total,
+        total=counts["total"],
         detail=f"Threshold ±{ABSURD_VALUE:.0e}.",
         why="A catch-all for scaling mistakes. The threshold sits deliberately "
         "high: Japan's current account really is of order ¥10¹², so anything "
@@ -289,18 +327,18 @@ def _absurd_values(total: int) -> Finding:
         "missed ÷1,000,000 on a small series — a CPI of 3.2 stored as 3,200,000 "
         "looks unremarkable — which is why the unit tests pin that conversion "
         "directly.",
-        samples=list(queryset[:5]),
+        samples=_samples(_absurd_q()) if count else [],
     )
 
 
-def _missing_period_start(total: int) -> Finding:
-    count = EventRelease.objects.filter(reference_period_start__isnull=True).count()
+def _missing_period_start(counts: dict) -> Finding:
+    count = counts["no_period_start"]
     return Finding(
         code="missing_period_start",
         title="Reference periods that do not sort",
         severity=INFO if count else OK,
         count=count,
-        total=total,
+        total=counts["total"],
         why="The period label alone does not order chronologically, so a "
         "parsed start date sits beside it. Rows without one still merge "
         "correctly; they just cannot be sorted or windowed by period.",
@@ -327,18 +365,14 @@ def _orphans() -> Finding:
     )
 
 
-def _vol_check(total: int) -> Finding:
-    count = EventRelease.objects.filter(vol_check=VolCheck.NOT_CHECKED).count()
-    anchorable = EventRelease.objects.filter(
-        Q(release_time_utc__isnull=False) | Q(scheduled_time_utc__isnull=False)
-    ).count()
+def _vol_check(counts: dict) -> Finding:
     return Finding(
         code="vol_check",
         title="Timestamps never verified against price",
         severity=INFO,
-        count=count,
-        total=total,
-        detail=f"{anchorable:,} release(s) have a timestamp that could be checked.",
+        count=counts["vol_unchecked"],
+        total=counts["total"],
+        detail=f"{counts['anchorable']:,} release(s) have a timestamp that could be checked.",
         why="The check confirms a realised-volatility spike lands within ±2 "
         "minutes of the stored timestamp, and flags the row if it does not. It "
         "is how this project finds its own bugs — a timestamp wrong by an hour "

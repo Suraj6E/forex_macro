@@ -1,39 +1,56 @@
 /* ==========================================================================
-   fxmacro — monochrome design system
+   fxmacro — design system
    Single user, local, no build step (planning.md §8).
 
-   Colour policy: the chrome is greyscale. Amber and red appear ONLY for
-   warning and failure states, and never alone — every status also carries a
-   text label, so colour is redundant rather than load-bearing.
-   Charts use one flat ink per mark; identity comes from the row label and a
-   direct value label, never from hue.
+   Colour policy. The chrome stays near-neutral so the data carries the colour.
+   Every hue below was run through the palette validator against these exact
+   surfaces, in both modes:
+
+     series 1 vs 2 (actual/forecast)  CVD ΔE 24.7 light / 26.8 dark
+     diverging (beat/miss)            CVD ΔE 21.6 light / 19.2 dark
+
+   All well clear of the ΔE 8 floor, so the pairs stay distinguishable under
+   protanopia, deuteranopia and tritanopia. Colour is still never the only
+   channel: the forecast line is also dashed and thinner, surprise sign is
+   also encoded by position about a zero line, and every status chip carries
+   its own word.
    ========================================================================== */
 
 :root {
   color-scheme: dark;
 
-  --bg: #0a0a0a;
+  --bg: #0d0d0d;
   --surface: #101010;
-  --surface-2: #161616;
-  --surface-3: #1d1d1d;
-  --border: #242424;
-  --border-2: #333333;
+  --surface-2: #17171a;
+  --surface-3: #1f1f23;
+  --border: #26262b;
+  --border-2: #35353c;
 
-  --text: #f5f5f5;
-  --muted: #a3a3a3;
-  --faint: #6e6e6e;
+  --text: #f4f4f5;
+  --muted: #a5a5ad;
+  --faint: #71717a;
 
-  --mark: #e5e5e5;
-  --mark-2: #8a8a8a;
-  --track: #262626;
+  /* data ink */
+  --series-1: #3987e5;   /* actual, bars, primary magnitude */
+  --series-2: #d95926;   /* forecast, secondary series */
+  --pos: #3987e5;        /* beat — diverging cool arm */
+  --neg: #e66767;        /* missed — diverging warm arm */
+  --mark: #3987e5;
+  --mark-2: #8a8a94;
+  --track: #232329;
 
-  --inverse-bg: #f5f5f5;
-  --inverse-fg: #0a0a0a;
+  --accent: #3987e5;
+  --accent-fg: #ffffff;
+  --inverse-bg: #f4f4f5;
+  --inverse-fg: #0d0d0d;
 
-  --warn: #d9a441;
-  --err: #e06c6c;
-  --warn-bg: rgba(217, 164, 65, .10);
-  --err-bg: rgba(224, 108, 108, .10);
+  /* status — fixed, never themed, never alone */
+  --ok: #0ca30c;
+  --warn: #fab219;
+  --err: #d03b3b;
+  --ok-bg: rgba(12, 163, 12, .12);
+  --warn-bg: rgba(250, 178, 25, .12);
+  --err-bg: rgba(208, 59, 59, .14);
 
   --radius: 10px;
   --radius-sm: 6px;
@@ -46,28 +63,36 @@
 :root[data-theme="light"] {
   color-scheme: light;
 
-  --bg: #ffffff;
+  --bg: #f7f7f6;
   --surface: #fbfbfb;
-  --surface-2: #f5f5f5;
-  --surface-3: #ededed;
-  --border: #e6e6e6;
-  --border-2: #d6d6d6;
+  --surface-2: #f1f1f0;
+  --surface-3: #e7e7e5;
+  --border: #e3e3e0;
+  --border-2: #d2d2ce;
 
-  --text: #0a0a0a;
-  --muted: #5f5f5f;
-  --faint: #8c8c8c;
+  --text: #0b0b0b;
+  --muted: #52514e;
+  --faint: #898781;
 
-  --mark: #1a1a1a;
-  --mark-2: #9a9a9a;
-  --track: #ececec;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --pos: #2a78d6;
+  --neg: #e34948;
+  --mark: #2a78d6;
+  --mark-2: #9a9a94;
+  --track: #e7e7e3;
 
-  --inverse-bg: #0a0a0a;
-  --inverse-fg: #fafafa;
+  --accent: #2a78d6;
+  --accent-fg: #ffffff;
+  --inverse-bg: #0b0b0b;
+  --inverse-fg: #fbfbfb;
 
-  --warn: #9a6b12;
-  --err: #b4302f;
-  --warn-bg: rgba(154, 107, 18, .08);
-  --err-bg: rgba(180, 48, 47, .07);
+  --ok: #0ca30c;
+  --warn: #fab219;
+  --err: #d03b3b;
+  --ok-bg: rgba(12, 163, 12, .10);
+  --warn-bg: rgba(250, 178, 25, .16);
+  --err-bg: rgba(208, 59, 59, .09);
 
   --shadow: 0 1px 2px rgba(0, 0, 0, .06);
 }
@@ -114,7 +139,12 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   color: var(--muted); font-size: 13.5px;
 }
 .navlink:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
-.navlink.is-active { background: var(--surface-3); color: var(--text); font-weight: 550; }
+.navlink.is-active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent); font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+:root[data-theme="light"] .navlink.is-active { color: #1c5cab; }
 .navlink__count { font-family: var(--mono); font-size: 11px; color: var(--faint); }
 .navlink.is-active .navlink__count { color: var(--muted); }
 
@@ -179,8 +209,10 @@ h3 { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
 .stat__v { font-family: var(--mono); font-size: 25px; line-height: 1.1; letter-spacing: -.02em; }
 .stat__v small { font-size: 14px; color: var(--faint); }
 .stat__note { display: block; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
-.stat--warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
-.stat--warn .stat__v { color: var(--warn); }
+.stat--warn { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); }
+.stat--warn .stat__k { color: var(--warn); }
+:root[data-theme="light"] .stat--warn .stat__k { color: #7a5300; }
+.stat--accent .stat__v { color: var(--accent); }
 
 /* --------------------------------------------------------------- tables -- */
 
@@ -199,6 +231,17 @@ table.t tbody tr:hover { background: var(--surface-2); }
 table.t td.num, table.t th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 table.t .sub { display: block; color: var(--faint); font-size: 11.5px; margin-top: 2px; }
 table.t--dense th, table.t--dense td { padding: 6px 14px; }
+
+.sorth {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: inherit; text-decoration: none; white-space: nowrap;
+}
+.sorth:hover { color: var(--text); text-decoration: none; }
+.sorth__arrow { opacity: .35; font-size: 10px; }
+.sorth:hover .sorth__arrow { opacity: .8; }
+table.t thead th.is-sorted { color: var(--accent); }
+table.t thead th.is-sorted .sorth__arrow { opacity: 1; }
+:root[data-theme="light"] table.t thead th.is-sorted { color: #1c5cab; }
 
 .mono { font-family: var(--mono); }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
@@ -219,9 +262,11 @@ table.t--dense th, table.t--dense td { padding: 6px 14px; }
   white-space: nowrap;
 }
 .badge__dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-.badge--solid { background: var(--inverse-bg); color: var(--inverse-fg); border-color: transparent; }
-.badge--warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: var(--warn-bg); }
-.badge--err  { color: var(--err);  border-color: color-mix(in srgb, var(--err) 40%, transparent);  background: var(--err-bg); }
+.badge--solid { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.badge--ok   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 45%, transparent);   background: var(--ok-bg); }
+.badge--warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, transparent); background: var(--warn-bg); }
+.badge--err  { color: var(--err);  border-color: color-mix(in srgb, var(--err) 45%, transparent);  background: var(--err-bg); }
+:root[data-theme="light"] .badge--warn { color: #7a5300; }
 .badge--ghost { background: transparent; }
 
 /* --------------------------------------------------------------- buttons -- */
@@ -235,8 +280,8 @@ table.t--dense th, table.t--dense td { padding: 6px 14px; }
 }
 .btn:hover { background: var(--surface-3); text-decoration: none; }
 .btn:disabled, .btn.is-disabled { opacity: .4; cursor: not-allowed; }
-.btn--primary { background: var(--inverse-bg); color: var(--inverse-fg); border-color: transparent; }
-.btn--primary:hover { filter: brightness(.92); background: var(--inverse-bg); }
+.btn--primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.btn--primary:hover { filter: brightness(1.08); background: var(--accent); }
 .btn--sm { padding: 4px 9px; font-size: 11.5px; }
 .btn--ghost { background: transparent; border-color: var(--border); color: var(--muted); }
 .btn--ghost:hover { color: var(--text); background: var(--surface-2); }
@@ -259,6 +304,16 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 11
   padding: 12px 16px; background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); margin-bottom: 14px;
 }
+
+/* Chart switcher — change series without going back to the list. */
+.switcher {
+  display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;
+  padding: 12px 16px; margin-bottom: 16px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.switcher select { min-width: 120px; width: 100%; }
+.switcher__nav { display: flex; gap: 8px; align-items: center; margin-left: auto; }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field > span { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); font-weight: 600; }
 
@@ -268,11 +323,53 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 11
 .chart text { font-family: var(--sans); fill: var(--muted); }
 .chart .lbl { font-size: 11px; fill: var(--muted); }
 .chart .val { font-size: 11px; font-family: var(--mono); fill: var(--text); }
-.chart .axis { font-size: 10px; fill: var(--faint); }
-.chart .bar { fill: var(--mark); }
-.chart .bar-dim { fill: var(--mark-2); }
+.chart .axis { font-size: 10px; fill: var(--faint); font-family: var(--mono); }
+.chart .bar { fill: var(--series-1); }
+.chart .bar-dim { fill: var(--neg); }
+.chart .bar-empty { fill: var(--mark-2); opacity: .5; }
 .chart .track { fill: var(--track); }
 .chart .rule { stroke: var(--border); stroke-width: 1; }
+.chart .grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; }
+.chart .zero { stroke: var(--border-2); stroke-width: 1; }
+
+/* Two series are told apart by weight and dash, never by hue — so the chart
+   survives colour-vision deficiency and a black-and-white print. */
+.chart .series {
+  fill: none; stroke: var(--series-1); stroke-width: 1.75;
+  stroke-linejoin: round; stroke-linecap: round;
+}
+.chart .series--secondary {
+  stroke: var(--series-2); stroke-width: 1.25; stroke-dasharray: 4 3;
+}
+.chart .dot { fill: var(--series-1); }
+.legend__swatch { border-top-color: var(--series-1); }
+.legend__swatch--dashed { border-top: 2px dashed var(--series-2); }
+.chart rect[fill="transparent"]:hover { fill: var(--surface-3); fill-opacity: .5; }
+
+.spark { width: 104px; height: 26px; display: block; }
+.spark .series { stroke-width: 1.25; }
+.spark .dot { r: 2; }
+
+.legend { display: flex; gap: 14px; align-items: center; font-size: 11.5px; color: var(--muted); }
+.legend__key { display: inline-flex; align-items: center; gap: 6px; }
+.legend__swatch { width: 16px; height: 0; border-top: 2px solid var(--mark); }
+.legend__swatch--dashed { border-top: 1px dashed var(--mark-2); }
+
+.chartcard__head {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 13px 18px 0;
+}
+.chartcard__head h3 { margin: 0; }
+.chartcard__head .spacer { margin-left: auto; }
+
+.ranges { display: inline-flex; border: 1px solid var(--border-2); border-radius: var(--radius-sm); overflow: hidden; }
+.ranges a {
+  padding: 3px 10px; font-size: 11.5px; color: var(--muted);
+  border-right: 1px solid var(--border-2); text-decoration: none;
+}
+.ranges a:last-child { border-right: 0; }
+.ranges a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
+.ranges a.is-active { background: var(--inverse-bg); color: var(--inverse-fg); }
 
 .meter { height: 6px; background: var(--track); border-radius: 3px; overflow: hidden; min-width: 90px; }
 .meter__fill { height: 100%; background: var(--mark); }

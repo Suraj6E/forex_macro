@@ -1,0 +1,8 @@
+{% comment %}
+Impact tier as the source rates it. Colour is backed by the word, never
+standing in for it.
+{% endcomment %}
+{% if importance == 3 %}<span class="badge badge--err">high</span>
+{% elif importance == 2 %}<span class="badge badge--warn">medium</span>
+{% elif importance == 1 %}<span class="badge badge--ghost">low</span>
+{% else %}<span class="badge badge--ghost faint">—</span>{% endif %}

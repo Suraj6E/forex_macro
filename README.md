@@ -50,7 +50,9 @@ then create a login with `manage.py createsuperuser`.
 
 | Screen | What it is for |
 |---|---|
-| **Dashboard** | What the dataset holds, where it came from, how complete it is, and which capabilities exist yet. |
+| **Overview** | Releases per year, most frequent and busiest high-impact indicators, currency split, column coverage, source contributions. |
+| **Indicators** | Every series with a sparkline of its recent history. Search by name, currency or impact. |
+| **Indicator detail** | **The chart page.** Value over time with the forecast overlaid, plus surprise (actual − forecast) about a zero line. 1Y/5Y/10Y/All ranges. Hover any point for its exact timestamp and value. |
 | **Data quality** | Eleven checks graded blocking / warning / info, each stating what it means and offering the fix. Plus timestamp confidence, forecast provenance, cross-source agreement and the forward-capture log. Deliberately prominent (§10). |
 | **Duplicates** | Merge indicators that different sources named differently; collapse duplicate releases; purge a source's contributions. Exact name matches can be merged in bulk; similar ones need a human. |
 | **Calendar** | Every release held, filterable, with per-field provenance. |
@@ -73,6 +75,7 @@ and for the Task Scheduler entry, not because you are expected to use it.
 | `capture_forward` | Sources → **Fetch** on the ForexFactory row |
 | `reparse <source>` | Sources → **Re-parse latest** |
 | `run_job <id> --force` | Job detail → **Run again** (the CLI variant prints the traceback inline instead of storing it) |
+| `prune_history` | Activity → **Clear history** (add `--dry-run` to see what would go) |
 | `test tests` | — unit tests for the Django-free layer |
 
 Set `FXMACRO_WORKER=0` to keep a command from spawning the background worker.
@@ -145,6 +148,17 @@ Suggested cadence: Sunday before the week opens.
   reported; re-running the same range is cheap because payloads are
   content-addressed and never downloaded twice.
 - Charts are server-rendered inline SVG — no chart library, no CDN, no build
-  step. Every chart is a single series, so identity comes from the row label
-  and a direct value label rather than from colour; the palette is monochrome
-  and amber/red appear only for warning and failure, always beside a word.
+  step, no JavaScript. Every hue was run through a palette validator against
+  the app's own surfaces in both themes: actual vs forecast separate at CVD
+  ΔE 24.7 light / 26.8 dark, beat vs miss at 21.6 / 19.2, all far clear of the
+  ΔE 8 floor. Colour is never the only channel — the forecast line is also
+  dashed and thinner, surprise sign is also position about a zero line, and
+  status chips always carry their word.
+- Tables sort by clicking a column header. Sorting is done in SQL against a
+  whitelist, so a hand-edited query string cannot inject an ordering.
+- Series longer than ~420 points are thinned for display (endpoints always
+  kept) — a 720px plot cannot resolve more.
+- **Raw payloads have been pruned.** Fetch-run provenance is intact (what was
+  fetched, when, by which parser, with what hash), but only the most recent run
+  per source still has its bytes. Re-parsing older history would need a
+  re-crawl — about 20 minutes for the full calendar.

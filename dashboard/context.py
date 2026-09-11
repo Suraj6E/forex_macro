@@ -24,9 +24,12 @@ def nav_counts(request):
         total=Count("id"),
         disagree=Count("id", filter=Q(cross_source=CrossSource.DISAGREE)),
     )
+    total = releases["total"]
     return {
         "nav_counts": {
-            "releases": releases["total"],
+            "releases": total,
+            # 86,450 in a 40px-wide chip is unreadable; 86k is not.
+            "releases_short": f"{total / 1000:.0f}k" if total >= 10_000 else total,
             "indicators": indicators["total"],
             "instruments": Instrument.objects.count(),
             "sources": Source.objects.count(),

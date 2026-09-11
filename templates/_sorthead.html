@@ -1,0 +1,18 @@
+{% comment %}
+Sortable header row. The active column shows its direction with an arrow, so
+sort state is never carried by colour alone.
+{% endcomment %}
+<thead>
+  <tr>
+    {% for h in headers %}
+      <th {% if h.width %}style="width:{{ h.width }}"{% endif %} class="{% if h.numeric %}num{% endif %} {% if h.active %}is-sorted{% endif %}">
+        {% if h.sortable %}
+          <a class="sorth" href="{{ h.url }}">
+            {{ h.label }}
+            <span class="sorth__arrow">{% if h.active %}{% if h.dir == 'asc' %}↑{% else %}↓{% endif %}{% else %}↕{% endif %}</span>
+          </a>
+        {% else %}{{ h.label }}{% endif %}
+      </th>
+    {% endfor %}
+  </tr>
+</thead>

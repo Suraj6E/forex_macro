@@ -51,23 +51,21 @@
       {% for key, label in quality_filters %}<option value="{{ key }}" {% if key == flag %}selected{% endif %}>{{ label }}</option>{% endfor %}
     </select>
   </label>
-  <label class="field"><span>From</span><input type="date" name="from" value="{{ date_from }}"></label>
-  <label class="field"><span>To</span><input type="date" name="to" value="{{ date_to }}"></label>
   <button class="btn btn--primary" type="submit">Apply</button>
   <a class="btn btn--ghost" href="{% url 'calendar_data:browser' %}">Reset</a>
-  <span class="tiny faint" style="margin-left:auto;">{{ match_count|intcomma }} of {{ total_count|intcomma }} releases</span>
+  <div class="ranges" style="margin-left:auto;">
+    {% for value, label in ranges %}
+      <a class="{% if value == span %}is-active{% endif %}"
+         href="?{% if q %}q={{ q }}&{% endif %}{% if currency %}currency={{ currency }}&{% endif %}{% if importance %}importance={{ importance }}&{% endif %}{% if flag %}flag={{ flag }}&{% endif %}{% if value %}span={{ value }}{% endif %}">{{ label }}</a>
+    {% endfor %}
+  </div>
+  <span class="tiny faint">{{ match_count|intcomma }} of {{ total_count|intcomma }}</span>
 </form>
 
 <section class="card card--flush">
   <div class="tablewrap">
     <table class="t">
-      <thead>
-        <tr>
-          <th>When (UTC)</th><th>Ccy</th><th>Indicator</th>
-          <th class="num">Actual</th><th class="num">Forecast</th><th class="num">Previous</th>
-          <th>Provenance</th><th>Quality</th><th></th>
-        </tr>
-      </thead>
+      {% include "_sorthead.html" with headers=headers %}
       <tbody>
       {% for e in page %}
         <tr>
@@ -92,27 +90,21 @@
             </span>
           </td>
           <td class="num small">{{ e.actual|default:"—" }}</td>
-          <td class="num small">{{ e.forecast|default:"—" }}</td>
-          <td class="num small">{{ e.previous|default:"—" }}</td>
+          <td class="num small muted">{{ e.forecast|default:"—" }}</td>
+          <td class="num small muted">{{ e.previous|default:"—" }}</td>
+          <td class="num small">{% include "calendar_data/_impact.html" with importance=e.indicator.importance %}</td>
           <td class="small">
             {% if e.forecast_provenance == "point_in_time" %}
-              <span class="badge">point in time</span>
-            {% elif e.forecast_provenance == "vendor_stored" %}
-              <span class="badge badge--warn">vendor stored</span>
+              <span class="badge badge--ok">point in time</span>
+            {% elif e.cross_source == "disagree" %}
+              <span class="badge badge--err">disagree</span>
             {% else %}
-              <span class="badge badge--ghost faint">no forecast</span>
+              <span class="badge badge--ghost faint">{{ e.get_timestamp_confidence_display|truncatewords:1 }}</span>
             {% endif %}
           </td>
-          <td class="small">
-            {% if e.cross_source == "disagree" %}<span class="badge badge--err">disagree</span>
-            {% elif e.cross_source == "agree" %}<span class="badge">agree</span>
-            {% else %}<span class="badge badge--ghost faint">single source</span>{% endif %}
-            <span class="sub">{{ e.get_timestamp_confidence_display|truncatewords:2 }}</span>
-          </td>
-          <td class="right"><a class="tiny" href="{% url 'calendar_data:event' e.pk %}">open</a></td>
         </tr>
       {% empty %}
-        <tr><td colspan="9">
+        <tr><td colspan="8">
           <div class="empty">
             <div class="empty__t">No releases match.</div>
             <p class="tiny">If the dataset is empty, collect a source first.</p>

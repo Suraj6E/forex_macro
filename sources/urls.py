@@ -12,6 +12,7 @@ urlpatterns = [
     path("reparse/<slug:key>/", views.reparse, name="reparse"),
     path("toggle/<slug:key>/", views.toggle_source, name="toggle"),
     path("jobs/", views.jobs_list, name="jobs"),
+    path("jobs/prune/", views.prune_history, name="prune_history"),
     path("jobs/panel/", views.jobs_panel, name="jobs_panel"),
     path("jobs/<int:pk>/", views.job_detail, name="job_detail"),
     path("jobs/<int:pk>/rerun/", views.rerun_job, name="rerun_job"),

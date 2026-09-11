@@ -53,26 +53,31 @@ def field_coverage() -> tuple[list[tuple[str, int]], int]:
     return [(label, agg[name]) for name, label in VALUE_FIELDS], total
 
 
-def _labelled_counts(field: str, choices) -> list[tuple[str, int]]:
-    counts = dict(
-        EventRelease.objects.values_list(field)
-        .annotate(n=Count("id"))
-        .values_list(field, "n")
-    )
-    return [(label, counts.get(value, 0)) for value, label in choices]
+BREAKDOWN_FIELDS = {
+    "timestamp_confidence": TimestampConfidence.choices,
+    "forecast_provenance": ForecastProvenance.choices,
+    "actual_provenance": ActualProvenance.choices,
+    "cross_source": CrossSource.choices,
+    "vol_check": VolCheck.choices,
+}
 
 
 def quality_breakdown() -> dict[str, list[tuple[str, int]]]:
+    """Every distribution in one scan.
+
+    Five separate GROUP BYs meant five full passes over 86,000 rows. SQLite
+    computes the lot in one pass given conditional aggregates, and the page
+    stops being the slowest thing in the app.
+    """
+    aggregates = {}
+    for field, choices in BREAKDOWN_FIELDS.items():
+        for value, _label in choices:
+            aggregates[f"{field}__{value}"] = Count("id", filter=Q(**{field: value}))
+
+    counted = EventRelease.objects.aggregate(**aggregates)
     return {
-        "timestamp_confidence": _labelled_counts(
-            "timestamp_confidence", TimestampConfidence.choices
-        ),
-        "forecast_provenance": _labelled_counts(
-            "forecast_provenance", ForecastProvenance.choices
-        ),
-        "actual_provenance": _labelled_counts("actual_provenance", ActualProvenance.choices),
-        "cross_source": _labelled_counts("cross_source", CrossSource.choices),
-        "vol_check": _labelled_counts("vol_check", VolCheck.choices),
+        field: [(label, counted[f"{field}__{value}"]) for value, label in choices]
+        for field, choices in BREAKDOWN_FIELDS.items()
     }
 
 

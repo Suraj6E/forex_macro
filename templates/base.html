@@ -26,40 +26,37 @@
     </div>
 
     <div class="navgroup">
-      <div class="navgroup__title">Overview</div>
-      <a class="navlink {% if nav == 'dashboard' %}is-active{% endif %}" href="{% url 'dashboard:index' %}">Dashboard</a>
-      <a class="navlink {% if nav == 'quality' %}is-active{% endif %}" href="{% url 'quality:index' %}">
-        Data quality
-        {% if nav_counts.quality_flags %}<span class="navlink__count">{{ nav_counts.quality_flags }}</span>{% endif %}
-      </a>
+      <a class="navlink {% if nav == 'dashboard' %}is-active{% endif %}" href="{% url 'dashboard:index' %}">Overview</a>
     </div>
 
     <div class="navgroup">
-      <div class="navgroup__title">Dataset</div>
-      <a class="navlink {% if nav == 'calendar' %}is-active{% endif %}" href="{% url 'calendar_data:browser' %}">
-        Calendar <span class="navlink__count">{{ nav_counts.releases }}</span>
-      </a>
+      <div class="navgroup__title">Explore</div>
       <a class="navlink {% if nav == 'indicators' %}is-active{% endif %}" href="{% url 'calendar_data:indicators' %}">
         Indicators <span class="navlink__count">{{ nav_counts.indicators }}</span>
       </a>
-      <a class="navlink {% if nav == 'instruments' %}is-active{% endif %}" href="{% url 'prices:index' %}">
-        Instruments <span class="navlink__count">{{ nav_counts.instruments }}</span>
+      <a class="navlink {% if nav == 'calendar' %}is-active{% endif %}" href="{% url 'calendar_data:browser' %}">
+        Releases <span class="navlink__count">{{ nav_counts.releases_short }}</span>
       </a>
     </div>
 
     <div class="navgroup">
-      <div class="navgroup__title">Ingestion</div>
+      <div class="navgroup__title">Data</div>
+      <a class="navlink {% if nav == 'quality' %}is-active{% endif %}" href="{% url 'quality:index' %}">
+        Quality
+        {% if nav_counts.quality_flags %}<span class="navlink__count">{{ nav_counts.quality_flags }}</span>{% endif %}
+      </a>
       <a class="navlink {% if nav == 'sources' %}is-active{% endif %}" href="{% url 'sources:console' %}">
         Sources <span class="navlink__count">{{ nav_counts.sources }}</span>
       </a>
       <a class="navlink {% if nav == 'jobs' %}is-active{% endif %}" href="{% url 'sources:jobs' %}">
-        Jobs & runs
+        Activity
         {% if nav_counts.jobs_active %}<span class="navlink__count">{{ nav_counts.jobs_active }} live</span>{% endif %}
       </a>
     </div>
 
     <div class="navgroup">
-      <div class="navgroup__title">Analysis</div>
+      <div class="navgroup__title">Not built yet</div>
+      <a class="navlink {% if nav == 'instruments' %}is-active{% endif %}" href="{% url 'prices:index' %}">Prices</a>
       <a class="navlink {% if nav == 'studies' %}is-active{% endif %}" href="{% url 'studies:index' %}">Studies</a>
     </div>
 

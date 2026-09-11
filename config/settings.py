@@ -46,6 +46,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "dashboard.middleware.TimingMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -81,6 +82,13 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
+        # Django closes the connection after every request by default, which
+        # throws away the page cache configured below — so each page load
+        # re-read 88 MB from disk and the quality screen took ~2.5s however
+        # much the queries were tuned. Keeping the connection alive lets the
+        # cache persist between requests. Safe here: one user, one process.
+        "CONN_MAX_AGE": None,
+        "CONN_HEALTH_CHECKS": True,
         "OPTIONS": {
             # cache_size is negative to mean KiB rather than pages. SQLite's
             # 2 MB default is sized for OLTP; the quality screen runs a dozen
@@ -134,5 +142,10 @@ LOGGING = {
     "formatters": {"plain": {"format": "%(asctime)s %(levelname)-7s %(name)s: %(message)s"}},
     "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "plain"}},
     "root": {"handlers": ["console"], "level": "INFO"},
-    "loggers": {"django.db.backends": {"level": "WARNING"}},
+    "loggers": {
+        "django.db.backends": {"level": "WARNING"},
+        # Slow-request lines name their worst SQL, which only exists when
+        # DEBUG populates the query log; without it the timing still prints.
+        "fxmacro.timing": {"level": "WARNING"},
+    },
 }

@@ -1,19 +1,19 @@
 {% extends "base.html" %}
 {% load humanize %}
-{% block title %}{{ indicator.name }} — fxmacro{% endblock %}
+{% block title %}{{ indicator.currency }} {{ indicator.name }} — fxmacro{% endblock %}
 
 {% block content %}
 <div class="page-head">
   <div class="page-head__text">
     <h1>{{ indicator.name }}</h1>
     <p class="page-head__sub">
-      <span class="mono">{{ indicator.currency }}</span> ·
-      {% if indicator.canonical_code %}
-        canonical code <span class="mono">{{ indicator.canonical_code }}</span>
-      {% else %}
-        <span class="badge badge--warn">no canonical code</span> — cannot be joined across sources yet
-      {% endif %}
-      · {{ release_total|intcomma }} release{{ release_total|pluralize }} held
+      <span class="badge">{{ indicator.currency }}</span>
+      {% if indicator.canonical_code %}<span class="badge mono">{{ indicator.canonical_code }}</span>{% endif %}
+      <span class="badge badge--ghost">{{ indicator.get_importance_display }}</span>
+      <span class="muted">
+        {{ stats.releases|intcomma }} releases
+        {% if stats.first %}· {{ stats.first|date:"M Y" }} → {{ stats.last|date:"M Y" }}{% endif %}
+      </span>
     </p>
   </div>
   <div class="page-head__actions">
@@ -21,10 +21,126 @@
   </div>
 </div>
 
+<div class="switcher">
+  <label class="field">
+    <span>Currency</span>
+    <select onchange="location = '{% url 'calendar_data:indicators' %}?currency=' + this.value;">
+      {% for code in currencies %}
+        <option value="{{ code }}" {% if code == indicator.currency %}selected{% endif %}>{{ code }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <label class="field" style="flex:1 1 340px;">
+    <span>Indicator — {{ indicator.currency }} ({{ sibling_count }})</span>
+    <select onchange="if(this.value) location = this.value;">
+      {% for id, name, n in siblings %}
+        <option value="{% url 'calendar_data:indicator' id %}{% if span %}?span={{ span }}{% endif %}"
+                {% if id == indicator.pk %}selected{% endif %}>{{ name }} · {{ n }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <div class="switcher__nav">
+    {% if previous_indicator %}
+      <a class="btn btn--ghost btn--sm" href="{% url 'calendar_data:indicator' previous_indicator.0 %}{% if span %}?span={{ span }}{% endif %}"
+         title="{{ previous_indicator.1 }}">← Previous</a>
+    {% else %}<span class="btn btn--ghost btn--sm is-disabled">← Previous</span>{% endif %}
+    <span class="tiny faint nowrap">{{ position }} / {{ sibling_count }}</span>
+    {% if next_indicator %}
+      <a class="btn btn--ghost btn--sm" href="{% url 'calendar_data:indicator' next_indicator.0 %}{% if span %}?span={{ span }}{% endif %}"
+         title="{{ next_indicator.1 }}">Next →</a>
+    {% else %}<span class="btn btn--ghost btn--sm is-disabled">Next →</span>{% endif %}
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><span class="stat__k">Released values</span>
+    <span class="stat__v">{{ stats.with_actual|intcomma }}</span></div>
+  <div class="stat"><span class="stat__k">Latest</span>
+    <span class="stat__v">{{ stats.last|date:"j M Y"|default:"—" }}</span>
+    <span class="stat__note">{{ stats.last|date:"H:i"|default:"" }} UTC</span></div>
+  <div class="stat"><span class="stat__k">Range</span>
+    <span class="stat__v" style="font-size:18px">{{ stats.lowest|floatformat:"-2" }} … {{ stats.highest|floatformat:"-2" }}</span></div>
+  <div class="stat"><span class="stat__k">Mean</span>
+    <span class="stat__v" style="font-size:20px">{{ stats.mean|floatformat:2 }}</span></div>
+  <div class="stat"><span class="stat__k">With forecast</span>
+    <span class="stat__v">{{ stats.with_forecast|intcomma }}</span>
+    <span class="stat__note">{{ stats.with_revision|intcomma }} revised previous</span></div>
+</div>
+
+<section class="card card--flush" style="margin-top:16px;">
+  <div class="chartcard__head">
+    <h3>Value over time</h3>
+    <div class="legend">
+      <span class="legend__key"><span class="legend__swatch"></span>actual</span>
+      {% if has_forecast %}<span class="legend__key"><span class="legend__swatch legend__swatch--dashed"></span>forecast</span>{% endif %}
+    </div>
+    <span class="spacer"></span>
+    <div class="ranges">
+      {% for value, label in ranges %}
+        <a class="{% if value == span %}is-active{% endif %}"
+           href="?{% if value %}span={{ value }}{% endif %}">{{ label }}</a>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="card__body">{{ value_chart }}</div>
+  <div class="card__foot">
+    {{ plotted|intcomma }} point{{ plotted|pluralize }} plotted. Hover any point for its
+    exact timestamp and value. The forecast line is what the calendar displays
+    today, not what it showed before each release — so it is a reference, not a
+    point-in-time consensus.
+  </div>
+</section>
+
+{% if surprise_count %}
+<section class="card card--flush" style="margin-top:16px;">
+  <div class="chartcard__head">
+    <h3>Surprise — actual minus forecast</h3>
+    <span class="spacer"></span>
+    <span class="badge badge--ghost tiny">{{ surprise_count|intcomma }} comparable releases</span>
+  </div>
+  <div class="card__body">{{ surprise_chart }}</div>
+  <div class="card__foot">
+    Bars above the line beat the forecast, below missed it — polarity is shown
+    by position, not colour. These are raw differences in the indicator's own
+    units, not standardised, so they are readable for this series and
+    meaningless across series.
+  </div>
+</section>
+{% endif %}
+
+<h2>Releases <span class="h2sub">most recent 40</span></h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Released (UTC)</th><th class="num">Actual</th><th class="num">Forecast</th>
+                 <th class="num">Previous</th><th class="num">Revised prev.</th><th></th></tr></thead>
+      <tbody>
+      {% for r in releases %}
+        <tr>
+          <td class="mono small nowrap">
+            {{ r.release_time_utc|date:"Y-m-d H:i"|default:"—" }}
+            {% if not r.release_time_utc %}<span class="sub">scheduled {{ r.scheduled_time_utc|date:"Y-m-d H:i" }}</span>{% endif %}
+          </td>
+          <td class="num small">{{ r.actual_current|default_if_none:"—" }}</td>
+          <td class="num small muted">{{ r.forecast_stored|default_if_none:"—" }}</td>
+          <td class="num small muted">{{ r.previous|default_if_none:"—" }}</td>
+          <td class="num small muted">{{ r.revised_previous|default_if_none:"—" }}</td>
+          <td class="right"><a class="tiny" href="{% url 'calendar_data:event' r.id %}">open</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="6"><div class="empty tiny">No releases held.</div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<h2>Mapping</h2>
 <div class="cols cols--2">
   <section class="card">
-    <h3>Mapping</h3>
-    <form method="post" action="{% url 'calendar_data:indicator_update' indicator.pk %}" style="margin-top:12px;">
+    <form method="post" action="{% url 'calendar_data:indicator_update' indicator.pk %}">
       {% csrf_token %}
       <input type="hidden" name="next" value="{{ request.get_full_path }}">
       <div class="cols cols--3" style="gap:12px;">
@@ -45,8 +161,7 @@
           </select></label>
       </div>
       <div class="btnrow" style="margin-top:12px;">
-        <button class="btn btn--primary" type="submit">Save mapping</button>
-        <span class="tiny faint">Codes are uppercased and spaces become underscores.</span>
+        <button class="btn btn--primary" type="submit">Save</button>
       </div>
     </form>
   </section>
@@ -55,49 +170,17 @@
     <div class="card__head"><h3>Source aliases</h3></div>
     <div class="tablewrap">
       <table class="t t--dense">
-        <thead><tr><th>Source</th><th>Its name for this</th><th class="num">Seen</th></tr></thead>
         <tbody>
         {% for a in aliases %}
-          <tr>
-            <td class="small">{{ a.source.name }}</td>
-            <td class="small mono muted">{{ a.source_key }}</td>
-            <td class="num">{{ a.times_seen }}</td>
-          </tr>
+          <tr><td class="small">{{ a.source.name }}</td>
+              <td class="small mono muted">{{ a.source_key }}</td>
+              <td class="num">{{ a.times_seen }}</td></tr>
         {% empty %}
-          <tr><td colspan="3"><div class="empty tiny">No aliases.</div></td></tr>
+          <tr><td><div class="empty tiny">No aliases.</div></td></tr>
         {% endfor %}
         </tbody>
       </table>
     </div>
-    <div class="card__foot">
-      Each source names this release its own way. A title change at the source
-      forks a new alias rather than silently corrupting the existing one.
-    </div>
   </section>
 </div>
-
-<h2>Releases</h2>
-<section class="card card--flush">
-  <div class="tablewrap">
-    <table class="t t--dense">
-      <thead><tr><th>Scheduled (UTC)</th><th>Period</th><th class="num">Actual</th>
-                 <th class="num">Forecast</th><th class="num">Previous</th><th>Provenance</th><th></th></tr></thead>
-      <tbody>
-      {% for e in releases %}
-        <tr>
-          <td class="mono small nowrap">{{ e.scheduled_time_utc|date:"Y-m-d H:i"|default:"—" }}</td>
-          <td class="mono small muted">{{ e.reference_period }}</td>
-          <td class="num small">{{ e.actual|default:"—" }}</td>
-          <td class="num small">{{ e.forecast|default:"—" }}</td>
-          <td class="num small">{{ e.previous|default:"—" }}</td>
-          <td class="small faint">{{ e.get_forecast_provenance_display|truncatewords:3 }}</td>
-          <td class="right"><a class="tiny" href="{% url 'calendar_data:event' e.pk %}">open</a></td>
-        </tr>
-      {% empty %}
-        <tr><td colspan="7"><div class="empty tiny">No releases held.</div></td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
 {% endblock %}

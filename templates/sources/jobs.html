@@ -5,14 +5,31 @@
 {% block content %}
 <div class="page-head">
   <div class="page-head__text">
-    <h1>Jobs &amp; runs</h1>
+    <h1>Activity</h1>
     <p class="page-head__sub">
       Every button press becomes a row here. Progress lives in the database
-      rather than in the request, so nothing is lost to a page reload — which is
-      the whole reason there is a job runner instead of a synchronous download.
+      rather than in the request, so nothing is lost to a page reload.
     </p>
   </div>
+  <div class="page-head__actions">
+    <form method="post" action="{% url 'sources:prune_history' %}" class="rowform">
+      {% csrf_token %}
+      <label class="check" title="Also delete the stored payload files">
+        <input type="checkbox" name="drop_payloads" value="1" checked> incl. payloads
+      </label>
+      <button class="btn" type="submit">Clear history</button>
+    </form>
+  </div>
 </div>
+
+<p class="note" style="margin-bottom:16px;">
+  Clearing keeps the most recent run of every source and all
+  <strong>{{ runs|length }}</strong> fetch-run records — what was fetched, when,
+  by which parser, and the hash of what arrived. It removes older job logs and
+  {{ prunable.snapshots|intcomma }} stored payload{{ prunable.snapshots|pluralize }}
+  ({{ prunable.bytes|filesizeformat }}). The trade: re-parsing history would then
+  need a re-crawl rather than a re-read.
+</p>
 
 <form class="filters" method="get">
   <label class="field">

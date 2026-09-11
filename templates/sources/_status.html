@@ -8,7 +8,7 @@ same to anyone.
 {% elif status == "degraded" or status == "restricted" or status == "cancelled" %}
   <span class="badge badge--warn"><span class="badge__dot"></span>{{ label|default:status }}</span>
 {% elif status == "success" or status == "ok" %}
-  <span class="badge"><span class="badge__dot"></span>{{ label|default:status }}</span>
+  <span class="badge badge--ok"><span class="badge__dot"></span>{{ label|default:status }}</span>
 {% elif status == "running" or status == "queued" %}
   <span class="badge badge--solid">{{ label|default:status }}</span>
 {% else %}

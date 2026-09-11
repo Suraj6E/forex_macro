@@ -256,6 +256,18 @@ def source_detail(request, key: str):
     )
 
 
+def prune_history(request):
+    """Clear ingest logs and stale raw payloads (§5.4)."""
+    if (bad := _require_post(request)) is not None:
+        return bad
+
+    from sources.pruning import prune
+
+    result = prune(drop_payloads=bool(request.POST.get("drop_payloads")))
+    messages.success(request, result["summary"])
+    return redirect(request.POST.get("next") or "sources:jobs")
+
+
 def rerun_job(request, pk: int):
     if (bad := _require_post(request)) is not None:
         return bad
@@ -274,6 +286,8 @@ def jobs_list(request):
     if status:
         queryset = queryset.filter(status=status)
 
+    from sources.pruning import prunable
+
     page = Paginator(queryset, 40).get_page(request.GET.get("page"))
     params = {k: v for k, v in request.GET.items() if k != "page" and v}
     return render(
@@ -282,6 +296,7 @@ def jobs_list(request):
         {
             "nav": "jobs",
             "page": page,
+            "prunable": prunable(),
             "querystring": urlencode(params) + "&" if params else "",
             "kinds": Job.objects.values_list("kind", flat=True).distinct(),
             "statuses": JobStatus.choices,
