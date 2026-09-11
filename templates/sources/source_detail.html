@@ -138,4 +138,23 @@
     </table>
   </div>
 </section>
+
+{% if contribution %}
+<h2>Purge</h2>
+<section class="card">
+  <p class="prose" style="margin:0 0 12px;">
+    Removes everything <strong>{{ source.name }}</strong> contributed:
+    {{ contribution.observations|intcomma }} observation(s) across
+    {{ contribution.releases|intcomma }} release(s), plus its aliases. Releases
+    another source also claims are kept, because deleting them would discard
+    that source's work. Raw payloads on disk are untouched, so a purge is
+    recoverable by re-importing them.
+  </p>
+  <form method="post" action="{% url 'quality:purge_source' source.key %}" class="rowform">
+    {% csrf_token %}
+    <input type="text" name="confirm" placeholder="type {{ source.key }}" style="width:230px" required>
+    <button class="btn" type="submit">Purge this source's data</button>
+  </form>
+</section>
+{% endif %}
 {% endblock %}

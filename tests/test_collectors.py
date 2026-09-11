@@ -9,6 +9,7 @@ Each test here pins down a decision that would otherwise be discovered as
 * that a month's expected bar count follows the New York-anchored FX week
 """
 
+import json
 import lzma
 import struct
 import unittest
@@ -19,6 +20,7 @@ from analytics.timeutils import expected_minutes, fx_sessions
 from collectors import dukascopy as duka
 from collectors import histdata as hd
 from normalisers import dbnomics as dbn
+from normalisers import forexfactory_pages as ffp
 from normalisers import mt5_calendar as mt5
 
 
@@ -183,6 +185,96 @@ class Mt5ValueTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             mt5.parse(b"event_id;event_name\n1;CPI\n")
         self.assertIn("missing column", str(caught.exception).lower())
+
+
+class ForexFactoryPagesTests(unittest.TestCase):
+    """The historical calendar. Field mapping verified against real releases
+    before this parser was written — NFP on 6 Sep 2024 reads 142K actual,
+    164K forecast, 114K previous and 89K revised previous, at 12:30 UTC."""
+
+    NFP = {
+        "id": 135998,
+        "ebaseId": 66,
+        "name": "Non-Farm Employment Change",
+        "currency": "USD",
+        "dateline": 1725625800,
+        "impactName": "high",
+        "actual": "142K",
+        "forecast": "164K",
+        "previous": "114K",
+        "revision": "89K",
+        "timeMasked": False,
+    }
+
+    def _page(self, *events) -> bytes:
+        days = [{"date": "Fri", "dateline": 1725580800, "events": list(events)}]
+        return (
+            "<html><script>window.calendarComponentStates[1] = {\n"
+            f"days: {json.dumps(days)},\n"
+            "other: 1};</script></html>"
+        ).encode("utf-8")
+
+    def test_known_release_maps_correctly(self):
+        rows = ffp.parse(self._page(self.NFP))
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+
+        self.assertEqual(
+            row.release_time_utc, datetime(2024, 9, 6, 12, 30, tzinfo=timezone.utc)
+        )
+        self.assertEqual(row.actual, Decimal("142000"))
+        self.assertEqual(row.forecast, Decimal("164000"))
+        self.assertEqual(row.previous, Decimal("114000"))
+        # The site's `revision` restates the PREVIOUS release, not this one.
+        self.assertEqual(row.revised_previous, Decimal("89000"))
+        self.assertEqual(row.importance_source, 3)
+
+    def test_the_stable_series_id_is_the_alias_key(self):
+        # ebaseId survives title changes across nineteen years; the display
+        # title does not, and a changed title silently forks a new indicator.
+        row = ffp.parse(self._page(self.NFP))[0]
+        self.assertEqual(row.source_event_key, "ff:66")
+
+    def test_a_historical_scrape_is_never_point_in_time(self):
+        # §4.3: what the page shows today is the currently displayed forecast.
+        # Filing it as point-in-time would be look-ahead contamination.
+        row = ffp.parse(self._page(self.NFP))[0]
+        self.assertEqual(row.forecast_target, "forecast_stored")
+        self.assertEqual(row.actual_target, "actual_current")
+
+    def test_an_event_without_an_actual_is_scheduled_not_released(self):
+        pending = {**self.NFP, "actual": ""}
+        row = ffp.parse(self._page(pending))[0]
+        self.assertIsNone(row.release_time_utc)
+        self.assertEqual(
+            row.scheduled_time_utc, datetime(2024, 9, 6, 12, 30, tzinfo=timezone.utc)
+        )
+
+    def test_masked_times_are_graded_down(self):
+        masked = {**self.NFP, "timeMasked": True}
+        self.assertEqual(ffp.parse(self._page(masked))[0].timestamp_confidence, "date_only")
+        self.assertEqual(ffp.parse(self._page(self.NFP))[0].timestamp_confidence, "minute")
+
+    def test_out_of_scope_currencies_are_dropped(self):
+        self.assertEqual(ffp.parse(self._page({**self.NFP, "currency": "CNY"})), [])
+
+    def test_nested_brackets_do_not_truncate_the_calendar(self):
+        # A lazy regex would stop at the first "]," inside the data and return
+        # a short calendar — a plausible-looking wrong answer, which is worse
+        # than an error. The bracket scanner must survive it.
+        noisy = {**self.NFP, "name": "Thing [a], [b]", "notice": "see [1], [2]"}
+        rows = ffp.parse(self._page(noisy, {**self.NFP, "id": 2, "ebaseId": 67}))
+        self.assertEqual(len(rows), 2)
+
+    def test_a_block_page_raises_rather_than_returning_nothing(self):
+        with self.assertRaises(ValueError):
+            ffp.parse(b"<html><body>Attention Required! Cloudflare</body></html>")
+
+    def test_summarise_counts_what_arrived(self):
+        stats = ffp.summarise(ffp.parse(self._page(self.NFP)))
+        self.assertEqual(stats["rows"], 1)
+        self.assertEqual(stats["with_actual"], 1)
+        self.assertEqual(stats["with_revision"], 1)
 
 
 class DbnomicsTests(unittest.TestCase):

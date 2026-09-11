@@ -27,6 +27,14 @@
       {% if head.earliest %}{{ head.earliest|date:"j M Y" }} → {{ head.latest|date:"j M Y" }}{% else %}nothing ingested yet{% endif %}
     </span>
   </div>
+  <div class="stat {% if not head.anchorable %}stat--warn{% endif %}">
+    <span class="stat__k">Can anchor a study</span>
+    <span class="stat__v">{{ head.anchorable|intcomma }}<small> / {{ head.total|intcomma }}</small></span>
+    <span class="stat__note">
+      <a href="{% url 'calendar_data:browser' %}?flag=period_only">the rest are period-indexed</a> —
+      they fill an actual, never a t0
+    </span>
+  </div>
   <div class="stat">
     <span class="stat__k">Source observations</span>
     <span class="stat__v">{{ head.observations|intcomma }}</span>

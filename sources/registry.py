@@ -13,6 +13,7 @@ from typing import Callable
 from collectors import dbnomics as dbn
 from collectors import dukascopy as duka
 from collectors import forexfactory as ff
+from collectors import forexfactory_pages as ffp
 from collectors import histdata as hd
 from collectors import mt5_calendar as mt5
 from collectors.base import FetchContext, FetchResult
@@ -55,6 +56,13 @@ COLLECTORS: dict[str, RegisteredCollector] = {
         mt5.reparse,
         accepts_upload=True,
         upload_accept=".csv",
+    ),
+    ffp.KEY: RegisteredCollector(
+        ffp.KEY,
+        ffp.fetch,
+        ffp.PARSER_VERSION,
+        ffp.reparse,
+        requires_date_range=True,
     ),
     dbn.KEY: RegisteredCollector(dbn.KEY, dbn.fetch, dbn.PARSER_VERSION, dbn.reparse),
     duka.KEY: RegisteredCollector(

@@ -1,0 +1,52 @@
+{% load humanize %}
+<section class="card card--flush">
+  <div class="card__head">
+    <h3>Checks</h3>
+    <span class="spacer"></span>
+    <span class="badge badge--ghost tiny">{{ problems|length }} of {{ findings|length }} need attention</span>
+  </div>
+  <div class="tablewrap">
+    <table class="t">
+      <thead>
+        <tr><th style="width:11%">Severity</th><th style="width:26%">Check</th>
+            <th class="num" style="width:9%">Count</th><th style="width:40%">What it means</th>
+            <th style="width:14%"></th></tr>
+      </thead>
+      <tbody>
+      {% for f in findings %}
+        <tr>
+          <td>
+            {% if f.clean %}<span class="badge">clear</span>
+            {% elif f.severity == "blocking" %}<span class="badge badge--err"><span class="badge__dot"></span>blocking</span>
+            {% elif f.severity == "warning" %}<span class="badge badge--warn"><span class="badge__dot"></span>warning</span>
+            {% else %}<span class="badge badge--ghost">info</span>{% endif %}
+          </td>
+          <td>
+            <strong>{{ f.title }}</strong>
+            {% if f.detail %}<span class="sub">{{ f.detail }}</span>{% endif %}
+          </td>
+          <td class="num">
+            {{ f.count|intcomma }}
+            {% if f.total %}<span class="sub">{{ f.share|floatformat:1 }}% of {{ f.total|intcomma }}</span>{% endif %}
+          </td>
+          <td class="small muted">{{ f.why }}</td>
+          <td class="right">
+            {% if not f.clean %}
+              {% if f.action_url %}
+                <a class="btn btn--sm" href="{% url f.action_url %}">{{ f.action_label|default:"Open" }}</a>
+              {% elif f.link %}
+                <a class="btn btn--ghost btn--sm" href="{{ f.link }}">{{ f.action_label|default:"Show" }}</a>
+              {% endif %}
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    <strong>blocking</strong> means the data cannot be used for what this project is for.
+    <strong>warning</strong> means it is usable but a result built on it needs a caveat.
+    <strong>info</strong> is worth knowing and nothing is wrong.
+  </div>
+</section>

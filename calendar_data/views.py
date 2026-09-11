@@ -12,7 +12,8 @@ from urllib.parse import urlencode
 
 from django.contrib import messages
 from django.core.paginator import Paginator
-from django.db.models import Count, Q
+from django.db.models import Count, F, Q
+from django.db.models.functions import Coalesce
 from django.http import HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
 
@@ -28,7 +29,19 @@ from quality.enums import (
 
 PAGE_SIZE = 50
 
+#: An event study is anchored on t0. A row with no instant cannot anchor one;
+#: it can only fill the `actual` column of a row that does. That distinction is
+#: the single most important thing this screen has to communicate, so it is a
+#: first-class filter rather than something you infer from an em-dash.
+ANCHORABLE = Q(release_time_utc__isnull=False) | Q(scheduled_time_utc__isnull=False)
+
 QUALITY_FILTERS = {
+    "anchorable": (ANCHORABLE, "has a timestamp — can anchor a study"),
+    "period_only": (~ANCHORABLE, "period-indexed only — cannot anchor a study"),
+    "provisional": (
+        Q(reference_period__startswith="release:"),
+        "provisionally keyed — no reporting period",
+    ),
     "disagree": (Q(cross_source=CrossSource.DISAGREE), "cross-source disagreement"),
     "point_in_time": (
         Q(forecast_provenance=ForecastProvenance.POINT_IN_TIME),
@@ -54,7 +67,9 @@ def _querystring(request, drop=("page",)) -> str:
 
 
 def browser(request):
-    queryset = EventRelease.objects.select_related("indicator", "release_group")
+    queryset = EventRelease.objects.select_related("indicator", "release_group").annotate(
+        anchor=Coalesce("release_time_utc", "scheduled_time_utc")
+    )
 
     search = (request.GET.get("q") or "").strip()
     currency = request.GET.get("currency") or ""
@@ -76,12 +91,24 @@ def browser(request):
     if flag in QUALITY_FILTERS:
         queryset = queryset.filter(QUALITY_FILTERS[flag][0])
     if date_from:
-        queryset = queryset.filter(scheduled_time_utc__date__gte=date_from)
+        queryset = queryset.filter(anchor__date__gte=date_from)
     if date_to:
-        queryset = queryset.filter(scheduled_time_utc__date__lte=date_to)
+        queryset = queryset.filter(anchor__date__lte=date_to)
 
-    queryset = queryset.order_by("-scheduled_time_utc", "indicator__currency")
+    # Timestamped rows first, newest first; period-indexed rows sort by the
+    # period they describe. Sorting everything by a null timestamp is what made
+    # this screen look empty when it was merely mixed.
+    queryset = queryset.order_by(
+        F("anchor").desc(nulls_last=True),
+        F("reference_period_start").desc(nulls_last=True),
+        "indicator__currency",
+    )
     page = Paginator(queryset, PAGE_SIZE).get_page(request.GET.get("page"))
+
+    split = EventRelease.objects.aggregate(
+        anchorable=Count("id", filter=ANCHORABLE),
+        period_only=Count("id", filter=~ANCHORABLE),
+    )
 
     return render(
         request,
@@ -101,6 +128,8 @@ def browser(request):
             "date_to": date_to,
             "match_count": page.paginator.count,
             "total_count": EventRelease.objects.count(),
+            "anchorable_count": split["anchorable"],
+            "period_only_count": split["period_only"],
         },
     )
 

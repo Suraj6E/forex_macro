@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}Duplicates — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Duplicates</h1>
+    <p class="page-head__sub">
+      Every source names a release its own way, so the first ingest from each
+      creates its own indicator. Merging them under one canonical code is what
+      makes a number from MT5 and a number from a statistical agency the same
+      row. Nothing here is merged automatically on a guess.
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <a class="btn btn--ghost" href="{% url 'quality:index' %}">Data quality</a>
+  </div>
+</div>
+
+<h2>Exact matches
+  <span class="h2sub">identical once case and punctuation are removed</span></h2>
+<section class="card card--flush">
+  {% if exact %}
+  <div class="tablewrap">
+    <table class="t">
+      <thead><tr><th>Ccy</th><th>Normalised name</th><th>Members</th>
+                 <th class="num">Releases</th><th></th></tr></thead>
+      <tbody>
+      {% for g in exact %}
+        <tr>
+          <td class="mono small">{{ g.currency }}</td>
+          <td class="small">{{ g.label }}</td>
+          <td class="small">
+            {% for m in g.members %}
+              <div>
+                {% if m.pk == g.primary.pk %}<span class="badge badge--solid tiny">keep</span>{% endif %}
+                <a href="{% url 'calendar_data:indicator' m.pk %}">{{ m.name }}</a>
+                <span class="faint tiny">· {{ m.release_count }} release{{ m.release_count|pluralize }}
+                  {% if m.canonical_code %}· <span class="mono">{{ m.canonical_code }}</span>{% endif %}</span>
+              </div>
+            {% endfor %}
+          </td>
+          <td class="num">{{ g.total_releases }}</td>
+          <td class="right">
+            <form method="post" action="{% url 'quality:merge_group' %}">
+              {% csrf_token %}
+              <input type="hidden" name="primary_id" value="{{ g.primary.pk }}">
+              {% for m in g.members %}<input type="hidden" name="indicator_ids" value="{{ m.pk }}">{% endfor %}
+              <button class="btn btn--sm" type="submit">Merge</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    <form method="post" action="{% url 'quality:merge_all_exact' %}" class="btnrow">
+      {% csrf_token %}
+      <button class="btn btn--primary btn--sm" type="submit">Merge all {{ exact|length }} exact group(s)</button>
+      <span class="tiny">The survivor is the mapped indicator if there is one, otherwise the one
+        with the most releases. Every source's raw claim is preserved on it.</span>
+    </form>
+  </div>
+  {% else %}
+    <div class="empty">
+      <div class="empty__t">No two indicators share a name.</div>
+      <p class="tiny">{{ indicator_total }} indicator(s) checked.</p>
+    </div>
+  {% endif %}
+</section>
+
+<h2>Similar names
+  <span class="h2sub">suggestions — these need your judgement</span></h2>
+<section class="card card--flush">
+  {% if similar %}
+  <div class="tablewrap">
+    <table class="t">
+      <thead><tr><th>Ccy</th><th class="num">Overlap</th><th>Candidates</th><th></th></tr></thead>
+      <tbody>
+      {% for g in similar %}
+        <tr>
+          <td class="mono small">{{ g.currency }}</td>
+          <td class="num">{{ g.score|floatformat:2 }}</td>
+          <td class="small">
+            {% for m in g.members %}
+              <div>
+                <a href="{% url 'calendar_data:indicator' m.pk %}">{{ m.name }}</a>
+                <span class="faint tiny">· {{ m.release_count }} release{{ m.release_count|pluralize }}</span>
+              </div>
+            {% endfor %}
+          </td>
+          <td class="right">
+            <form method="post" action="{% url 'quality:merge_group' %}">
+              {% csrf_token %}
+              <input type="hidden" name="primary_id" value="{{ g.primary.pk }}">
+              {% for m in g.members %}<input type="hidden" name="indicator_ids" value="{{ m.pk }}">{% endfor %}
+              <button class="btn btn--ghost btn--sm" type="submit">Merge anyway</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    There is no bulk action here on purpose. Fusing two genuinely different
+    series into one is an error no downstream check would catch — the merged
+    row would look perfectly healthy and every statistic built on it would be
+    wrong. Check the names before merging.
+  </div>
+  {% else %}
+    <div class="empty"><div class="empty__t">No similar pairs above the threshold.</div></div>
+  {% endif %}
+</section>
+
+<h2>Duplicate releases
+  <span class="h2sub">from provisionally keyed rows</span></h2>
+<section class="card card--flush">
+  {% if provisional %}
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Indicator</th><th>Rows</th></tr></thead>
+      <tbody>
+      {% for group in provisional %}
+        <tr>
+          <td class="small">{{ group.0.indicator.currency }} {{ group.0.indicator.name }}</td>
+          <td class="small">
+            {% for r in group %}
+              <div class="mono tiny">
+                <a href="{% url 'calendar_data:event' r.pk %}">{{ r.reference_period }}</a>
+                · scheduled {{ r.scheduled_time_utc|date:"Y-m-d H:i" }}
+              </div>
+            {% endfor %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    <form method="post" action="{% url 'quality:merge_provisional' %}" class="btnrow">
+      {% csrf_token %}
+      <button class="btn btn--primary btn--sm" type="submit">Collapse {{ provisional_extra }} duplicate release(s)</button>
+      <span class="tiny">Same indicator, same instant within two minutes. Safe: every source claim
+        moves to the survivor.</span>
+    </form>
+  </div>
+  {% else %}
+    <div class="empty">
+      <div class="empty__t">No duplicate releases.</div>
+      <p class="tiny">
+        Releases keyed on a reporting period cannot duplicate at all — the
+        identity constraint forbids it. Only provisionally keyed rows can, and
+        none have drifted.
+      </p>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

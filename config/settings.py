@@ -82,11 +82,21 @@ DATABASES = {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
         "OPTIONS": {
+            # cache_size is negative to mean KiB rather than pages. SQLite's
+            # 2 MB default is sized for OLTP; the quality screen runs a dozen
+            # aggregates over every release, and against an 88 MB database a
+            # 2 MB cache means each one re-reads from disk — measured at ~1s
+            # cold degrading to ~6s once anything else competes for memory.
+            # §8 calls SQLite "unpleasant for repeated analytical scans"; this
+            # is that, and 64 MB is the cheap half of the fix.
             "init_command": (
                 "PRAGMA journal_mode=WAL;"
                 "PRAGMA synchronous=NORMAL;"
                 "PRAGMA busy_timeout=10000;"
                 "PRAGMA foreign_keys=ON;"
+                "PRAGMA cache_size=-65536;"
+                "PRAGMA temp_store=MEMORY;"
+                "PRAGMA mmap_size=268435456;"
             ),
             "transaction_mode": "IMMEDIATE",
         },

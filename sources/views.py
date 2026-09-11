@@ -235,6 +235,8 @@ def source_detail(request, key: str):
         defaults = {"delay_seconds": 0.05}
     elif source.key == "histdata":
         defaults = {"import_dir": "", "import_glob": "*.zip"}
+    elif source.key == "forexfactory_pages":
+        defaults = {"delay_seconds": 2.5, "max_retries": 2}
 
     return render(
         request,

@@ -8,9 +8,16 @@
     <h1>Calendar</h1>
     <p class="page-head__sub">
       Every release the dataset holds, with the provenance of each number
-      attached. Actual and forecast are shown as separate columns rather than
-      merged — three different numbers can occupy the same “actual” cell, and
-      collapsing them is how look-ahead contamination gets in.
+      attached. Actual and forecast are separate columns rather than merged —
+      three different numbers can occupy the same “actual” cell, and collapsing
+      them is how look-ahead contamination gets in.
+    </p>
+    <p class="page-head__sub" style="margin-top:8px;">
+      <a href="?flag=anchorable"><strong>{{ anchorable_count|intcomma }}</strong> have a timestamp</a>
+      and can anchor an event study;
+      <a href="?flag=period_only"><strong>{{ period_only_count|intcomma }}</strong> are period-indexed only</a>
+      — they know what the number was, never when it was published, so they can
+      fill an <em>actual</em> but never be a t0.
     </p>
   </div>
   <div class="page-head__actions">
@@ -56,7 +63,7 @@
     <table class="t">
       <thead>
         <tr>
-          <th>Scheduled (UTC)</th><th>Ccy</th><th>Indicator</th>
+          <th>When (UTC)</th><th>Ccy</th><th>Indicator</th>
           <th class="num">Actual</th><th class="num">Forecast</th><th class="num">Previous</th>
           <th>Provenance</th><th>Quality</th><th></th>
         </tr>
@@ -65,8 +72,16 @@
       {% for e in page %}
         <tr>
           <td class="mono small nowrap">
-            {{ e.scheduled_time_utc|date:"Y-m-d H:i"|default:"—" }}
-            {% if e.trading_day %}<span class="sub">trading day {{ e.trading_day|date:"j M" }}</span>{% endif %}
+            {% if e.anchor %}
+              {{ e.anchor|date:"Y-m-d H:i" }}
+              {% if e.release_time_utc %}<span class="sub">observed release</span>
+              {% else %}<span class="sub">scheduled</span>{% endif %}
+              {% if e.trading_day %}<span class="sub">trading day {{ e.trading_day|date:"j M" }}</span>{% endif %}
+            {% else %}
+              <span class="faint">no timestamp</span>
+              <span class="sub">period {{ e.reference_period }}</span>
+              <span class="sub"><span class="badge badge--ghost tiny">cannot anchor a study</span></span>
+            {% endif %}
           </td>
           <td class="mono small">{{ e.indicator.currency }}</td>
           <td>

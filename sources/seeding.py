@@ -56,14 +56,23 @@ SOURCES = [
         name="ForexFactory calendar pages",
         kind=SourceKind.CALENDAR,
         base_url="https://www.forexfactory.com/calendar",
-        gives="forecast, previous, actual, revised",
-        depth_note="deep",
-        role="2007–2017 backfill *if* MT5 falls short. Brittle; phase 3 at the earliest.",
-        timezone_rule="Site-configured display timezone. Must be pinned before parsing.",
+        gives="release time (Unix, DST-correct), actual, forecast, previous, "
+        "revised previous, impact, stable series id",
+        depth_note="Verified back to Jan 2007: 326 events that month, 273 with "
+        "actuals, 220 with forecasts, 100% with a stable series id",
+        role="Primary historical calendar. Covers 2007→now with timestamps and "
+        "all four value fields, which closes the 2007–2017 gap §4.2 called the "
+        "plan's biggest open risk.",
+        timezone_rule="Unix seconds, verified DST-correct: 08:30 New York reads "
+        "13:30 UTC in January and 12:30 UTC in June. No conversion assumption "
+        "needed for this source.",
         robots_status=RobotsStatus.RESTRICTED,
-        terms_note="HTML crawl. §5.4: scrapers break on redesign, silently, and "
-        "usually emit plausible-looking wrong data rather than an error.",
-        fetch_policy_json={"cadence": "manual", "requests_per_minute": 4},
+        terms_note="Unofficial interface behind Cloudflare; data is embedded as a "
+        "JS object rather than only rendered, so the parser is sturdier than a "
+        "DOM scrape but can still change without notice. Forecasts are what the "
+        "site displays today, so they are vendor-stored and never "
+        "point-in-time (§4.3). One request per month; paced.",
+        fetch_policy_json={"cadence": "manual", "delay_seconds": 2.5, "granularity": "month"},
     ),
     dict(
         key="alfred",

@@ -141,6 +141,10 @@ def headline() -> dict:
     )
     releases = EventRelease.objects.aggregate(
         total=Count("id"),
+        anchorable=Count(
+            "id",
+            filter=Q(release_time_utc__isnull=False) | Q(scheduled_time_utc__isnull=False),
+        ),
         disagree=Count("id", filter=Q(cross_source=CrossSource.DISAGREE)),
         point_in_time=Count(
             "id", filter=Q(forecast_provenance=ForecastProvenance.POINT_IN_TIME)

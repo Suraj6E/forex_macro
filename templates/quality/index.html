@@ -10,29 +10,23 @@
       Source and quality are visible fields here, not internal notes. Every
       release carries where its timestamp came from, whether its forecast was
       captured before the release, whether two sources agree, and whether the
-      stored timestamp has been checked against a volatility spike.
+      stored timestamp has ever been checked against a volatility spike.
     </p>
   </div>
   <div class="page-head__actions">
+    <a class="btn btn--ghost" href="{% url 'quality:duplicates' %}">Duplicates</a>
     <a class="btn btn--ghost" href="{% url 'calendar_data:indicators' %}?state=unmapped">Fix mappings</a>
-    <a class="btn btn--ghost" href="{% url 'sources:console' %}">Sources</a>
   </div>
 </div>
 
-<div class="stats">
-  <div class="stat"><span class="stat__k">Releases</span><span class="stat__v">{{ total|intcomma }}</span></div>
-  <div class="stat {% if head.disagree %}stat--warn{% endif %}">
-    <span class="stat__k">Disagreements</span><span class="stat__v">{{ head.disagree }}</span>
-    <span class="stat__note">both values kept</span></div>
-  <div class="stat {% if unmapped_total %}stat--warn{% endif %}">
-    <span class="stat__k">Unmapped indicators</span><span class="stat__v">{{ unmapped_total }}</span></div>
-  <div class="stat stat--warn">
-    <span class="stat__k">Timestamps unchecked</span>
-    <span class="stat__v">{{ unchecked_pct|floatformat:0 }}<small>%</small></span>
-    <span class="stat__note">needs price data — P2</span></div>
-  <div class="stat {% if unhealthy %}stat--warn{% endif %}">
-    <span class="stat__k">Sources unhealthy</span><span class="stat__v">{{ unhealthy|length }}</span></div>
-</div>
+{% if blocking %}
+<p class="msg msg--error">
+  <strong>{{ blocking|length }} blocking issue{{ blocking|pluralize }}.</strong>
+  Data in this state cannot support the measurements this project exists to make.
+</p>
+{% endif %}
+
+{% include "quality/_findings.html" %}
 
 <div class="cols cols--2" style="margin-top:16px;">
   <section class="card card--flush">
@@ -56,15 +50,6 @@
   </section>
 
   <section class="card card--flush">
-    <div class="card__head"><h3>Actual provenance</h3></div>
-    <div class="card__body">{{ actual_chart }}</div>
-    <div class="card__foot">
-      First print versus current: the same cell can hold what printed at
-      release, what it was revised to, and what a database says today.
-    </div>
-  </section>
-
-  <section class="card card--flush">
     <div class="card__head"><h3>Cross-source agreement</h3></div>
     <div class="card__body">{{ cross_chart }}</div>
     <div class="card__foot">
@@ -72,73 +57,16 @@
       genuine revision we had not modelled. Nothing is silently picked.
     </div>
   </section>
-</div>
-
-<div class="cols cols--2" style="margin-top:16px;">
-  <section class="card card--flush">
-    <div class="card__head"><h3>Timestamp verification</h3><span class="spacer"></span>
-      <span class="badge badge--warn">blocked until P2</span></div>
-    <div class="card__body">{{ volcheck_chart }}</div>
-    <div class="card__foot">
-      The check: for each high-impact event, confirm a realised-volatility spike
-      lands within ±2 minutes of the stored timestamp, and flag the row if not.
-      It needs the M1 price backbone, so nothing is checked yet — which is why
-      every row reads <em>not checked</em> rather than <em>confirmed</em>.
-    </div>
-  </section>
 
   <section class="card card--flush">
     <div class="card__head"><h3>Column coverage</h3></div>
     <div class="card__body">{{ coverage_chart }}</div>
+    <div class="card__foot">
+      Counts of releases carrying each column, against the total. Actual and
+      forecast stay split rather than coalesced.
+    </div>
   </section>
 </div>
-
-<h2>Cross-source disagreements</h2>
-<section class="card card--flush">
-  <div class="tablewrap">
-    <table class="t t--dense">
-      <thead><tr><th>Scheduled</th><th>Ccy</th><th>Indicator</th><th>Fields by source</th><th></th></tr></thead>
-      <tbody>
-      {% for e in disagreements %}
-        <tr>
-          <td class="mono small nowrap">{{ e.scheduled_time_utc|date:"Y-m-d H:i" }}</td>
-          <td class="mono small">{{ e.indicator.currency }}</td>
-          <td class="small">{{ e.indicator.name }}</td>
-          <td class="mono tiny muted">{{ e.source_map_json }}</td>
-          <td class="right"><a class="tiny" href="{% url 'calendar_data:event' e.pk %}">open</a></td>
-        </tr>
-      {% empty %}
-        <tr><td colspan="5"><div class="empty tiny">No disagreements — which is expected while only one source has a collector. This table becomes useful the moment a second one does.</div></td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
-
-<h2>Unmapped indicators <span class="h2sub">nothing joins across sources until these have a code</span></h2>
-<section class="card card--flush">
-  <div class="tablewrap">
-    <table class="t t--dense">
-      <thead><tr><th>Ccy</th><th>Name</th><th class="num">Releases</th><th></th></tr></thead>
-      <tbody>
-      {% for ind in unmapped %}
-        <tr>
-          <td class="mono small">{{ ind.currency }}</td>
-          <td class="small">{{ ind.name }}</td>
-          <td class="num">{{ ind.release_count }}</td>
-          <td class="right"><a class="tiny" href="{% url 'calendar_data:indicator' ind.pk %}">map</a></td>
-        </tr>
-      {% empty %}
-        <tr><td colspan="4"><div class="empty tiny">Everything is mapped.</div></td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% if unmapped_total > 15 %}
-  <div class="card__foot">Showing the 15 with the most releases, of {{ unmapped_total }}.
-    <a href="{% url 'calendar_data:indicators' %}?state=unmapped">See all →</a></div>
-  {% endif %}
-</section>
 
 <div class="cols cols--2" style="margin-top:16px;">
   <section class="card card--flush">
@@ -149,12 +77,13 @@
         {% for r in revisions %}
           <tr>
             <td class="small nowrap">{{ r.observed_at|date:"j M H:i" }}</td>
-            <td class="small">{{ r.event_release.indicator.name|truncatechars:34 }}</td>
+            <td class="small">{{ r.event_release.indicator.name|truncatechars:32 }}</td>
             <td class="mono tiny">{{ r.field }}</td>
             <td class="num small">{{ r.old_value|truncatechars:12 }} → {{ r.new_value|truncatechars:12 }}</td>
           </tr>
         {% empty %}
-          <tr><td><div class="empty tiny">No source has revised a value yet. This log is how a site quietly editing a published forecast becomes visible.</div></td></tr>
+          <tr><td><div class="empty tiny">No source has revised a value yet. This log is how a
+            site quietly editing a published forecast becomes visible.</div></td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -172,7 +101,6 @@
             <td class="small nowrap">{{ run.started_at|date:"j M H:i" }}Z</td>
             <td>{% include "sources/_status.html" with status=run.status label=run.get_status_display %}</td>
             <td class="num small">{{ run.rows_seen }} seen</td>
-            <td class="small muted">{{ run.notes|truncatechars:52 }}</td>
             <td class="right"><a class="tiny" href="{% url 'sources:run_detail' run.pk %}">open</a></td>
           </tr>
         {% empty %}
@@ -187,4 +115,26 @@
     </div>
   </section>
 </div>
+
+<h2>Source health</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Source</th><th>Health</th><th>Last success</th><th class="num">Failures</th><th></th></tr></thead>
+      <tbody>
+      {% for s in sources %}
+        <tr>
+          <td class="small">{{ s.name }}<span class="sub mono">{{ s.key }}</span></td>
+          <td>{% include "sources/_status.html" with status=s.health label=s.get_health_display %}</td>
+          <td class="small faint">{{ s.last_success_at|date:"j M H:i"|default:"never" }}</td>
+          <td class="num">{{ s.consecutive_failures }}</td>
+          <td class="right"><a class="tiny" href="{% url 'sources:detail' s.key %}">open</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="5"><div class="empty tiny">No source has been fetched yet.</div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
 {% endblock %}

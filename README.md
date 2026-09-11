@@ -4,16 +4,25 @@ A local, single-user testbed for measuring what FX majors do around
 macroeconomic releases. Design and reasoning live in [`planning.md`](planning.md);
 this file is just how to run it.
 
-**Status: P0 complete, sources implemented.** Django project, the §9 data
-model, the job runner, the full screen set, five collectors, and the Parquet
-price store. Nothing is *measured* yet — the event study is P1.
+**Status: P0 complete, calendar loaded.** Django project, the §9 data model,
+the job runner, the full screen set, six collectors, and the Parquet price
+store. Nothing is *measured* yet — the event study is P1.
+
+**The calendar is loaded: 86,450 releases, Jan 2007 → today, every one with a
+timestamp.** 66,186 carry an actual, 56,111 a forecast, 26,090 a revised
+previous. Source: the ForexFactory calendar pages. Verified against known
+history — Nov 2008 payrolls read −533K, Apr 2020 read −20,537K, Aug 2024 read
+142K — and the release times track US daylight saving correctly (08:30 New
+York is 13:30 UTC in winter, 12:30 in summer, and only those two values
+appear). No price data yet.
 
 ## Sources
 
 | Source | How it collects | State |
 |---|---|---|
-| **ForexFactory weekly** | HTTP, weekly cadence | Working. Forward point-in-time capture (§7.3). Rate-limits hard; cooldown enforced from the DB. |
-| **DBnomics** | HTTP API, series list configurable per source | Working. Actuals for the 8 economies. No release timestamps and no forecasts by design. |
+| **ForexFactory pages** | HTTP, one request per month | **The calendar.** 86,450 events loaded, Jan 2007 → today. Nothing exists before Jan 2007 — months back to 2000 return a valid page with zero events. |
+| **ForexFactory weekly** | HTTP, weekly cadence | Working. The *only* point-in-time forecast channel (§7.3) — the pages source cannot be, because it shows today's forecast. Rate-limits hard; cooldown enforced from the DB. |
+| **DBnomics** | HTTP API, series list configurable per source | Working but **not loaded** — purged once ForexFactory covered the span. Available as a cross-check; it carries no release timestamps, so it can fill an `actual` but never anchor a study. |
 | **MT5 calendar** | MQL5 script → UTF-8 CSV → upload or watched folder | Working. Run `mql5/CalendarExport.mq5` in the terminal. Handles the ×1,000,000 scaling and the `LONG_MIN` null sentinel. |
 | **Dukascopy** | HTTP, one LZMA file per instrument-hour → M1 bars | Working; decode verified against live ticks. The feed throttles, so sweeps retry with backoff and record unavailable hours. Ticks are for event windows only — bulk would be ~800 GB. |
 | **HistData** | Import: upload zips or point `import_dir` at a folder | Import path working. **Automated download is not possible** — the form posts an empty token and the site returns HTTP 200 with zero bytes to anything that is not a browser. §14 Q4 anticipated this. |
@@ -42,7 +51,8 @@ then create a login with `manage.py createsuperuser`.
 | Screen | What it is for |
 |---|---|
 | **Dashboard** | What the dataset holds, where it came from, how complete it is, and which capabilities exist yet. |
-| **Data quality** | Timestamp confidence, forecast provenance, cross-source agreement, unmapped indicators, the forward-capture log. Deliberately prominent (§10). |
+| **Data quality** | Eleven checks graded blocking / warning / info, each stating what it means and offering the fix. Plus timestamp confidence, forecast provenance, cross-source agreement and the forward-capture log. Deliberately prominent (§10). |
+| **Duplicates** | Merge indicators that different sources named differently; collapse duplicate releases; purge a source's contributions. Exact name matches can be merged in bulk; similar ones need a human. |
 | **Calendar** | Every release held, filterable, with per-field provenance. |
 | **Event detail** | One release: each field with its supplying source, what every source said verbatim, the revision log, co-timed releases. |
 | **Indicators** | Assign canonical codes, importance and release groups — the §9 mapping surface. |
@@ -115,6 +125,18 @@ Suggested cadence: Sunday before the week opens.
   a later job can re-key them once MT5 supplies `period`.
 - The feed rate-limits hard (HTTP 429 observed). `min_interval_hours` is
   enforced from the DB; the console offers a `force` override.
+- **Every release is keyed provisionally.** ForexFactory carries no reporting
+  period, so rows use a `release:<UTC minute>` key instead of the §4.4 identity.
+  They cannot be joined to an agency figure by period until a source that does
+  carry `period` — MT5 or an agency — supplies one and they are re-keyed.
+- **No forecast in the dataset is point-in-time.** A historical scrape shows
+  today's consensus, and calendar sites revise those (§4.3). Only the weekly
+  forward capture earns that label; it currently holds 16 such forecasts and
+  grows by one week each week. This is what blocks the leakage test (§3.4) and
+  same-instant decomposition (§3.3) on historical data.
+- **The dataset has one calendar source**, so `cross_source` is structurally
+  always `single_source` and the conflict detection of §4.4 has nothing to
+  compare. Loading MT5 as a second opinion is what switches it on.
 - No event study yet. P0.5 (source audit) is next: export your MT5 calendar and
   import it to find out how far back it actually reaches, which decides where
   surprise-conditioned analysis can start.
