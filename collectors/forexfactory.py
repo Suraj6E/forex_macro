@@ -17,6 +17,7 @@ from collectors.base import (
     FetchContext,
     FetchResult,
     http_get,
+    preview_from_events,
     write_snapshot,
 )
 from normalisers import forexfactory as ff_normaliser
@@ -75,6 +76,12 @@ def fetch(ctx: FetchContext) -> FetchResult:
     return FetchResult(
         snapshots=[snapshot],
         rows=rows,
+        preview=preview_from_events(
+            rows,
+            caption="The weekly feed carries forecast and previous but never an "
+            "actual — the empty actual column is the source's shape, not a "
+            "parsing failure.",
+        ),
         notes=notes,
         parser_version=PARSER_VERSION,
     )

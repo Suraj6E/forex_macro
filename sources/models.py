@@ -66,6 +66,14 @@ class Source(models.Model):
         max_length=16, choices=RobotsStatus.choices, default=RobotsStatus.UNCHECKED
     )
 
+    config_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Operator-editable settings the collector reads: which "
+        "DBnomics series to pull, where the MT5 export lands, an API key. "
+        "§0a — what a source collects is configuration, not code.",
+    )
+
     gives = models.CharField(
         max_length=300, blank=True, help_text="Which fields this source supplies (§5.1/§5.2)."
     )
@@ -210,6 +218,14 @@ class FetchRun(models.Model):
     rows_new = models.IntegerField(default=0)
     rows_changed = models.IntegerField(default=0)
     rows_unmapped = models.IntegerField(default=0)
+    bars_written = models.IntegerField(default=0)
+
+    #: A sample of the data itself, not a count of it. Coverage charts cannot
+    #: tell you a column is fully populated with the wrong number; this can.
+    sample_json = models.JSONField(default=dict, blank=True)
+
+    #: Preview runs fetch, parse and show, but write nothing to the dataset.
+    preview_only = models.BooleanField(default=False)
 
     error_text = models.TextField(blank=True)
     parser_version = models.CharField(max_length=32, blank=True)

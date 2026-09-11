@@ -311,6 +311,27 @@ dl.kv dd { margin: 0; font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
 .pager { display: flex; gap: 8px; align-items: center; margin-top: 14px; font-size: 12.5px; color: var(--muted); }
 
 .rowform { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+.chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-family: var(--mono);
+  padding: 2px 7px; border: 1px solid var(--border-2); border-radius: 999px;
+  color: var(--muted); cursor: pointer; user-select: none;
+}
+.chip:hover { background: var(--surface-2); color: var(--text); }
+.chip input { margin: 0; }
+.chip:has(input:checked) { background: var(--inverse-bg); color: var(--inverse-fg); border-color: transparent; }
+
+input[type=file] { font-size: 11.5px; color: var(--muted); max-width: 100%; }
+input[type=file]::file-selector-button {
+  font: inherit; font-size: 11.5px; margin-right: 8px; cursor: pointer;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border-2); border-radius: var(--radius-sm); padding: 3px 9px;
+}
+
+.sample th { position: sticky; top: 0; }
+.samplewrap { max-height: 460px; overflow: auto; }
 .rowform input[type=text] { width: 130px; }
 .rowform select { max-width: 150px; }
 

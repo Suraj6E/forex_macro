@@ -27,8 +27,8 @@
      hx-trigger="load, every 2s"
      hx-swap="innerHTML"></div>
 
-{% include "sources/_sourcetable.html" with title="Calendar, actuals and reference" rows=calendar_sources %}
-{% include "sources/_sourcetable.html" with title="Price" rows=price_sources %}
+{% include "sources/_sourcetable.html" with title="Calendar, actuals and reference" rows=calendar_sources instruments=instruments %}
+{% include "sources/_sourcetable.html" with title="Price" rows=price_sources instruments=instruments %}
 
 <section class="card" style="margin-top:16px;">
   <h3>What the buttons do</h3>
@@ -38,6 +38,13 @@
       Queues a job: request the source, write the payload to <code class="mono">data/raw/</code>
       content-hashed, normalise it, merge it on the identity key, and record what
       changed. Idempotent — re-running never duplicates a release.
+    </dd>
+    <dt>Preview</dt>
+    <dd class="muted small">
+      The same fetch and the same parsing, but <strong>nothing is written</strong>.
+      The run page then shows a sample of the actual rows. Use it before
+      committing a new source or a new configuration to the dataset — a coverage
+      chart cannot tell you a column is fully populated with the wrong number.
     </dd>
     <dt>Force</dt>
     <dd class="muted small">

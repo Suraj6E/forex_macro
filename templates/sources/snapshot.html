@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}Raw payload #{{ snapshot.pk }} — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Raw payload</h1>
+    <p class="page-head__sub">
+      Exactly what the source sent, before any parsing. Everything else on the
+      console is a derived view of these bytes — which is why they are kept.
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <a class="btn" href="?download=1">Download</a>
+    <a class="btn btn--ghost" href="{% url 'sources:run_detail' snapshot.fetch_run.pk %}">Back to run</a>
+  </div>
+</div>
+
+<section class="card">
+  <dl class="kv">
+    <dt>Source</dt><dd class="small">{{ snapshot.fetch_run.source.name }}</dd>
+    <dt>Fetched</dt><dd class="small">{{ snapshot.fetched_at|date:"Y-m-d H:i:s" }}Z</dd>
+    <dt>URL</dt><dd class="small mono">{{ snapshot.url|default:"—" }}</dd>
+    <dt>Stored at</dt><dd class="small mono">data/raw/{{ snapshot.path }}</dd>
+    <dt>sha256</dt><dd class="small mono">{{ snapshot.sha256 }}</dd>
+    <dt>Size</dt><dd class="small">{{ snapshot.size_bytes|intcomma }} bytes ({{ snapshot.size_bytes|filesizeformat }})</dd>
+    <dt>Content type</dt><dd class="small mono">{{ snapshot.content_type|default:"—" }}</dd>
+  </dl>
+</section>
+
+<h2>Contents
+  {% if truncated %}<span class="h2sub">first {{ shown_bytes|intcomma }} bytes</span>{% endif %}</h2>
+{% if binary %}
+  <section class="card">
+    <div class="empty">
+      <div class="empty__t">Binary payload.</div>
+      <p class="tiny">
+        Compressed tick or bar archives are not readable as text. Download it, or
+        read the parsed sample on the run page — that is the same bytes after the
+        normaliser has had them.
+      </p>
+    </div>
+  </section>
+{% else %}
+  <pre class="pre" style="max-height:640px; overflow:auto;">{{ text }}</pre>
+{% endif %}
+{% endblock %}

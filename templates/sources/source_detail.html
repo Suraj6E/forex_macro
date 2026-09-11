@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}{{ source.name }} — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>{{ source.name }}</h1>
+    <p class="page-head__sub">
+      <span class="mono">{{ source.key }}</span> ·
+      {% include "sources/_status.html" with status=source.health label=source.get_health_display %}
+      {% if not source.has_collector %}<span class="badge badge--warn">no collector yet</span>{% endif %}
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <form method="post" action="{% url 'sources:toggle' source.key %}">
+      {% csrf_token %}
+      <button class="btn btn--ghost" type="submit">{% if source.enabled %}Disable{% else %}Enable{% endif %}</button>
+    </form>
+    <a class="btn btn--ghost" href="{% url 'sources:console' %}">All sources</a>
+  </div>
+</div>
+
+<div class="cols cols--2">
+
+  <section class="card">
+    <h3>What it is</h3>
+    <dl class="kv" style="margin-top:10px;">
+      <dt>Role</dt><dd class="small">{{ source.role|default:"—" }}</dd>
+      <dt>Gives</dt><dd class="small">{{ source.gives|default:"—" }}</dd>
+      <dt>Depth</dt><dd class="small">{{ source.depth_note|default:"—" }}</dd>
+      <dt>Clock</dt><dd class="small">{{ source.timezone_rule|default:"—" }}</dd>
+      <dt>Base URL</dt><dd class="small mono">{{ source.base_url|default:"—" }}</dd>
+      <dt>Access</dt><dd class="small">{{ source.get_robots_status_display }}</dd>
+      <dt>Terms</dt><dd class="small muted">{{ source.terms_note|default:"—" }}</dd>
+      <dt>Fetch policy</dt><dd class="small mono">{{ source.fetch_policy_json|default:"—" }}</dd>
+      <dt>Held here</dt><dd class="small">
+        {% if contribution %}
+          {{ contribution.observations|intcomma }} observations across
+          {{ contribution.releases|intcomma }} releases
+        {% else %}nothing yet{% endif %}
+      </dd>
+    </dl>
+  </section>
+
+  <section class="card">
+    <h3>Configuration</h3>
+    <p class="prose" style="margin:8px 0 12px;">
+      What this source collects is a setting, not code — which series to pull,
+      where an export lands, how politely to pace requests. Edit the JSON and
+      save; the next fetch uses it.
+    </p>
+    <form method="post">
+      {% csrf_token %}
+      <textarea name="config_json" rows="14" style="width:100%; font-family:var(--mono); font-size:12px;">{{ config_text }}</textarea>
+      <div class="btnrow" style="margin-top:10px;">
+        <button class="btn btn--primary" type="submit">Save configuration</button>
+        {% if defaults_text %}
+          <button class="btn btn--ghost" type="button"
+                  onclick="document.querySelector('[name=config_json]').value = this.dataset.defaults;"
+                  data-defaults="{{ defaults_text }}">Load defaults</button>
+        {% endif %}
+      </div>
+    </form>
+  </section>
+
+</div>
+
+{% if source.has_collector %}
+<h2>Collect</h2>
+<section class="card">
+  <form method="post" action="{% url 'sources:fetch' source.key %}"
+        {% if source.accepts_upload %}enctype="multipart/form-data"{% endif %}>
+    {% csrf_token %}
+    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+
+    <div class="cols cols--3" style="gap:14px;">
+      {% if source.supports_date_range or source.requires_date_range %}
+        <label class="field"><span>From{% if source.requires_date_range %} (required){% endif %}</span>
+          <input type="date" name="date_from" {% if source.requires_date_range %}required{% endif %}></label>
+        <label class="field"><span>To{% if source.requires_date_range %} (required){% endif %}</span>
+          <input type="date" name="date_to" {% if source.requires_date_range %}required{% endif %}></label>
+      {% endif %}
+      {% if source.accepts_upload %}
+        <label class="field">
+          <span>Import file{% if source.collector.multi_upload %}s{% endif %}</span>
+          <input type="file" name="file" accept="{{ source.collector.upload_accept }}"
+                 {% if source.collector.multi_upload %}multiple{% endif %}></label>
+      {% endif %}
+    </div>
+
+    {% if source.needs_symbols %}
+      <div class="field" style="margin-top:12px;">
+        <span>Instruments</span>
+        <div class="chips" style="margin-top:5px;">
+          {% for i in instruments %}
+            <label class="chip"><input type="checkbox" name="symbols" value="{{ i.symbol }}"> {{ i.symbol }}</label>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+
+    <div class="btnrow" style="margin-top:14px;">
+      <button class="btn btn--primary" type="submit" {% if not source.enabled %}disabled{% endif %}>Fetch</button>
+      <button class="btn" type="submit" name="preview" value="1">Preview only</button>
+      {% if source.cooldown %}
+        <label class="check"><input type="checkbox" name="force" value="1"> force past the {{ source.cooldown }} cooldown</label>
+      {% endif %}
+      <span class="tiny faint">Preview fetches and shows the rows without writing anything to the dataset.</span>
+    </div>
+  </form>
+</section>
+{% endif %}
+
+<h2>Runs</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Run</th><th>Status</th><th class="num">Seen</th><th class="num">New</th>
+                 <th class="num">Bars</th><th>Params</th><th>Started</th><th></th></tr></thead>
+      <tbody>
+      {% for run in runs %}
+        <tr>
+          <td class="mono">#{{ run.pk }}</td>
+          <td>{% include "sources/_status.html" with status=run.status label=run.get_status_display %}
+            {% if run.preview_only %}<span class="sub"><span class="badge badge--ghost tiny">preview</span></span>{% endif %}</td>
+          <td class="num">{{ run.rows_seen|intcomma }}</td>
+          <td class="num">{{ run.rows_new|intcomma }}</td>
+          <td class="num">{{ run.bars_written|intcomma }}</td>
+          <td class="small mono muted">{{ run.params_json|truncatechars:52 }}</td>
+          <td class="small faint nowrap">{{ run.started_at|date:"j M H:i" }}Z</td>
+          <td class="right"><a class="tiny" href="{% url 'sources:run_detail' run.pk %}">open</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="8"><div class="empty tiny">Never collected.</div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

@@ -118,13 +118,17 @@ SOURCES = [
         base_url="https://www.histdata.com/",
         gives="M1 OHLC, bid only",
         depth_note="2000+ — ~1,600 monthly zips for 7 pairs × 19 years",
-        role="Bulk M1 backbone.",
+        role="Bulk M1 backbone. Import-only: the site declines automated "
+        "downloads, so upload the zips or point import_dir at a folder (§14 Q4).",
         timezone_rule="Eastern Standard Time with NO DST adjustment. Fixed UTC-5 "
         "year-round. Do NOT use America/New_York — it would shift half the "
         "history by an hour (§4.1).",
         robots_status=RobotsStatus.RESTRICTED,
         terms_note="M1 bars are bid-only; ask appears in tick data only, so "
-        "HistData alone cannot give spread (§4.7).",
+        "HistData alone cannot give spread (§4.7). Verified: the download form "
+        "posts an empty token and returns HTTP 200 with zero bytes to anything "
+        "that is not a browser — hence the import path.",
+        fetch_policy_json={"transport": "import", "import_glob": "*.zip"},
     ),
     dict(
         key="dukascopy",

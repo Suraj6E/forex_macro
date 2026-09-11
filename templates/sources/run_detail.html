@@ -8,23 +8,28 @@
     <h1>{{ run.source.name }} <span class="mono muted" style="font-size:15px">run #{{ run.pk }}</span></h1>
     <p class="page-head__sub">
       {% include "sources/_status.html" with status=run.status label=run.get_status_display %}
+      {% if run.preview_only %}<span class="badge badge--warn">preview — nothing written</span>{% endif %}
       <span class="muted"> — started {{ run.started_at|date:"j M Y H:i:s" }}Z</span>
     </p>
   </div>
   <div class="page-head__actions">
     {% if run.job %}<a class="btn btn--ghost" href="{% url 'sources:job_detail' run.job.pk %}">Job #{{ run.job.pk }}</a>{% endif %}
-    <a class="btn btn--ghost" href="{% url 'sources:console' %}">Sources</a>
+    <a class="btn btn--ghost" href="{% url 'sources:detail' run.source.key %}">Source</a>
   </div>
 </div>
 
 <div class="stats">
   <div class="stat"><span class="stat__k">Rows seen</span><span class="stat__v">{{ run.rows_seen|intcomma }}</span></div>
-  <div class="stat"><span class="stat__k">New</span><span class="stat__v">{{ run.rows_new|intcomma }}</span></div>
-  <div class="stat"><span class="stat__k">Changed</span><span class="stat__v">{{ run.rows_changed|intcomma }}</span>
-    <span class="stat__note">a source revising its own number</span></div>
-  <div class="stat {% if run.rows_unmapped %}stat--warn{% endif %}"><span class="stat__k">Newly unmapped</span>
-    <span class="stat__v">{{ run.rows_unmapped|intcomma }}</span>
-    <span class="stat__note">indicators with no canonical code yet</span></div>
+  {% if run.bars_written %}
+    <div class="stat"><span class="stat__k">M1 bars written</span><span class="stat__v">{{ run.bars_written|intcomma }}</span></div>
+  {% else %}
+    <div class="stat"><span class="stat__k">New</span><span class="stat__v">{{ run.rows_new|intcomma }}</span></div>
+    <div class="stat"><span class="stat__k">Changed</span><span class="stat__v">{{ run.rows_changed|intcomma }}</span>
+      <span class="stat__note">a source revising its own number</span></div>
+    <div class="stat {% if run.rows_unmapped %}stat--warn{% endif %}"><span class="stat__k">Newly unmapped</span>
+      <span class="stat__v">{{ run.rows_unmapped|intcomma }}</span>
+      <span class="stat__note">indicators with no canonical code yet</span></div>
+  {% endif %}
   <div class="stat"><span class="stat__k">Raw payloads</span><span class="stat__v">{{ snapshot_count }}</span>
     <span class="stat__note">{{ snapshot_bytes|filesizeformat }}</span></div>
 </div>
@@ -32,34 +37,57 @@
 {% if run.notes %}<p class="note" style="margin-top:16px;">{{ run.notes }}</p>{% endif %}
 {% if run.error_text %}<h2>Error</h2><pre class="pre pre--err">{{ run.error_text }}</pre>{% endif %}
 
-<h2>Raw snapshots <span class="h2sub">immutable, content-hashed, kept on disk</span></h2>
+{% if sample_rows %}
+<h2>Sample of the data itself
+  <span class="h2sub">{{ sample_rows|length }} of {{ sample_total|intcomma }} row{{ sample_total|pluralize }}</span></h2>
+<section class="card card--flush">
+  <div class="tablewrap samplewrap">
+    <table class="t t--dense sample">
+      <thead><tr>{% for c in sample_columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+      <tbody>
+      {% for row in sample_rows %}
+        <tr>{% for cell in row %}
+          <td class="small mono">{{ cell|default_if_none:"—" }}</td>
+        {% endfor %}</tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if sample_caption %}<div class="card__foot">{{ sample_caption }}</div>{% endif %}
+</section>
+{% elif run.status == "success" %}
+<p class="note" style="margin-top:16px;">This collector returned no sample rows.</p>
+{% endif %}
+
+<h2>Raw payloads <span class="h2sub">immutable, content-hashed, kept on disk</span></h2>
 <section class="card card--flush">
   <div class="tablewrap">
     <table class="t t--dense">
       <thead>
-        <tr><th>Fetched</th><th>URL</th><th>Stored at</th><th>sha256</th>
-            <th class="num">Bytes</th><th class="num">HTTP</th><th class="num">ms</th></tr>
+        <tr><th>Fetched</th><th>Source URL</th><th>Stored at</th><th>sha256</th>
+            <th class="num">Bytes</th><th class="num">HTTP</th><th class="num">ms</th><th></th></tr>
       </thead>
       <tbody>
       {% for snap in run.snapshots.all %}
         <tr>
           <td class="small nowrap">{{ snap.fetched_at|date:"Y-m-d H:i:s" }}Z</td>
-          <td class="small mono muted">{{ snap.url|truncatechars:52 }}</td>
-          <td class="small mono muted">{{ snap.path }}</td>
-          <td class="small mono faint">{{ snap.sha256|slice:":16" }}…</td>
+          <td class="small mono muted">{{ snap.url|truncatechars:46 }}</td>
+          <td class="small mono muted">{{ snap.path|truncatechars:44 }}</td>
+          <td class="small mono faint">{{ snap.sha256|slice:":12" }}…</td>
           <td class="num small">{{ snap.size_bytes|intcomma }}</td>
           <td class="num small">{{ snap.http_status|default:"—" }}</td>
           <td class="num small">{{ snap.duration_ms|default:"—" }}</td>
+          <td class="right"><a class="tiny" href="{% url 'sources:snapshot' snap.pk %}">inspect</a></td>
         </tr>
       {% empty %}
-        <tr><td colspan="7"><div class="empty tiny">No payload — this run re-parsed an existing snapshot.</div></td></tr>
+        <tr><td colspan="8"><div class="empty tiny">No payload — this run re-parsed an existing snapshot.</div></td></tr>
       {% endfor %}
       </tbody>
     </table>
   </div>
   <div class="card__foot">
     Parser <code class="mono">{{ run.parser_version|default:"—" }}</code>. Payloads are kept so a
-    parser fix is a re-parse, not a re-crawl — HTML scrapers break silently and
+    parser fix is a re-parse, not a re-crawl — scrapers break silently and
     usually emit plausible-looking wrong data rather than an error.
   </div>
 </section>
