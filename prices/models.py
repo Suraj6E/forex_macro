@@ -38,8 +38,28 @@ class Instrument(models.Model):
         return currency in (self.base_ccy, self.quote_ccy)
 
 
+class Timeframe(models.TextChoices):
+    """Bar size. §7 locks 1-minute as the working resolution, but coarser bars
+    are a legitimate first pass: an hourly series is ~60× smaller and still
+    resolves everything past the `+1h` rung of the horizon ladder."""
+
+    M1 = "m1", "1 minute"
+    M15 = "m15", "15 minutes"
+    H1 = "h1", "1 hour"
+    D1 = "d1", "1 day"
+
+
+#: Bar length in seconds, for expected-count arithmetic.
+TIMEFRAME_SECONDS = {
+    Timeframe.M1: 60,
+    Timeframe.M15: 15 * 60,
+    Timeframe.H1: 60 * 60,
+    Timeframe.D1: 24 * 60 * 60,
+}
+
+
 class PriceCoverage(models.Model):
-    """One row per instrument × source × month.
+    """One row per instrument × source × timeframe × month.
 
     Gaps are the thing that breaks long horizons: a `-5d … +1M` window needs
     unbroken bars across weekends and holidays, which is a different failure
@@ -48,6 +68,9 @@ class PriceCoverage(models.Model):
 
     instrument = models.ForeignKey(Instrument, on_delete=models.CASCADE, related_name="coverage")
     source = models.ForeignKey("sources.Source", on_delete=models.CASCADE)
+    timeframe = models.CharField(
+        max_length=4, choices=Timeframe.choices, default=Timeframe.M1, db_index=True
+    )
     month = models.DateField(help_text="First day of the covered month.")
 
     bar_count = models.IntegerField(default=0)
@@ -63,15 +86,28 @@ class PriceCoverage(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["instrument", "source", "month"]
+        ordering = ["instrument", "source", "timeframe", "month"]
         constraints = [
             models.UniqueConstraint(
-                fields=["instrument", "source", "month"], name="uniq_coverage_month"
+                fields=["instrument", "source", "timeframe", "month"],
+                name="uniq_coverage_month",
             )
         ]
 
     def __str__(self):
-        return f"{self.instrument} {self.source_id} {self.month:%Y-%m}"
+        return f"{self.instrument} {self.source_id} {self.timeframe} {self.month:%Y-%m}"
+
+    @property
+    def is_complete(self) -> bool:
+        """Enough of the month present to skip on a resumed fetch.
+
+        Not 100%: Dukascopy pads closed hours and public holidays differ by
+        venue, so an exact match would never happen and every resume would
+        re-download everything.
+        """
+        if not self.expected_bar_count:
+            return False
+        return self.bar_count >= self.expected_bar_count * 0.9
 
     @property
     def completeness(self) -> float | None:

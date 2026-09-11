@@ -13,6 +13,7 @@ Keeping the payload means a parser fix is a re-parse, not a re-crawl.
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -220,6 +221,25 @@ class HttpResponse:
     url: str
 
 
+_sessions = threading.local()
+
+
+def _session():
+    """One keep-alive session per thread.
+
+    Without this every request pays a fresh TCP and TLS handshake. Against a
+    feed whose responses already take seconds that is a large share of the
+    total, and it is free to avoid.
+    """
+    import requests
+
+    existing = getattr(_sessions, "session", None)
+    if existing is None:
+        existing = requests.Session()
+        _sessions.session = existing
+    return existing
+
+
 def http_request(
     ctx: FetchContext,
     url: str,
@@ -245,7 +265,7 @@ def http_request(
 
     started = time.monotonic()
     try:
-        response = requests.request(
+        response = _session().request(
             method, url, params=params, data=data, headers=merged, timeout=ctx.timeout
         )
     except (requests.Timeout, requests.ConnectionError) as exc:

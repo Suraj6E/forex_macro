@@ -20,7 +20,7 @@ import pandas as pd
 from django.conf import settings
 
 from analytics.timeutils import expected_minutes
-from prices.models import Instrument, PriceCoverage
+from prices.models import TIMEFRAME_SECONDS, Instrument, PriceCoverage
 
 #: One row per minute.  `spread_mean` and `tick_count` are null for bar-only
 #: sources: HistData's M1 bars are bid-only and cannot give spread (§4.7).
@@ -40,12 +40,23 @@ def month_start(value: date | datetime) -> date:
     return date(value.year, value.month, 1)
 
 
-def relative_path(symbol: str, source_key: str, month: date) -> str:
-    return f"{symbol}/{source_key}/{month:%Y-%m}.parquet"
+def relative_path(symbol: str, source_key: str, month: date, timeframe: str = "m1") -> str:
+    return f"{symbol}/{source_key}/{timeframe}/{month:%Y-%m}.parquet"
 
 
-def absolute_path(symbol: str, source_key: str, month: date) -> Path:
-    return settings.PARQUET_DIR / relative_path(symbol, source_key, month)
+def absolute_path(symbol: str, source_key: str, month: date, timeframe: str = "m1") -> Path:
+    return settings.PARQUET_DIR / relative_path(symbol, source_key, month, timeframe)
+
+
+def expected_bars(month: date, timeframe: str) -> int:
+    """How many bars a complete month should hold at this bar size.
+
+    Derived from the FX week's open minutes (§4.1), so it moves with daylight
+    saving rather than assuming a fixed number of hours per week.
+    """
+    minutes = expected_minutes(month)
+    seconds = TIMEFRAME_SECONDS.get(timeframe, 60)
+    return int(minutes * 60 // seconds)
 
 
 def empty_frame() -> pd.DataFrame:
@@ -82,6 +93,7 @@ def write_month(
     frame: pd.DataFrame,
     month: date,
     *,
+    timeframe: str = "m1",
     fetch_run=None,
     gap_count: int | None = None,
 ) -> PriceCoverage:
@@ -94,7 +106,7 @@ def write_month(
     month = month_start(month)
     frame = normalise_frame(frame)
 
-    path = absolute_path(instrument.symbol, source.key, month)
+    path = absolute_path(instrument.symbol, source.key, month, timeframe)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if path.exists():
@@ -103,7 +115,7 @@ def write_month(
 
     frame.to_parquet(path, index=False, compression="zstd")
 
-    expected = expected_minutes(month)
+    expected = expected_bars(month, timeframe)
     bar_count = len(frame)
     if gap_count is None:
         gap_count = max(expected - bar_count, 0)
@@ -111,6 +123,7 @@ def write_month(
     coverage, _ = PriceCoverage.objects.update_or_create(
         instrument=instrument,
         source=source,
+        timeframe=timeframe,
         month=month,
         defaults={
             "bar_count": bar_count,
@@ -118,27 +131,31 @@ def write_month(
             "gap_count": gap_count,
             "first_ts_utc": _as_utc(frame["ts_utc"].iloc[0]) if bar_count else None,
             "last_ts_utc": _as_utc(frame["ts_utc"].iloc[-1]) if bar_count else None,
-            "parquet_path": relative_path(instrument.symbol, source.key, month),
+            "parquet_path": relative_path(instrument.symbol, source.key, month, timeframe),
             "fetch_run": fetch_run,
         },
     )
     return coverage
 
 
-def read_month(symbol: str, source_key: str, month: date) -> pd.DataFrame:
-    path = absolute_path(symbol, source_key, month_start(month))
+def read_month(
+    symbol: str, source_key: str, month: date, timeframe: str = "m1"
+) -> pd.DataFrame:
+    path = absolute_path(symbol, source_key, month_start(month), timeframe)
     if not path.exists():
         return empty_frame()
     return pd.read_parquet(path)
 
 
-def read_range(symbol: str, source_key: str, start: datetime, end: datetime) -> pd.DataFrame:
+def read_range(
+    symbol: str, source_key: str, start: datetime, end: datetime, timeframe: str = "m1"
+) -> pd.DataFrame:
     """Bars between two instants, stitched across month files."""
     frames = []
     cursor = month_start(start)
     last = month_start(end)
     while cursor <= last:
-        frames.append(read_month(symbol, source_key, cursor))
+        frames.append(read_month(symbol, source_key, cursor, timeframe))
         cursor = (
             date(cursor.year + 1, 1, 1)
             if cursor.month == 12

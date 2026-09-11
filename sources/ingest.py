@@ -72,6 +72,23 @@ def fetch_source(job: Job) -> dict:
         notes="Preview run — nothing was written to the dataset." if preview_only else "",
     )
 
+    # Resume: tell the collector which instrument-months are already stored so
+    # a throttled or interrupted run picks up where it stopped instead of
+    # re-downloading everything.
+    if params.get("symbols") and params.get("timeframe"):
+        from prices.models import PriceCoverage
+
+        params["skip_months"] = [
+            f"{row['instrument__symbol']}:{row['month']:%Y-%m}"
+            for row in PriceCoverage.objects.filter(
+                source=source,
+                timeframe=params["timeframe"],
+                instrument__symbol__in=params["symbols"],
+            ).values("instrument__symbol", "month", "bar_count", "expected_bar_count")
+            if row["expected_bar_count"]
+            and row["bar_count"] >= row["expected_bar_count"] * 0.9
+        ]
+
     ctx = FetchContext(
         raw_root=settings.RAW_DIR,
         source_key=source.key,
@@ -186,6 +203,7 @@ def _write_price_frames(job: Job, run: FetchRun, source: Source, frames) -> int:
     from prices.models import Instrument
     from prices.store import write_month
 
+    timeframe = (run.params_json or {}).get("timeframe") or "m1"
     written = 0
     for index, frame in enumerate(frames, start=1):
         instrument = Instrument.objects.filter(symbol=frame.symbol).first()
@@ -194,12 +212,14 @@ def _write_price_frames(job: Job, run: FetchRun, source: Source, frames) -> int:
             continue
 
         coverage = write_month(
-            instrument, source, frame.frame, frame.month, fetch_run=run
+            instrument, source, frame.frame, frame.month,
+            timeframe=timeframe, fetch_run=run,
         )
         written += len(frame.frame)
         job.append_log(
-            f"{frame.symbol} {frame.month:%Y-%m}: {coverage.bar_count:,} bars stored "
-            f"({coverage.gap_count:,} minutes short of a complete month)"
+            f"{frame.symbol} {frame.month:%Y-%m} [{timeframe}]: "
+            f"{coverage.bar_count:,} bars stored "
+            f"({coverage.gap_count:,} short of a complete month)"
         )
         jobs.set_progress(
             job, 0.5 + 0.5 * index / len(frames), f"writing {frame.symbol} {frame.month:%Y-%m}"

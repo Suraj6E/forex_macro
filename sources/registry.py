@@ -46,6 +46,10 @@ class RegisteredCollector:
     #: Needs an explicit date range; the form marks it required.
     requires_date_range: bool = False
 
+    #: Bar sizes this collector can fetch, as (value, label). Empty means the
+    #: source has only one resolution and the form omits the control.
+    timeframes: tuple = ()
+
 
 COLLECTORS: dict[str, RegisteredCollector] = {
     ff.KEY: RegisteredCollector(ff.KEY, ff.fetch, ff.PARSER_VERSION, ff.reparse),
@@ -71,6 +75,11 @@ COLLECTORS: dict[str, RegisteredCollector] = {
         duka.PARSER_VERSION,
         needs_symbols=True,
         requires_date_range=True,
+        timeframes=(
+            ("h1", "1 hour — one file per month, practical for decades"),
+            ("d1", "1 day — one file per year"),
+            ("m1", "1 minute — built from ticks, one request per hour"),
+        ),
     ),
     # HistData declines to be automated (see its module docstring), so it is an
     # importer: upload the monthly zips or point it at a folder.

@@ -85,6 +85,9 @@ def _collect_params(request) -> dict:
     symbols = request.POST.getlist("symbols")
     if symbols:
         params["symbols"] = symbols
+    timeframe = (request.POST.get("timeframe") or "").strip()
+    if timeframe:
+        params["timeframe"] = timeframe
     if request.POST.get("force"):
         params["force"] = True
     return params

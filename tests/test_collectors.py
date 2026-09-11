@@ -13,7 +13,7 @@ import json
 import lzma
 import struct
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from analytics.timeutils import expected_minutes, fx_sessions
@@ -40,7 +40,7 @@ class DukascopyWireFormatTests(unittest.TestCase):
         self.assertEqual(duka.point_scale("EURUSD"), 100_000.0)
 
     def _payload(self, records) -> bytes:
-        raw = b"".join(duka.RECORD.pack(*r) for r in records)
+        raw = b"".join(duka.TICK_RECORD.pack(*r) for r in records)
         return lzma.compress(raw, format=lzma.FORMAT_ALONE)
 
     def test_decode_ticks_scales_and_places_in_time(self):
@@ -79,6 +79,100 @@ class DukascopyWireFormatTests(unittest.TestCase):
         # OHLC is the bid; the spread is carried separately, because a mid
         # price overstates what was actually capturable.
         self.assertAlmostEqual(row["spread_mean"], 0.0002, places=6)
+
+
+class DukascopyCandleTests(unittest.TestCase):
+    """The candle endpoint: one file per instrument-month, which is what makes
+    an hourly backbone ~1,600 requests instead of ~1.2 million."""
+
+    MONTH = datetime(2024, 9, 1, tzinfo=timezone.utc)
+
+    def _payload(self, records) -> bytes:
+        raw = b"".join(duka.CANDLE_RECORD.pack(*r) for r in records)
+        return lzma.compress(raw, format=lzma.FORMAT_ALONE)
+
+    def test_month_is_zero_based_in_the_candle_url(self):
+        url = duka.candle_url("EURUSD", date(2024, 9, 1), "h1")
+        self.assertIn("/2024/08/BID_candles_hour_1.bi5", url)
+
+    def test_daily_candles_live_in_a_year_file(self):
+        url = duka.candle_url("EURUSD", date(2024, 9, 1), "d1")
+        self.assertIn("/2024/BID_candles_day_1.bi5", url)
+        self.assertNotIn("/08/", url)
+
+    def test_field_order_is_open_close_low_high(self):
+        # Read as open/high/low/close this record would put the high below the
+        # close — which is exactly how the real format was identified.
+        record = (3600, 111417, 111365, 111355, 111426, 2686.32)
+        rows = duka.decode_candles(self._payload([record]), self.MONTH, 100_000.0)
+
+        self.assertEqual(len(rows), 1)
+        when, open_, high, low, close, volume = rows[0]
+        self.assertEqual(when, datetime(2024, 9, 1, 1, 0, tzinfo=timezone.utc))
+        self.assertAlmostEqual(open_, 1.11417, places=6)
+        self.assertAlmostEqual(close, 1.11365, places=6)
+        self.assertAlmostEqual(low, 1.11355, places=6)
+        self.assertAlmostEqual(high, 1.11426, places=6)
+        self.assertAlmostEqual(volume, 2686.32, places=2)
+
+    def test_decoded_bars_are_internally_consistent(self):
+        rows = duka.decode_candles(
+            self._payload(
+                [
+                    (0, 110456, 110500, 110400, 110550, 10.0),
+                    (3600, 110500, 110450, 110430, 110560, 20.0),
+                ]
+            ),
+            self.MONTH,
+            100_000.0,
+        )
+        for _when, open_, high, low, close, _vol in rows:
+            self.assertLessEqual(low, min(open_, close))
+            self.assertGreaterEqual(high, max(open_, close))
+
+    def test_offsets_are_seconds_from_the_period_start(self):
+        rows = duka.decode_candles(
+            self._payload([(0, 1, 1, 1, 2, 1.0), (7200, 1, 1, 1, 2, 1.0)]),
+            self.MONTH,
+            100_000.0,
+        )
+        self.assertEqual(rows[1][0] - rows[0][0], timedelta(hours=2))
+
+    def test_flat_zero_volume_padding_is_dropped(self):
+        # Closed hours arrive as a flat bar carrying the last price. That is
+        # padding, not a quote, and counting it would invent liquidity.
+        padded = (0, 110456, 110456, 110456, 110456, 0.0)
+        real = (3600, 110456, 110500, 110400, 110550, 12.0)
+        rows = duka.decode_candles(self._payload([padded, real]), self.MONTH, 100_000.0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], datetime(2024, 9, 1, 1, 0, tzinfo=timezone.utc))
+
+    def test_a_genuinely_flat_bar_with_volume_is_kept(self):
+        traded = (0, 110456, 110456, 110456, 110456, 5.0)
+        rows = duka.decode_candles(self._payload([traded]), self.MONTH, 100_000.0)
+        self.assertEqual(len(rows), 1, "zero range with volume is a real bar")
+
+    def test_jpy_pairs_use_the_three_decimal_scale(self):
+        rows = duka.decode_candles(
+            self._payload([(0, 143250, 143300, 143200, 143400, 9.0)]),
+            self.MONTH,
+            duka.point_scale("USDJPY"),
+        )
+        self.assertAlmostEqual(rows[0][1], 143.250, places=4)
+
+    def test_frame_has_no_spread_column_populated(self):
+        # Bid candles carry no ask, so spread must stay null rather than be
+        # invented (§4.7) — only the tick endpoint can give spread.
+        rows = duka.decode_candles(
+            self._payload([(0, 110456, 110500, 110400, 110550, 12.0)]),
+            self.MONTH, 100_000.0,
+        )
+        frame = duka.candles_to_frame(rows)
+        self.assertTrue(frame["spread_mean"].isna().all())
+        self.assertEqual(list(frame["ts_utc"])[0], self.MONTH)
+
+    def test_empty_payload_is_no_bars_not_an_error(self):
+        self.assertEqual(duka.decode_candles(b"", self.MONTH, 100_000.0), [])
 
 
 class HistDataTests(unittest.TestCase):

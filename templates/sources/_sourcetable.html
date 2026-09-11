@@ -71,6 +71,16 @@
                   </div>
                 {% endif %}
 
+                {% if s.collector.timeframes %}
+                  <div class="rowform" style="margin-bottom:5px;">
+                    <select name="timeframe" title="Bar size">
+                      {% for value, label in s.collector.timeframes %}
+                        <option value="{{ value }}">{{ label }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                {% endif %}
+
                 {% if s.accepts_upload %}
                   <div class="rowform" style="margin-bottom:5px;">
                     <input type="file" name="file" accept="{{ s.collector.upload_accept }}"
