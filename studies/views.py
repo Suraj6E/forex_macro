@@ -80,6 +80,7 @@ def event_study(request):
     """Run and read one indicator × one instrument."""
     indicator_id = request.GET.get("indicator")
     instrument_id = request.GET.get("instrument")
+    importance = request.GET.get("importance") or ""
 
     indicator = Indicator.objects.filter(pk=indicator_id).first() if indicator_id else None
     instrument = (
@@ -87,6 +88,30 @@ def event_study(request):
         if instrument_id
         else Instrument.objects.filter(symbol="EURUSD").first()
     )
+
+    # A release in a third currency cannot move this pair through a leg it does
+    # not have, so it has no business in the picker — nor in the result, which
+    # is why a selection that survives a pair change is dropped rather than
+    # silently measured. Same for a selection the impact filter excludes: a
+    # dropdown showing "pick a release" above a curve is a lie about what is
+    # on screen.
+    if indicator and instrument and not instrument.involves(indicator.currency):
+        indicator = None
+    if indicator and importance and indicator.importance != int(importance):
+        indicator = None
+
+    indicators = Indicator.objects.annotate(
+        # Counting with a filter rather than joining and de-duplicating: the
+        # join form costs ~12s against 86,000 releases because DISTINCT has to
+        # sort the whole product.
+        n=Count("releases", filter=Q(releases__release_time_utc__isnull=False))
+    ).filter(n__gte=engine.MIN_N)
+    if instrument:
+        indicators = indicators.filter(
+            Q(currency=instrument.base_ccy) | Q(currency=instrument.quote_ccy)
+        )
+    if importance:
+        indicators = indicators.filter(importance=importance)
 
     curve_rows, points, headline, rows = [], [], None, []
     scatter, scatter_horizon, scatter_normal = [], None, None
@@ -150,15 +175,14 @@ def event_study(request):
             "indicator": indicator,
             "instrument": instrument,
             "instruments": Instrument.objects.filter(enabled=True),
-            # Counting with a filter rather than joining and de-duplicating:
-            # the join form costs ~12s against 86,000 releases because DISTINCT
-            # has to sort the whole product.
-            "indicators": Indicator.objects.annotate(
-                n=Count("releases", filter=Q(releases__release_time_utc__isnull=False))
-            )
-            .filter(n__gte=engine.MIN_N)
-            .order_by("-n", "currency", "name")
-            .values_list("id", "currency", "name", "n")[:400],
+            "indicators": indicators.order_by("-n", "currency", "name").values_list(
+                "id", "currency", "name", "n"
+            )[:400],
+            "importance": importance,
+            "importances": [(3, "High"), (2, "Medium"), (1, "Low"), (0, "Unrated")],
+            "pair_currencies": (
+                [instrument.base_ccy, instrument.quote_ccy] if instrument else []
+            ),
             "curve": curve_rows,
             "rows": rows,
             "ratio_chart": charts.ratio(points),

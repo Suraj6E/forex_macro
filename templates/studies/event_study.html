@@ -27,6 +27,8 @@
         <option value="{{ id }}" {% if indicator and id == indicator.pk %}selected{% endif %}>
           {{ currency }} · {{ name }} ({{ n }})
         </option>
+      {% empty %}
+        <option value="" disabled>no releases match this pair and impact</option>
       {% endfor %}
     </select>
   </label>
@@ -38,7 +40,20 @@
       {% endfor %}
     </select>
   </label>
-  <span class="tiny faint" style="margin-left:auto;">
+  <label class="field">
+    <span>Impact</span>
+    <select name="importance" onchange="this.form.submit()">
+      <option value="">All</option>
+      {% for value, label in importances %}
+        <option value="{{ value }}" {% if importance == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <span class="tiny faint" style="margin-left:auto; max-width:340px;">
+    {% if pair_currencies %}
+      Only {{ pair_currencies|join:" and " }} releases are listed — one in a third
+      currency cannot move this pair through a leg it does not have.
+    {% endif %}
     Unmeasured pairings start measuring as soon as you pick them.
   </span>
 </form>
