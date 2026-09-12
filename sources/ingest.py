@@ -238,6 +238,37 @@ def seed_reference_job(job: Job) -> dict:
     return result
 
 
+@jobs.handler("run_study")
+def run_study_job(job: Job) -> dict:
+    """Measure one indicator against one instrument across the ladder (P1)."""
+    from calendar_data.models import Indicator
+    from prices.models import Instrument
+    from studies.engine import run_study
+
+    params = dict(job.params_json or {})
+    indicator = Indicator.objects.get(pk=params["indicator_id"])
+    instrument = Instrument.objects.get(pk=params["instrument_id"])
+
+    result = run_study(
+        indicator,
+        instrument,
+        timeframe=params.get("timeframe"),
+        log=job.append_log,
+        progress=lambda frac, msg: jobs.set_progress(job, frac, msg),
+    )
+    return {
+        "indicator_id": indicator.pk,
+        "instrument_id": instrument.pk,
+        "events_measured": result.events_measured,
+        "events_total": result.events_total,
+        "impacts_written": result.impacts_written,
+        "curve_points": result.curve_points,
+        "timeframe": result.timeframe,
+        "horizons": result.horizons,
+        "summary": result.notes,
+    }
+
+
 @jobs.handler("reparse_snapshot")
 def reparse_snapshot_job(job: Job) -> dict:
     """Re-run the current normaliser over stored bytes — no network call (§5.4)."""

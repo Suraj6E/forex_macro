@@ -82,6 +82,28 @@ def fx_sessions(start: date, end: date) -> list[tuple[datetime, datetime]]:
     return sessions
 
 
+def open_seconds_between(start: datetime, end: datetime) -> float:
+    """Seconds the FX market is actually open between two instants.
+
+    The horizon ladder is calendar time — `+1d` is `t0 + 24h`, never "the next
+    daily bar" (§4.1). But the market is shut for two days a week, so a Friday
+    release has about nine trading hours inside its `+1d` window, not
+    twenty-four. Judging window completeness against calendar hours therefore
+    rejects exactly the releases that fall on a Friday, which for payrolls is
+    all of them — a filter that correlates with the event is worse than no
+    filter at all.
+    """
+    if end <= start:
+        return 0.0
+    total = 0.0
+    for open_utc, close_utc in fx_sessions(start.date(), end.date()):
+        lo = max(open_utc, start)
+        hi = min(close_utc, end)
+        if hi > lo:
+            total += (hi - lo).total_seconds()
+    return total
+
+
 def expected_minutes(month_start: date) -> int:
     """How many M1 bars a complete month of FX data should contain."""
     if month_start.month == 12:

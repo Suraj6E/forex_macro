@@ -12,22 +12,56 @@
       Adding a new question must never mean editing Python.
     </p>
   </div>
+  <div class="page-head__actions">
+    <a class="btn btn--primary" href="{% url 'studies:event_study' %}">Event study</a>
+  </div>
 </div>
 
+{% load humanize %}
+{% if computed %}
+<h2>Measured</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Indicator</th><th>Pair</th><th class="num">Horizons</th>
+                 <th class="num">Releases</th><th></th></tr></thead>
+      <tbody>
+      {% for row in computed %}
+        <tr>
+          <td class="small">{{ row.indicator__currency }} {{ row.indicator__name }}</td>
+          <td class="mono small">{{ row.instrument__symbol }}</td>
+          <td class="num">{{ row.points }}</td>
+          <td class="num">{{ row.best_n }}</td>
+          <td class="right">
+            <a class="tiny" href="{% url 'studies:event_study' %}?indicator={{ row.indicator__id }}&instrument={{ row.instrument__id }}">curve →</a>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">{{ impacts|intcomma }} per-event measurements stored.</div>
+</section>
+{% else %}
 <p class="msg msg--warning">
-  <strong>The study engine is P4.</strong> The tables exist and the analytics
-  layer is importable from a notebook, but nothing can be run yet — there is no
-  price data to measure against. This page documents the shape rather than
-  pretending to a capability.
+  Nothing measured yet.
+  <a href="{% url 'studies:event_study' %}">Run an event study</a> to produce a
+  decay curve.
+</p>
+{% endif %}
+
+<p class="note" style="margin-top:16px;">
+  <strong>The saved-specification engine is still P4.</strong> The event study
+  runs one indicator against one pair; the configurable object below — pooling,
+  event-anchored windows, conditioning variables, holdout samples — is the shape
+  it grows into, documented rather than implied.
 </p>
 
-<div class="stats">
+<div class="stats" style="margin-top:16px;">
   <div class="stat"><span class="stat__k">Saved specifications</span><span class="stat__v">{{ specs|length }}</span></div>
   <div class="stat"><span class="stat__k">Runs</span><span class="stat__v">{{ runs|length }}</span></div>
-  <div class="stat"><span class="stat__k">Event impacts stored</span><span class="stat__v">{{ impacts }}</span>
+  <div class="stat"><span class="stat__k">Event impacts stored</span><span class="stat__v">{{ impacts|intcomma }}</span>
     <span class="stat__note">one row per event × instrument × horizon</span></div>
-  <div class="stat"><span class="stat__k">Decay curves</span><span class="stat__v">{{ curves }}</span>
-    <span class="stat__note">the headline output</span></div>
 </div>
 
 <div class="cols cols--2" style="margin-top:16px;">

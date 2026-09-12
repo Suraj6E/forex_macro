@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}Event study — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Event study</h1>
+    <p class="page-head__sub">
+      What one pair does around one release, across the horizon ladder — and
+      for how long it lasts. Measured against what that pair normally does in
+      the same weekday-and-hour slot, which is what makes it an event study
+      rather than a picture of a move.
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <a class="btn btn--ghost" href="{% url 'studies:index' %}">Studies</a>
+  </div>
+</div>
+
+<form class="filters" method="post" action="{% url 'studies:run' %}">
+  {% csrf_token %}
+  <label class="field" style="flex:1 1 360px;">
+    <span>Indicator</span>
+    <select name="indicator" required>
+      <option value="">— pick a release —</option>
+      {% for id, currency, name, n in indicators %}
+        <option value="{{ id }}" {% if indicator and id == indicator.pk %}selected{% endif %}>
+          {{ currency }} · {{ name }} ({{ n }})
+        </option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Pair</span>
+    <select name="instrument" required>
+      {% for i in instruments %}
+        <option value="{{ i.pk }}" {% if instrument and i.pk == instrument.pk %}selected{% endif %}>{{ i.symbol }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button class="btn btn--primary" type="submit">Measure</button>
+  <span class="tiny faint">Reads every release and its prior twelve weeks; takes about a minute.</span>
+</form>
+
+{% if not curve %}
+  <section class="card">
+    <div class="empty">
+      <div class="empty__t">
+        {% if indicator %}Nothing measured yet for this pairing.{% else %}Pick an indicator and a pair.{% endif %}
+      </div>
+      <p class="tiny">Press <strong>Measure</strong> — results appear here when the job finishes.</p>
+    </div>
+  </section>
+{% else %}
+
+<section class="card verdict">
+  <h3 class="verdict__h">In plain terms</h3>
+  <p class="verdict__p">
+    {% if headline.any_effect %}
+      In the <strong>{{ headline.peak.horizon }}</strong> window after this release,
+      <strong>{{ instrument.symbol }}</strong> moves
+      <strong>{{ headline.peak_ratio|floatformat:2 }}×</strong> its usual amount —
+      about <strong>{{ headline.peak_pips|floatformat:1 }} pips</strong> more than a
+      typical window. The effect stays measurable out to
+      <strong>{{ headline.last_significant }}</strong>
+      {% if headline.first_insignificant %}
+        and is no longer detectable by <strong>{{ headline.first_insignificant }}</strong>.
+      {% else %}.{% endif %}
+    {% else %}
+      No horizon shows movement distinguishable from a normal window for this
+      pairing. Check the detectability floor below before reading that as
+      “no effect”: it may mean the sample could not have resolved one.
+    {% endif %}
+  </p>
+  {% if headline.quiet_before %}
+  <p class="verdict__p">
+    Before the release the market goes <strong>quiet</strong>: at
+    <strong>{{ headline.quiet_before }}</strong> price moves only
+    <strong>{{ headline.quiet_ratio|floatformat:2 }}×</strong> its usual amount.
+    That is the signature of market makers stepping back ahead of a known
+    announcement, not of nothing happening.
+  </p>
+  {% endif %}
+  <p class="verdict__meta">
+    Measured across <strong>{{ headline.n|intcomma }}</strong> releases ·
+    Mode A (no forecast needed) · hourly bars ·
+    <span class="badge badge--ghost">ESTIMATE</span>
+    <span class="badge badge--warn">association, not causation</span>
+  </p>
+</section>
+
+<section class="card card--flush" style="margin-top:16px;">
+  <div class="chartcard__head">
+    <h3>How much does {{ instrument.symbol }} move, versus a normal window?</h3>
+    <span class="spacer"></span>
+    <span class="legend tiny">
+      <span class="legend__key">solid = distinguishable from normal</span>
+      <span class="legend__key">hollow = not</span>
+    </span>
+  </div>
+  <div class="card__body">{{ ratio_chart }}</div>
+  <div class="card__foot">
+    The dashed line is an ordinary window for the same weekday and hour.
+    Above it price moves more than usual; below it, less. This says nothing
+    about <em>direction</em> — in Mode A there is no forecast, so a rise and a
+    fall of equal size count the same.
+  </div>
+</section>
+
+{% if scatter_n %}
+<section class="card card--flush" style="margin-top:16px;">
+  <div class="chartcard__head">
+    <h3>Every release at {{ scatter_horizon }}</h3>
+    <span class="spacer"></span>
+    <span class="tiny faint">{{ scatter_n }} releases, in pips</span>
+  </div>
+  <div class="card__body">{{ scatter_chart }}</div>
+  <div class="card__foot">
+    One dot per release, so you can see whether the average is steady or driven
+    by a handful of crises. The dashed line is the normal move for that window.
+  </div>
+</section>
+{% endif %}
+
+<h2>Excess movement, in pips</h2>
+<section class="card card--flush">
+  <div class="card__body">{{ chart }}</div>
+  <div class="card__foot">
+    The same measurement as the first chart, expressed as how many pips
+    <em>further</em> price travelled than usual, with the standard error.
+    Bars below the line are horizons where the market was quieter than normal.
+  </div>
+</section>
+
+<h2>The numbers</h2>
+<section class="card card--flush">
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead>
+        <tr><th>Horizon</th><th>Verdict</th><th class="num">× normal</th>
+            <th class="num">Excess (pips)</th><th class="num">± se</th>
+            <th class="num">n</th><th class="num">p (FDR)</th>
+            <th class="num">Floor (pips)</th><th>Attribution</th></tr>
+      </thead>
+      <tbody>
+      {% for item in rows %}
+        <tr>
+          <td class="mono">{{ item.row.horizon }}</td>
+          <td class="small">
+            {% if item.row.effect_size == None %}<span class="badge badge--ghost">too few</span>
+            {% elif item.significant and item.quieter %}<span class="badge badge--warn">quieter</span>
+            {% elif item.significant %}<span class="badge badge--ok">moves more</span>
+            {% else %}<span class="badge badge--ghost">no signal</span>{% endif %}
+          </td>
+          <td class="num">{{ item.row.r_squared|floatformat:2|default_if_none:"—" }}×</td>
+          <td class="num small">{{ item.pips|floatformat:1|default_if_none:"—" }}</td>
+          <td class="num small muted">{{ item.pips_error|floatformat:1|default_if_none:"—" }}</td>
+          <td class="num">{{ item.row.n }}</td>
+          <td class="num small">
+            {% if item.row.p_fdr != None %}
+              {% if item.significant %}<strong>{{ item.row.p_fdr|floatformat:4 }}</strong>
+              {% else %}<span class="muted">{{ item.row.p_fdr|floatformat:4 }}</span>{% endif %}
+            {% else %}—{% endif %}
+          </td>
+          <td class="num small muted">{{ item.floor_pips|floatformat:1|default_if_none:"—" }}</td>
+          <td class="small">
+            {% if item.row.attribution_confidence == "high" %}<span class="badge badge--ok">high</span>
+            {% elif item.row.attribution_confidence == "medium" %}<span class="badge badge--warn">medium</span>
+            {% else %}<span class="badge badge--ghost">low</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    <strong>× normal</strong> is the median move as a multiple of an ordinary
+    window — 1.0 is a typical hour. <strong>Floor</strong> is the smallest effect
+    this many observations could have resolved, so a non-significant row reads
+    as “no effect larger than this”, not “no effect”. <strong>Attribution</strong>
+    degrades with horizon because the event's contribution is roughly fixed
+    while noise grows with the square root of time. Below {{ min_n }}
+    observations no coefficient is reported at all.
+  </div>
+</section>
+
+<section class="card" style="margin-top:16px;">
+  <h3>How to read this</h3>
+  <dl class="kv" style="margin-top:10px;">
+    <dt><span class="badge badge--ghost">ESTIMATE</span></dt>
+    <dd class="small muted">Every number here is measured from this sample. It is
+      not a constant of nature and it is not a forecast.</dd>
+    <dt><span class="badge badge--warn">ASSOCIATION</span></dt>
+    <dd class="small muted">The tool observes what follows a release under
+      controls. It cannot rule out common drivers or unobserved news, so the
+      honest claim is association, never causation.</dd>
+    <dt><span class="badge badge--warn">NOT SEPARABLE</span></dt>
+    <dd class="small muted">Releases sharing a timestamp cannot be told apart —
+      payrolls, the unemployment rate and average hourly earnings land together,
+      so this measures the whole report, not one number in it.</dd>
+    <dt><span class="badge badge--ghost">RESOLUTION</span></dt>
+    <dd class="small muted">Measured on {{ engine_version }} against hourly bars,
+      so rungs shorter than an hour are absent rather than interpolated.</dd>
+  </dl>
+</section>
+{% endif %}
+{% endblock %}

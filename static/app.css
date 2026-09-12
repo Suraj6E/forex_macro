@@ -326,6 +326,12 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 11
 .chart .axis { font-size: 10px; fill: var(--faint); font-family: var(--mono); }
 .chart .bar { fill: var(--series-1); }
 .chart .bar-dim { fill: var(--neg); }
+/* Hollow = not distinguishable from zero. Significance is carried by fill and
+   by the asterisk under the axis, never by colour alone. */
+.chart .bar-hollow { fill: none; stroke: var(--mark-2); stroke-width: 1.25; stroke-dasharray: 3 2; }
+.chart .errbar { stroke: var(--muted); stroke-width: 1.25; }
+.chart .baseline-rule { stroke: var(--text); stroke-width: 1.5; stroke-dasharray: 5 3; }
+.chart .dot--event { fill: var(--series-1); fill-opacity: .55; }
 .chart .bar-empty { fill: var(--mark-2); opacity: .5; }
 .chart .track { fill: var(--track); }
 .chart .rule { stroke: var(--border); stroke-width: 1; }
@@ -351,6 +357,17 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 11
   padding: 8px 12px 0;
 }
 @media (max-width: 900px) { .pricechart { height: 340px; } }
+
+/* The answer, before the evidence. */
+.verdict { border-left: 3px solid var(--accent); }
+.verdict__h {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: .09em;
+  color: var(--faint); margin: 0 0 10px;
+}
+.verdict__p { font-size: 15.5px; line-height: 1.6; margin: 0 0 10px; max-width: 82ch; }
+.verdict__p strong { color: var(--accent); font-weight: 650; }
+:root[data-theme="light"] .verdict__p strong { color: #1c5cab; }
+.verdict__meta { font-size: 11.5px; color: var(--faint); margin: 12px 0 0; }
 
 .pickerbar {
   display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap;

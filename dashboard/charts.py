@@ -420,6 +420,296 @@ def surprise(points, *, width: int = 760, height: int = 190,
     return mark_safe("".join(parts))
 
 
+def decay(points, *, width: int = 780, height: int = 300,
+          empty: str = "No curve computed yet."):
+    """The decay curve — planning.md §6.2, the deliverable.
+
+    Excess movement against horizon, as bars about a zero line. Position
+    carries the sign; a significant bar is filled and an insignificant one is
+    hollow, so significance never rests on colour alone. Error bars show the
+    standard error, because §6.6 wants the uncertainty visible beside the
+    estimate rather than implied by a p-value elsewhere.
+    """
+    points = list(points)
+    if not points:
+        return empty_chart(empty)
+
+    pad_left, pad_right, pad_top, pad_bottom = 66, 16, 22, 40
+    plot_w = width - pad_left - pad_right
+    plot_h = height - pad_top - pad_bottom
+
+    values = []
+    for p in points:
+        if p["value"] is None:
+            continue
+        values.append(p["value"])
+        if p.get("error"):
+            values.extend([p["value"] + p["error"], p["value"] - p["error"]])
+    if not values:
+        return empty_chart(empty)
+
+    ticks = _nice_ticks(min(values + [0.0]), max(values + [0.0]))
+    low, high = min(ticks + values + [0.0]), max(ticks + values + [0.0])
+    span = (high - low) or 1.0
+
+    slot = plot_w / len(points)
+    bar_w = max(slot * 0.5, 3)
+
+    def y_at(value: float) -> float:
+        return pad_top + plot_h - ((value - low) / span) * plot_h
+
+    parts = [
+        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
+        f'preserveAspectRatio="xMinYMin meet">'
+    ]
+    for tick in ticks:
+        y = y_at(tick)
+        if not (pad_top - 1 <= y <= pad_top + plot_h + 1):
+            continue
+        parts.append(
+            f'<line class="grid" x1="{pad_left}" y1="{y:.1f}" '
+            f'x2="{width - pad_right}" y2="{y:.1f}"/>'
+        )
+        parts.append(
+            f'<text class="axis" x="{pad_left - 8}" y="{y + 3.5:.1f}" text-anchor="end">'
+            f"{_esc(f'{tick * 100:.2f}')}</text>"
+        )
+
+    zero_y = y_at(0.0)
+    for index, point in enumerate(points):
+        x = pad_left + index * slot + (slot - bar_w) / 2
+        centre = pad_left + index * slot + slot / 2
+
+        parts.append("<g>")
+        title = f"{point['horizon']}  n={point.get('n', 0)}"
+        if point["value"] is not None:
+            title += f"  excess {point['value'] * 100:+.3f}%"
+        if point.get("p") is not None:
+            title += f"  p={point['p']:.4f}"
+        if point.get("gated"):
+            title += "  — below the minimum-n gate, no coefficient reported"
+        parts.append(f"<title>{_esc(title)}</title>")
+
+        if point["value"] is not None:
+            y = y_at(point["value"])
+            top, bottom = min(y, zero_y), max(y, zero_y)
+            cls = "bar" if point.get("significant") else "bar-hollow"
+            parts.append(
+                f'<rect class="{cls}" x="{x:.1f}" y="{top:.1f}" '
+                f'width="{bar_w:.1f}" height="{max(bottom - top, 1):.1f}"/>'
+            )
+            if point.get("error"):
+                hi, lo = y_at(point["value"] + point["error"]), y_at(point["value"] - point["error"])
+                parts.append(
+                    f'<line class="errbar" x1="{centre:.1f}" y1="{hi:.1f}" '
+                    f'x2="{centre:.1f}" y2="{lo:.1f}"/>'
+                )
+                for edge in (hi, lo):
+                    parts.append(
+                        f'<line class="errbar" x1="{centre - 4:.1f}" y1="{edge:.1f}" '
+                        f'x2="{centre + 4:.1f}" y2="{edge:.1f}"/>'
+                    )
+        else:
+            parts.append(
+                f'<text class="axis" x="{centre:.1f}" y="{zero_y - 6:.1f}" '
+                f'text-anchor="middle">n/a</text>'
+            )
+
+        parts.append(
+            f'<text class="axis" x="{centre:.1f}" y="{height - 22}" '
+            f'text-anchor="middle">{_esc(point["horizon"])}</text>'
+        )
+        if point.get("significant"):
+            parts.append(
+                f'<text class="val" x="{centre:.1f}" y="{height - 10}" '
+                f'text-anchor="middle">*</text>'
+            )
+        parts.append("</g>")
+
+    parts.append(
+        f'<line class="zero" x1="{pad_left}" y1="{zero_y:.1f}" '
+        f'x2="{width - pad_right}" y2="{zero_y:.1f}"/>'
+    )
+    parts.append(
+        f'<text class="axis" x="4" y="{pad_top - 8}">excess move, % of price</text>'
+    )
+    parts.append("</svg>")
+    return mark_safe("".join(parts))
+
+
+def ratio(points, *, width: int = 780, height: int = 300, baseline: float = 1.0,
+          empty: str = "Nothing measured yet."):
+    """Movement as a multiple of normal, against a baseline of 1.0.
+
+    This is the readable form of the decay curve. Plotting "excess movement"
+    puts negative bars below zero at horizons where the market goes *quiet*,
+    which reads as "price fell" — it does not; it means price moved less than
+    it usually does. Anchoring at 1.0 removes that ambiguity: above the line is
+    more movement than normal, below it is less, and the direction of price
+    never enters into it.
+    """
+    points = [p for p in points if p.get("ratio") is not None]
+    if not points:
+        return empty_chart(empty)
+
+    pad_left, pad_right, pad_top, pad_bottom = 54, 16, 24, 42
+    plot_w = width - pad_left - pad_right
+    plot_h = height - pad_top - pad_bottom
+
+    values = [p["ratio"] for p in points] + [baseline]
+    low = min(min(values) * 0.9, baseline * 0.85)
+    high = max(max(values) * 1.05, baseline * 1.15)
+    span = (high - low) or 1.0
+
+    slot = plot_w / len(points)
+    bar_w = max(slot * 0.52, 3)
+
+    def y_at(value: float) -> float:
+        return pad_top + plot_h - ((value - low) / span) * plot_h
+
+    parts = [
+        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
+        f'preserveAspectRatio="xMinYMin meet">'
+    ]
+    for tick in _nice_ticks(low, high, 4):
+        if not (low <= tick <= high):
+            continue
+        y = y_at(tick)
+        parts.append(
+            f'<line class="grid" x1="{pad_left}" y1="{y:.1f}" '
+            f'x2="{width - pad_right}" y2="{y:.1f}"/>'
+        )
+        parts.append(
+            f'<text class="axis" x="{pad_left - 8}" y="{y + 3.5:.1f}" '
+            f'text-anchor="end">{_esc(f"{tick:.2f}")}×</text>'
+        )
+
+    base_y = y_at(baseline)
+    for index, point in enumerate(points):
+        x = pad_left + index * slot + (slot - bar_w) / 2
+        centre = pad_left + index * slot + slot / 2
+        y = y_at(point["ratio"])
+        top, bottom = min(y, base_y), max(y, base_y)
+        cls = "bar" if point.get("significant") else "bar-hollow"
+
+        parts.append("<g>")
+        louder = point["ratio"] >= baseline
+        parts.append(
+            f"<title>{_esc(point['horizon'])}: moves "
+            f"{_esc(f'{point['ratio']:.2f}')}× a normal window — "
+            f"{'more' if louder else 'less'} than usual"
+            f"{'' if point.get('significant') else ' (not distinguishable from normal)'}"
+            f"  n={point.get('n', 0)}</title>"
+        )
+        parts.append(
+            f'<rect class="{cls}" x="{x:.1f}" y="{top:.1f}" width="{bar_w:.1f}" '
+            f'height="{max(bottom - top, 1):.1f}"/>'
+        )
+        parts.append(
+            f'<text class="val" x="{centre:.1f}" '
+            f'y="{(top - 6) if louder else (bottom + 13):.1f}" text-anchor="middle">'
+            f"{_esc(f'{point['ratio']:.2f}')}×</text>"
+        )
+        parts.append(
+            f'<text class="axis" x="{centre:.1f}" y="{height - 22}" '
+            f'text-anchor="middle">{_esc(point["horizon"])}</text>'
+        )
+        parts.append("</g>")
+
+    parts.append(
+        f'<line class="baseline-rule" x1="{pad_left}" y1="{base_y:.1f}" '
+        f'x2="{width - pad_right}" y2="{base_y:.1f}"/>'
+    )
+    parts.append(
+        f'<text class="axis" x="{width - pad_right}" y="{base_y - 6:.1f}" '
+        f'text-anchor="end">normal</text>'
+    )
+    parts.append(
+        f'<text class="axis" x="4" y="{pad_top - 10}">movement vs a typical window</text>'
+    )
+    parts.append("</svg>")
+    return mark_safe("".join(parts))
+
+
+def dots(points, *, width: int = 780, height: int = 240, reference: float | None = None,
+         reference_label: str = "normal", empty: str = "No individual events to show."):
+    """One dot per event over time — the raw scatter behind an average.
+
+    §6.6 asks for the scatter when n is thin; it is worth showing when n is
+    healthy too, because an average hides whether an effect is steady or driven
+    by a handful of crises.
+    """
+    points = [(w, v) for w, v in points if v is not None]
+    if not points:
+        return empty_chart(empty)
+
+    pad_left, pad_right, pad_top, pad_bottom = 56, 14, 16, 26
+    plot_w = width - pad_left - pad_right
+    plot_h = height - pad_top - pad_bottom
+
+    values = [v for _, v in points] + ([reference] if reference else [])
+    high = max(values) * 1.05
+    low = 0.0
+    span = (high - low) or 1.0
+
+    stamps = [w for w, _ in points]
+    first, last = min(stamps), max(stamps)
+    total = max((last - first).total_seconds(), 1)
+
+    def x_at(when) -> float:
+        return pad_left + ((when - first).total_seconds() / total) * plot_w
+
+    def y_at(value: float) -> float:
+        return pad_top + plot_h - ((value - low) / span) * plot_h
+
+    parts = [
+        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
+        f'preserveAspectRatio="xMinYMin meet">'
+    ]
+    for tick in _nice_ticks(low, high, 3):
+        if not (low <= tick <= high):
+            continue
+        y = y_at(tick)
+        parts.append(
+            f'<line class="grid" x1="{pad_left}" y1="{y:.1f}" '
+            f'x2="{width - pad_right}" y2="{y:.1f}"/>'
+        )
+        parts.append(
+            f'<text class="axis" x="{pad_left - 8}" y="{y + 3.5:.1f}" '
+            f'text-anchor="end">{_esc(compact(tick))}</text>'
+        )
+
+    if reference:
+        y = y_at(reference)
+        parts.append(
+            f'<line class="baseline-rule" x1="{pad_left}" y1="{y:.1f}" '
+            f'x2="{width - pad_right}" y2="{y:.1f}"/>'
+        )
+        parts.append(
+            f'<text class="axis" x="{width - pad_right}" y="{y - 5:.1f}" '
+            f'text-anchor="end">{_esc(reference_label)}</text>'
+        )
+
+    for when, value in points:
+        parts.append(
+            f'<circle class="dot dot--event" cx="{x_at(when):.1f}" cy="{y_at(value):.1f}" r="2.5">'
+            f"<title>{_esc(f'{when:%Y-%m-%d}')}: {_esc(compact(value))}</title></circle>"
+        )
+
+    baseline_y = pad_top + plot_h
+    parts.append(
+        f'<line class="rule" x1="{pad_left}" y1="{baseline_y}" '
+        f'x2="{width - pad_right}" y2="{baseline_y}"/>'
+    )
+    parts.append(f'<text class="axis" x="{pad_left}" y="{height - 8}">{first:%Y}</text>')
+    parts.append(
+        f'<text class="axis" x="{width - pad_right}" y="{height - 8}" '
+        f'text-anchor="end">{last:%Y}</text>'
+    )
+    parts.append("</svg>")
+    return mark_safe("".join(parts))
+
+
 def sparkline(values, *, width: int = 104, height: int = 26):
     """Shape only — no axes, no labels. Used inside table rows."""
     values = [float(v) for v in values if v is not None]

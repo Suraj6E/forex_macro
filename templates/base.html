@@ -66,9 +66,10 @@
 
     <div class="navgroup">
       <div class="navgroup__title">Analysis</div>
-      <a class="navlink {% if nav == 'studies' %}is-active{% endif %}" href="{% url 'studies:index' %}">
-        Studies <span class="navlink__count">planned</span>
+      <a class="navlink {% if nav == 'studies' %}is-active{% endif %}" href="{% url 'studies:event_study' %}">
+        Event study <span class="navlink__count">curve</span>
       </a>
+      <a class="navlink" href="{% url 'studies:index' %}">Study engine</a>
     </div>
 
     <div class="sidebar__foot">
