@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from django.contrib import messages
 from django.db.models import Count, Max, Q
-from django.http import HttpResponseNotAllowed
+from django.http import HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 
 from analytics.horizons import LADDER, WindowScheme
@@ -17,6 +17,7 @@ from calendar_data.models import Indicator
 from dashboard import charts
 from prices.models import Instrument
 from sources import jobs
+from sources.models import Job, JobStatus
 from studies import engine
 from studies.models import (
     DecayCurve,
@@ -89,6 +90,19 @@ def event_study(request):
 
     curve_rows, points, headline, rows = [], [], None, []
     scatter, scatter_horizon, scatter_normal = [], None, None
+    stored_version = None
+    pending = None
+
+    # Changing the dropdown should just show the answer. When there is no
+    # stored curve the answer has to be computed first, so start it here and
+    # let the page report progress — rather than making the reader press a
+    # button whose only purpose is to say "yes, I meant it".
+    if indicator and instrument:
+        pending = _pending_job(indicator.pk, instrument.pk)
+        if pending is None and not _has_curve(indicator.pk, instrument.pk):
+            pending = jobs.enqueue(
+                "run_study", indicator_id=indicator.pk, instrument_id=instrument.pk
+            )
 
     if indicator and instrument:
         curve_rows = engine.curve_for(indicator.pk, instrument.pk)
@@ -119,6 +133,7 @@ def event_study(request):
             })
 
         headline = engine.summarise_curve(curve_rows, pip)
+        stored_version = curve_rows[0].engine_version if curve_rows else None
 
         peak = headline.get("peak")
         if peak is not None:
@@ -156,28 +171,70 @@ def event_study(request):
             "scatter_normal": scatter_normal,
             "scatter_n": len(scatter),
             "headline": headline,
+            "pending": pending,
             "engine_version": engine.ENGINE_VERSION,
+            "stored_version": stored_version,
+            "stale": bool(stored_version and stored_version != engine.ENGINE_VERSION),
             "min_n": engine.MIN_N,
         },
     )
 
 
+def _has_curve(indicator_id: int, instrument_id: int) -> bool:
+    return DecayCurve.objects.filter(
+        indicator_id=indicator_id, instrument_id=instrument_id
+    ).exists()
+
+
+def _pending_job(indicator_id: int, instrument_id: int):
+    """An in-flight measurement for this pairing, if any.
+
+    Checked before enqueueing so a reload — or a second tab — does not stack
+    duplicate multi-minute jobs onto the queue.
+    """
+    return (
+        Job.objects.filter(
+            kind="run_study",
+            status__in=[JobStatus.QUEUED, JobStatus.RUNNING],
+            params_json__indicator_id=indicator_id,
+            params_json__instrument_id=instrument_id,
+        )
+        .order_by("-id")
+        .first()
+    )
+
+
+def status(request):
+    """Progress of a measurement, polled by the page while it runs."""
+    job = get_object_or_404(Job, pk=request.GET.get("job"))
+    return JsonResponse(
+        {
+            "status": job.status,
+            "percent": job.progress_percent,
+            "message": job.message or "",
+            "done": job.status == JobStatus.SUCCESS,
+            "failed": job.status in (JobStatus.FAILED, JobStatus.CANCELLED),
+            "error": (job.error_text or "").strip().splitlines()[-1:] and
+                     (job.error_text or "").strip().splitlines()[-1][:200] or "",
+        }
+    )
+
+
 def run(request):
+    """Kept for an explicit re-measure of a curve that already exists."""
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
     indicator = get_object_or_404(Indicator, pk=request.POST.get("indicator"))
     instrument = get_object_or_404(Instrument, pk=request.POST.get("instrument"))
 
-    job = jobs.enqueue(
-        "run_study", indicator_id=indicator.pk, instrument_id=instrument.pk
-    )
-    messages.success(
-        request,
-        f"Measuring {indicator.currency} {indicator.name} against "
-        f"{instrument.symbol} — job #{job.pk}. This reads every release and "
-        f"its surrounding weeks, so it takes a minute.",
-    )
+    existing = _pending_job(indicator.pk, instrument.pk)
+    if existing is None:
+        jobs.enqueue(
+            "run_study", indicator_id=indicator.pk, instrument_id=instrument.pk
+        )
+    else:
+        messages.success(request, "Already measuring — showing progress.")
     return redirect(
         f"/studies/event-study/?indicator={indicator.pk}&instrument={instrument.pk}"
     )

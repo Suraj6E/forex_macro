@@ -162,6 +162,53 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(n, 12)
         self.assertGreater(abs_mean, 0.0)
 
+    def test_baseline_skips_windows_holding_the_same_event(self):
+        # A weekly release recurs at the same weekday and hour, so every
+        # look-back lands on a previous instance of itself. Measured on the
+        # real data that was 69% of windows for Natural Gas Storage, and the
+        # event ends up compared against itself.
+        bars = flat_bars()
+        weekly = [T0 - timedelta(weeks=w) for w in range(0, 30)]
+
+        contaminated = eventstudy._window_contains(
+            sorted(weekly), T0 - timedelta(weeks=1), Horizon("+1h", 3600)
+        )
+        self.assertTrue(contaminated, "a weekly look-back hits the event itself")
+
+        _mean, _sd, _abs, n = eventstudy.matched_baseline(
+            bars, T0, Horizon("+1h", 3600), weeks=6, exclude=weekly
+        )
+        self.assertEqual(n, 0, "every weekly window is excluded, so none qualify")
+
+    def test_baseline_walks_further_back_to_find_clean_windows(self):
+        # Monthly events contaminate roughly one window in four; the search
+        # should step past those rather than return a short sample.
+        bars = flat_bars()
+        monthly = [T0 - timedelta(weeks=4 * m) for m in range(0, 12)]
+        _mean, _sd, _abs, n = eventstudy.matched_baseline(
+            bars, T0, Horizon("+1h", 3600), weeks=6, exclude=monthly
+        )
+        self.assertEqual(n, 6, "still collects a full sample from clean weeks")
+
+    def test_exclusion_is_off_by_default(self):
+        bars = flat_bars()
+        _mean, _sd, _abs, n = eventstudy.matched_baseline(
+            bars, T0, Horizon("+1h", 3600), weeks=8
+        )
+        self.assertEqual(n, 8)
+
+    def test_window_containment_respects_the_horizon_span(self):
+        probe = T0 - timedelta(weeks=1)
+        # A release three hours after the probe is inside a +4h window...
+        inside = [probe + timedelta(hours=3)]
+        self.assertTrue(
+            eventstudy._window_contains(inside, probe, Horizon("+4h", 4 * 3600))
+        )
+        # ...but outside a +1h one.
+        self.assertFalse(
+            eventstudy._window_contains(inside, probe, Horizon("+1h", 3600))
+        )
+
     def test_too_few_matched_samples_gives_no_baseline(self):
         bars = flat_bars(hours=40)     # not enough history to look back weeks
         mean, sd, abs_mean, n = eventstudy.matched_baseline(

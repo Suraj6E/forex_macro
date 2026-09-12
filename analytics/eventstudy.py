@@ -22,6 +22,7 @@ Parquet files the UI reads.
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -210,18 +211,38 @@ def measure_window(bars: pd.DataFrame, t0: datetime, horizon: Horizon,
 
 
 def matched_baseline(
-    bars: pd.DataFrame, t0: datetime, horizon: Horizon, weeks: int = BASELINE_WEEKS
+    bars: pd.DataFrame,
+    t0: datetime,
+    horizon: Horizon,
+    weeks: int = BASELINE_WEEKS,
+    exclude: list[datetime] | None = None,
+    max_lookback_weeks: int | None = None,
 ) -> tuple[float | None, float | None, float | None, int]:
     """What this pair normally does at this weekday and hour.
 
     §6.1 specifies matched weekday-and-hour periods over the prior N weeks. The
     match matters: FX has a strong intraday and intraweek shape, so comparing a
     Friday 12:30 move against an all-hours average would attribute the ordinary
-    London-New York overlap to the release.
+    London–New York overlap to the release.
+
+    **`exclude` is what stops the comparison being circular.** A weekly release
+    recurs on the same weekday at the same hour, so every look-back lands on a
+    previous instance of the event itself — measured on the real data, 69% of
+    Natural Gas Storage baseline windows contained another Natural Gas Storage
+    release. The event is then compared against itself and the ratio collapses
+    to 1 by construction. Passing the indicator's own release times here skips
+    those windows and keeps walking back until enough clean ones are found.
     """
+    excluded = sorted(exclude or [])
+    ceiling = max_lookback_weeks or weeks * 4
+
     samples = []
-    for week in range(1, weeks + 1):
+    week = 1
+    while len(samples) < weeks and week <= ceiling:
         moment = t0 - timedelta(weeks=week)
+        week += 1
+        if _window_contains(excluded, moment, horizon):
+            continue
         value = raw_return(bars, moment, horizon)
         if value is not None and math.isfinite(value):
             samples.append(value)
@@ -240,12 +261,23 @@ def matched_baseline(
     )
 
 
+def _window_contains(excluded: list[datetime], moment: datetime, horizon: Horizon) -> bool:
+    """Does this candidate baseline window hold an excluded release?"""
+    if not excluded:
+        return False
+    start = min(moment, moment + timedelta(seconds=horizon.seconds))
+    end = max(moment, moment + timedelta(seconds=horizon.seconds))
+    index = bisect_left(excluded, start)
+    return index < len(excluded) and excluded[index] <= end
+
+
 def measure_event(
     bars: pd.DataFrame,
     t0: datetime,
     horizons=None,
     *,
     baseline_weeks: int = BASELINE_WEEKS,
+    exclude: list[datetime] | None = None,
 ) -> list[WindowMeasurement]:
     """One release against one instrument, across the whole ladder."""
     bars = _price_frame(bars)
@@ -259,7 +291,9 @@ def measure_event(
     for horizon in rungs:
         measurement = measure_window(bars, t0, horizon, bar_seconds)
         if measurement.usable:
-            mean, sd, abs_mean, n = matched_baseline(bars, t0, horizon, baseline_weeks)
+            mean, sd, abs_mean, n = matched_baseline(
+                bars, t0, horizon, baseline_weeks, exclude=exclude
+            )
             measurement.baseline_mean = mean
             measurement.baseline_sd = sd
             measurement.baseline_abs_mean = abs_mean

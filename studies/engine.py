@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 #: Bumped whenever the measurement changes, so a methodology change
 #: invalidates the cache instead of mixing generations (§9).
-ENGINE_VERSION = "es-1"
+#:
+#: es-2 — the matched baseline now skips look-back windows containing another
+#: release of the same indicator. Without it a weekly release is compared
+#: against itself and its measured effect collapses to ~1× by construction.
+ENGINE_VERSION = "es-2"
 
 PRICE_SOURCE = "dukascopy"
 
@@ -133,11 +137,17 @@ def run_study(
         result.notes = f"No {timeframe} bars cover these releases."
         return result
 
+    # Every release of this indicator, so the baseline never looks back at the
+    # event it is supposed to be a control for.
+    own_releases = [r.release_time_utc for r in releases]
+
     measurements_by_event = []
     rows: list[EventImpact] = []
 
     for index, release in enumerate(releases, start=1):
-        per_event = eventstudy.measure_event(bars, release.release_time_utc, horizons)
+        per_event = eventstudy.measure_event(
+            bars, release.release_time_utc, horizons, exclude=own_releases
+        )
         usable = [m for m in per_event if m.usable]
         if not usable:
             result.skipped_no_price += 1
@@ -334,13 +344,26 @@ def event_scatter(indicator_id: int, instrument_id: int, horizon: str, pip: floa
 
 
 def curve_for(indicator_id: int, instrument_id: int) -> list[DecayCurve]:
+    """The newest curve stored for this pairing, whatever engine made it.
+
+    Filtering strictly on the current version would make every previously
+    measured study disappear the moment the method changes — silently, which
+    is worse than showing an older result and labelling it. The page reports
+    which engine produced the curve and flags it when it is not the current
+    one; §9's cache-invalidation intent is served by the label, not by hiding
+    the work.
+    """
     from analytics.horizons import BY_LABEL
 
-    rows = list(
-        DecayCurve.objects.filter(
-            indicator_id=indicator_id,
-            instrument_id=instrument_id,
-            engine_version=ENGINE_VERSION,
-        )
+    stored = DecayCurve.objects.filter(
+        indicator_id=indicator_id, instrument_id=instrument_id
     )
-    return sorted(rows, key=lambda r: BY_LABEL[r.horizon].seconds if r.horizon in BY_LABEL else 0)
+    versions = set(stored.values_list("engine_version", flat=True))
+    if not versions:
+        return []
+    chosen = ENGINE_VERSION if ENGINE_VERSION in versions else max(versions)
+
+    rows = list(stored.filter(engine_version=chosen))
+    return sorted(
+        rows, key=lambda r: BY_LABEL[r.horizon].seconds if r.horizon in BY_LABEL else 0
+    )

@@ -18,11 +18,10 @@
   </div>
 </div>
 
-<form class="filters" method="post" action="{% url 'studies:run' %}">
-  {% csrf_token %}
+<form class="filters" method="get" id="pick">
   <label class="field" style="flex:1 1 360px;">
     <span>Indicator</span>
-    <select name="indicator" required>
+    <select name="indicator" onchange="this.form.submit()">
       <option value="">— pick a release —</option>
       {% for id, currency, name, n in indicators %}
         <option value="{{ id }}" {% if indicator and id == indicator.pk %}selected{% endif %}>
@@ -33,26 +32,81 @@
   </label>
   <label class="field">
     <span>Pair</span>
-    <select name="instrument" required>
+    <select name="instrument" onchange="this.form.submit()">
       {% for i in instruments %}
         <option value="{{ i.pk }}" {% if instrument and i.pk == instrument.pk %}selected{% endif %}>{{ i.symbol }}</option>
       {% endfor %}
     </select>
   </label>
-  <button class="btn btn--primary" type="submit">Measure</button>
-  <span class="tiny faint">Reads every release and its prior twelve weeks; takes about a minute.</span>
+  <span class="tiny faint" style="margin-left:auto;">
+    Unmeasured pairings start measuring as soon as you pick them.
+  </span>
 </form>
 
+{% if pending %}
+  <section class="card" id="measuring" data-job="{{ pending.pk }}">
+    <h3>Measuring {{ indicator.currency }} {{ indicator.name }} × {{ instrument.symbol }}</h3>
+    <p class="prose" style="margin:8px 0 12px;">
+      Reading every release and the twelve weeks before each one. A monthly
+      indicator takes under a minute; a weekly one with a thousand releases
+      takes a few. This page updates itself — you can leave it.
+    </p>
+    <div class="meter" style="max-width:100%;">
+      <div class="meter__fill" id="measure-bar" style="width: {{ pending.progress_percent }}%"></div>
+    </div>
+    <p class="tiny faint" style="margin:8px 0 0;" id="measure-msg">
+      {{ pending.message|default:"queued" }}
+    </p>
+  </section>
+  <script>
+  (function () {
+    var card = document.getElementById("measuring");
+    var bar = document.getElementById("measure-bar");
+    var msg = document.getElementById("measure-msg");
+    var url = "{% url 'studies:status' %}?job=" + card.dataset.job;
+
+    (function poll() {
+      fetch(url).then(function (r) { return r.json(); }).then(function (d) {
+        bar.style.width = d.percent + "%";
+        msg.textContent = d.message || d.status;
+        if (d.done) { location.reload(); return; }
+        if (d.failed) {
+          msg.textContent = "Measurement failed: " + (d.error || d.status);
+          msg.style.color = "var(--err)";
+          return;
+        }
+        setTimeout(poll, 2500);
+      }).catch(function () { setTimeout(poll, 5000); });
+    })();
+  })();
+  </script>
+{% endif %}
+
 {% if not curve %}
+  {% if not pending %}
   <section class="card">
     <div class="empty">
-      <div class="empty__t">
-        {% if indicator %}Nothing measured yet for this pairing.{% else %}Pick an indicator and a pair.{% endif %}
-      </div>
-      <p class="tiny">Press <strong>Measure</strong> — results appear here when the job finishes.</p>
+      <div class="empty__t">Pick an indicator and a pair.</div>
+      <p class="tiny">The measurement starts on its own and the curve appears here.</p>
     </div>
   </section>
+  {% endif %}
 {% else %}
+
+{% if stale and not pending %}
+<div class="msg msg--warning">
+  <strong>Measured with an older method ({{ stored_version }}).</strong>
+  The current engine is {{ engine_version }}, which excludes baseline windows
+  containing another release of this same indicator — without that, a recurring
+  release is compared against itself.
+  <form method="post" action="{% url 'studies:run' %}" style="display:inline; margin-left:8px;">
+    {% csrf_token %}
+    <input type="hidden" name="indicator" value="{{ indicator.pk }}">
+    <input type="hidden" name="instrument" value="{{ instrument.pk }}">
+    <button class="btn btn--sm" type="submit">Re-measure</button>
+  </form>
+</div>
+{% endif %}
 
 <section class="card verdict">
   <h3 class="verdict__h">In plain terms</h3>
