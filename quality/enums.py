@@ -38,11 +38,22 @@ class CrossSource(models.TextChoices):
 
 class VolCheck(models.TextChoices):
     """§4.1 validation rule: does a volatility spike sit where the stored
-    timestamp claims?  This is how we find our own bugs."""
+    timestamp claims?  This is how we find our own bugs.
+
+    `confirmed` and `confirmed_hour` are graded by different checks and are not
+    interchangeable.  The stored price backbone is hourly, so what P2 can
+    establish is that the spike landed in the release's own *hour* — enough to
+    catch a DST or source-clock error, which displaces a release by a whole hour
+    or more.  `confirmed` stays reserved for the ±2-minute check, which needs
+    the M1 event windows and cannot be awarded by an hourly scan.
+    """
 
     CONFIRMED = "confirmed", "confirmed — spike within ±2 minutes"
+    CONFIRMED_HOUR = "confirmed_hour", "confirmed at hour resolution — spike in the stored hour"
     OFFSET = "offset", "offset — spike found, but not where the timestamp says"
     NO_SPIKE = "no_spike", "no spike — nothing measurable happened here"
+    CONFOUNDED = "confounded", "confounded — the nearby spike belongs to a bigger release"
+    UNCHECKABLE = "uncheckable", "uncheckable — no bars, or no usable normal to compare against"
     NOT_CHECKED = "not_checked", "not checked"
 
 

@@ -19,7 +19,12 @@ from django.utils import timezone
 from analytics import eventstudy
 from analytics.horizons import LADDER, WindowScheme
 from calendar_data.models import EventRelease, Indicator
-from prices.models import TIMEFRAME_SECONDS, Instrument, PriceCoverage
+from prices.models import (
+    DEFAULT_PRICE_SOURCE,
+    TIMEFRAME_SECONDS,
+    Instrument,
+    PriceCoverage,
+)
 from prices.store import read_range
 from studies.models import AttributionConfidence, DecayCurve, EventImpact, Mode
 
@@ -33,7 +38,7 @@ logger = logging.getLogger(__name__)
 #: against itself and its measured effect collapses to ~1× by construction.
 ENGINE_VERSION = "es-2"
 
-PRICE_SOURCE = "dukascopy"
+PRICE_SOURCE = DEFAULT_PRICE_SOURCE
 
 #: Below this, §6.6's minimum-n gate applies: no coefficient is reported.
 MIN_N = 20

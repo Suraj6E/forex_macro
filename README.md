@@ -4,17 +4,56 @@ A local, single-user testbed for measuring what FX majors do around
 macroeconomic releases. Design and reasoning live in [`planning.md`](planning.md);
 this file is just how to run it.
 
-**Status: P0 complete, calendar loaded.** Django project, the §9 data model,
-the job runner, the full screen set, six collectors, and the Parquet price
-store. Nothing is *measured* yet — the event study is P1.
+**Status: P1 complete, P2 validation harness in.** Django project, the §9 data
+model, the job runner, the full screen set, six collectors, the Parquet price
+store, the event study across the horizon ladder, and — new — the check that
+asks price whether our release timestamps are where we think they are.
 
-**The calendar is loaded: 86,450 releases, Jan 2007 → today, every one with a
-timestamp.** 66,186 carry an actual, 56,111 a forecast, 26,090 a revised
-previous. Source: the ForexFactory calendar pages. Verified against known
+**The calendar is loaded: 86,450 releases, Jan 2007 → today.** 66,186 carry an
+exact release time and an actual; 56,111 a forecast, 26,090 a revised previous.
+The other 20,264 are bank holidays, bond auctions, speeches and other all-day or
+tentative entries that carry a scheduled time but no instant — they can be read,
+but nothing can be anchored to them. Source: the ForexFactory calendar pages.
+Verified against known
 history — Nov 2008 payrolls read −533K, Apr 2020 read −20,537K, Aug 2024 read
 142K — and the release times track US daylight saving correctly (08:30 New
 York is 13:30 UTC in winter, 12:30 in summer, and only those two values
-appear). No price data yet.
+appear).
+
+**Prices: hourly bars for all seven majors, Jan 2007 → Aug 2026**, from
+Dukascopy, in the Parquet store.
+
+**The timestamps have now been checked against price (§4.1, P2).** All 359
+indicators, 65,495 releases: each one's hour compared against what its pair
+normally does in the same weekday-and-hour slot, scanning ±3 hours around the
+stored instant.
+
+| Verdict | Indicators | |
+|---|---:|---|
+| **aligned** | 259 | the spike lands in the stored hour far more often than chance |
+| **scattered** | 97 | releases spike, but no offset stands out — almost all are weak series |
+| **offset** | 2 | EUR Retail Sales (+1h) and Belgian NBB Business Climate (−3h) |
+| insufficient | 1 | too few readable releases to say anything |
+
+**The clocks are sound.** Federal Funds Rate puts 90% of its spikes in the
+stored hour at 5.0× the normal hourly range; NZD Official Cash Rate 92% at 4.5×;
+payrolls 83% at 2.5× — against the ~14% each hour would get if the release had
+nothing to do with when price moved. The two remaining offsets are low-impact
+series and are worth a human look; everything a study is likely to be anchored
+to reads clean.
+
+Getting there took two corrections to the check itself, both of which the data
+forced:
+
+- A flat "a majority must agree" rule called 48%-on-time-out-of-seven-bins
+  *scattered*. Replaced with a binomial tail against the uniform null.
+- The check then named **39** indicators as systematically offset — and every
+  one had a heavier release sitting in the hour the spike landed in. European
+  morning prints resolved to +3h, which is the 13:30 UTC US cluster; 10:00 New
+  York prints to −2h, which is the 08:30 one. It had found the market's
+  dominant news hour, not our clocks. A bar can no longer win the scan if a
+  release at least as important occupies it, and the sweep is
+  false-discovery-controlled across all 359 tests.
 
 ## Sources
 
@@ -53,7 +92,8 @@ then create a login with `manage.py createsuperuser`.
 | **Overview** | Releases per year, most frequent and busiest high-impact indicators, currency split, column coverage, source contributions. |
 | **Indicators** | Every series with a sparkline of its recent history. Search by name, currency or impact. |
 | **Indicator detail** | **The chart page.** Value over time with the forecast overlaid, plus surprise (actual − forecast) about a zero line. 1Y/5Y/10Y/All ranges. Hover any point for its exact timestamp and value. |
-| **Data quality** | Eleven checks graded blocking / warning / info, each stating what it means and offering the fix. Plus timestamp confidence, forecast provenance, cross-source agreement and the forward-capture log. Deliberately prominent (§10). |
+| **Data quality** | Twelve checks graded blocking / warning / info, each stating what it means and offering the fix. Plus timestamp confidence, forecast provenance, cross-source agreement and the forward-capture log. Deliberately prominent (§10). |
+| **Timestamps** | **The validation harness.** Does a volatility spike land where each stored timestamp claims? Per-indicator verdict, the histogram of where spikes actually landed, a US summer/winter split for daylight-saving bugs, and the individual offset releases with what else shared that hour. |
 | **Duplicates** | Merge indicators that different sources named differently; collapse duplicate releases; purge a source's contributions. Exact name matches can be merged in bulk; similar ones need a human. |
 | **Calendar** | Every release held, filterable, with per-field provenance. |
 | **Event detail** | One release: each field with its supplying source, what every source said verbatim, the revision log, co-timed releases. |
@@ -63,7 +103,8 @@ then create a login with `manage.py createsuperuser`.
 | **Sources** | The register, and every collection button. Each source has a detail page with its editable configuration. |
 | **Run detail** | A sample of the actual rows fetched, plus every raw payload — each one inspectable byte-for-byte or downloadable. |
 | **Jobs & runs** | Every button press, with progress, log and result. |
-| **Studies** | The §6.8 specification and the horizon ladder. Engine lands in P4. |
+| **Event study** | One indicator against one pair across the horizon ladder: the decay curve, the per-release scatter behind it, and how long the effect stays distinguishable. Measured against the pair's own matched weekday-and-hour behaviour. |
+| **Studies** | The §6.8 specification and the horizon ladder. The saved-specification engine lands in P4. |
 
 ## Commands
 
@@ -77,6 +118,7 @@ and for the Task Scheduler entry, not because you are expected to use it.
 | `reparse <source>` | Sources → **Re-parse latest** |
 | `run_job <id> --force` | Job detail → **Run again** (the CLI variant prints the traceback inline instead of storing it) |
 | `prune_history` | Activity → **Clear history** (add `--dry-run` to see what would go) |
+| `vol_check` | Timestamps → **Check these timestamps against price** |
 | `test tests` | — unit tests for the Django-free layer |
 
 Set `FXMACRO_WORKER=0` to keep a command from spawning the background worker.
@@ -91,12 +133,12 @@ calendar_data/   Indicator, IndicatorAlias, ReleaseGroup, EventRelease,
                  SourceObservation, ValueRevision
 prices/          Instrument, PriceCoverage, MarketEvent
 studies/         StudySpec, StudyRun, EventImpact, CurrencyState, DecayCurve
-quality/         the shared quality vocabulary (§5.3)
+quality/         the shared quality vocabulary (§5.3) + the validation harness
 commentary/      Commentary, kept structurally separate from data
 
 collectors/      one module per source — NO Django imports
 normalisers/     per-source → CanonicalEvent, versioned — NO Django imports
-analytics/       horizons, clocks, event study — NO Django imports
+analytics/       horizons, clocks, event study, vol-check — NO Django imports
 consolidation/   merge, field priority, conflict detection
 
 data/raw/        immutable fetched payloads, content-hashed (gitignored)
@@ -120,8 +162,30 @@ Environment: FXMACRO_WORKER=0
 
 Suggested cadence: Sunday before the week opens.
 
-## Known limits at P0
+## Known limits at P2
 
+- **The vol-check resolves the hour, not the minute.** The price backbone is
+  hourly, so the affirmative grade is `confirmed_hour` — the spike landed in the
+  release's own hour. §5.3's ±2-minute grade (`confirmed`) needs M1 windows
+  around each event and stays reserved for that check, so the two are never
+  conflated in the database. The weaker grade still catches every failure that
+  displaces a release by a whole hour or more, which is what a daylight-saving
+  or source-clock bug does.
+- **An offset verdict has two readings and the check cannot separate them.**
+  Either the clock is wrong, or something bigger reliably happens that much
+  later. A bar occupied by a release at least as important is refused outright
+  (`confounded` — 10,592 releases), but the rule only sees what the calendar
+  knows about: a market open, a fixing, or an unlisted press conference is
+  invisible to it. The screen lists what else occupies the winning hour, which
+  is the evidence that settles it; §3.3's confound problem, arriving in the
+  validation harness.
+- **The refusal is deliberately conservative.** A genuine offset whose hour
+  happens to hold a big release is missed rather than reported. A check whose
+  job is finding our own bugs is worthless if it cries wolf, and the histogram
+  still shows the raw picture either way.
+- **A quiet indicator's clock cannot be validated this way at all.** If price
+  does not move when a release lands, price cannot say where it landed. Those
+  read `no_spike` and the verdict says *unverified*, never *correct*.
 - Only `forexfactory_weekly` has a collector. The other nine source rows exist
   in the register with their clocks and policies recorded, awaiting one.
 - The FF feed carries no reporting period, so its rows use a provisional
@@ -141,9 +205,11 @@ Suggested cadence: Sunday before the week opens.
 - **The dataset has one calendar source**, so `cross_source` is structurally
   always `single_source` and the conflict detection of §4.4 has nothing to
   compare. Loading MT5 as a second opinion is what switches it on.
-- No event study yet. P0.5 (source audit) is next: export your MT5 calendar and
-  import it to find out how far back it actually reaches, which decides where
-  surprise-conditioned analysis can start.
+- **Cross-source comparison, the other half of P2, cannot run yet** — with one
+  calendar source there is nothing to compare against. Loading the MT5 export is
+  what switches it on, and is also P0.5's remaining question: how far back does
+  your MT5 calendar actually reach, which decides where surprise-conditioned
+  analysis (Mode B) can start.
 - HistData cannot be downloaded automatically (see the sources table above).
 - Dukascopy throttles sustained sweeps. Unavailable hours are counted and
   reported; re-running the same range is cheap because payloads are

@@ -15,7 +15,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.core.paginator import Paginator
 from django.db.models import Count, Sum
-from django.http import Http404, HttpResponse, HttpResponseNotAllowed
+from django.http import Http404, HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 
 from prices.models import Instrument, PriceCoverage
@@ -313,6 +313,27 @@ def jobs_list(request):
 def jobs_panel(request):
     """Polled fragment. Progress lives in the DB, so a reload never loses it."""
     return render(request, "sources/_jobs.html", {"jobs": Job.objects.all()[:ACTIVE_JOB_LIMIT]})
+
+
+def job_status(request, pk: int):
+    """One job's progress as JSON, for a page that is waiting on it.
+
+    Lives here rather than in whichever app pressed the button: progress is a
+    property of the job table, and a second copy of this in every app would
+    drift.
+    """
+    job = get_object_or_404(Job, pk=pk)
+    last_error = (job.error_text or "").strip().splitlines()
+    return JsonResponse(
+        {
+            "status": job.status,
+            "percent": job.progress_percent,
+            "message": job.message or "",
+            "done": job.status == JobStatus.SUCCESS,
+            "failed": job.status in (JobStatus.FAILED, JobStatus.CANCELLED),
+            "error": last_error[-1][:200] if last_error else "",
+        }
+    )
 
 
 def job_detail(request, pk: int):

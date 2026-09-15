@@ -15,6 +15,7 @@ urlpatterns = [
     path("jobs/prune/", views.prune_history, name="prune_history"),
     path("jobs/panel/", views.jobs_panel, name="jobs_panel"),
     path("jobs/<int:pk>/", views.job_detail, name="job_detail"),
+    path("jobs/<int:pk>/status/", views.job_status, name="job_status"),
     path("jobs/<int:pk>/rerun/", views.rerun_job, name="rerun_job"),
     path("runs/<int:pk>/", views.run_detail, name="run_detail"),
     path("snapshots/<int:pk>/", views.snapshot_raw, name="snapshot"),

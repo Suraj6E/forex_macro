@@ -10,6 +10,10 @@ from django.db import models
 
 from quality.enums import Regime
 
+#: The feed every measurement currently reads. One name, so adding a second
+#: backbone later is a change in one place rather than a grep.
+DEFAULT_PRICE_SOURCE = "dukascopy"
+
 MAJORS = [
     ("EURUSD", "EUR", "USD", "0.0001"),
     ("GBPUSD", "GBP", "USD", "0.0001"),

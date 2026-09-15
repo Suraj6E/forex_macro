@@ -1,0 +1,396 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}Timestamp validation — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Timestamp validation</h1>
+    <p class="page-head__sub">
+      Every number this project produces is anchored to a release timestamp a
+      source handed us, and a timestamp wrong by an hour still yields a decay
+      curve with a significance level attached — wrong, and entirely plausible.
+      The only witness is price itself: if a release matters, the pair that
+      carries its currency moves when it lands. This screen is where price gets
+      to disagree with the calendar.
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <a class="btn btn--ghost" href="{% url 'quality:index' %}">Data quality</a>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat">
+    <span class="stat__k">Graded</span>
+    <span class="stat__v">{{ head.graded|intcomma }}</span>
+    <span class="stat__note">
+      of {{ head.anchorable|intcomma }} timestamped releases
+      ({{ head.graded_share|floatformat:1 }}%)
+    </span>
+  </div>
+  <div class="stat">
+    <span class="stat__k">Spike in the stored hour</span>
+    <span class="stat__v">{{ head.confirmed|intcomma }}</span>
+    <span class="stat__note">
+      {{ head.confirmed_share|floatformat:0 }}% of the {{ head.spiked|intcomma }}
+      releases that moved price at all — chance alone would put
+      {{ chance_share }}% here
+    </span>
+  </div>
+  <div class="stat">
+    <span class="stat__k">Spike somewhere else</span>
+    <span class="stat__v">{{ head.offset|intcomma }}</span>
+    <span class="stat__note">
+      the hour next door or further out; mostly weak releases whose
+      neighbourhood maximum fell where it liked
+    </span>
+  </div>
+  <div class="stat">
+    <span class="stat__k">No spike</span>
+    <span class="stat__v">{{ head.no_spike|intcomma }}</span>
+    <span class="stat__note">too quiet to locate — about the release, not the clock</span>
+  </div>
+  <div class="stat">
+    <span class="stat__k">Attribution refused</span>
+    <span class="stat__v">{{ head.confounded|intcomma }}</span>
+    <span class="stat__note">
+      a release at least as big owns the hour the spike landed in, so it says
+      nothing either way
+    </span>
+  </div>
+  <div class="stat">
+    <span class="stat__k">Uncheckable</span>
+    <span class="stat__v">{{ head.uncheckable|intcomma }}</span>
+    <span class="stat__note">no bars, or no usable normal behind them</span>
+  </div>
+</div>
+
+<form class="filters" method="get" style="margin-top:16px;">
+  <label class="field">
+    <span>Impact</span>
+    <select name="importance" onchange="this.form.submit()">
+      <option value="">All</option>
+      {% for value, label in importances %}
+        <option value="{{ value }}" {% if importance == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Currency</span>
+    <select name="currency" onchange="this.form.submit()">
+      <option value="">All</option>
+      {% for c in currencies %}
+        <option value="{{ c }}" {% if currency == c %}selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <span class="spacer"></span>
+</form>
+
+<form method="post" action="{% url 'quality:run_timestamps' %}" style="margin:-8px 0 16px;">
+  {% csrf_token %}
+  <input type="hidden" name="importance" value="{{ importance }}">
+  <input type="hidden" name="currency" value="{{ currency }}">
+  <input type="hidden" name="next" value="{{ request.get_full_path }}">
+  <button class="btn btn--primary btn--sm" type="submit" {% if pending %}disabled{% endif %}>
+    Check these timestamps against price
+  </button>
+  <span class="tiny faint" style="margin-left:10px;">
+    Runs every timestamped release of every matching indicator with at least
+    {{ min_n }} of them. Nothing is fetched; it reads the stored bars.
+  </span>
+</form>
+
+{% if pending %}
+  <section class="card" id="checking" data-job="{{ pending.pk }}">
+    <h3>Checking timestamps against price</h3>
+    <p class="prose" style="margin:8px 0 12px;">
+      Each release is compared against the twelve matching weekday-and-hour
+      slots behind it, at every hour from −{{ neighbourhood }} to
+      +{{ neighbourhood }}. This page updates itself — you can leave it.
+    </p>
+    <div class="meter" style="max-width:100%;">
+      <div class="meter__fill" id="check-bar" style="width: {{ pending.progress_percent }}%"></div>
+    </div>
+    <p class="tiny faint" style="margin:8px 0 0;" id="check-msg">{{ pending.message|default:"queued" }}</p>
+  </section>
+  <script>
+  (function () {
+    var card = document.getElementById("checking");
+    var bar = document.getElementById("check-bar");
+    var msg = document.getElementById("check-msg");
+    var url = "{% url 'sources:job_status' 0 %}".replace("/0/", "/" + card.dataset.job + "/");
+
+    (function poll() {
+      fetch(url).then(function (r) { return r.json(); }).then(function (d) {
+        bar.style.width = d.percent + "%";
+        msg.textContent = d.message || d.status;
+        if (d.done) { location.reload(); return; }
+        if (d.failed) {
+          msg.textContent = "Check failed: " + (d.error || d.status);
+          msg.style.color = "var(--err)";
+          return;
+        }
+        setTimeout(poll, 2500);
+      }).catch(function () { setTimeout(poll, 5000); });
+    })();
+  })();
+  </script>
+{% endif %}
+
+{% if detail %}
+<section class="card card--flush" style="margin-bottom:16px;">
+  <div class="card__head">
+    <h3>{{ detail.indicator.currency }} {{ detail.indicator.name }}</h3>
+    <span class="badge badge--ghost tiny mono">checked on {{ detail.symbol }}</span>
+    <span class="spacer"></span>
+    <a class="btn btn--ghost btn--sm" href="{% url 'quality:timestamps' %}?importance={{ importance }}&currency={{ currency }}">Close</a>
+  </div>
+  <div class="card__body">
+    <p class="prose" style="margin-top:0;">
+      {% if detail.verdict.status == offset_clock %}
+        <span class="badge badge--err"><span class="badge__dot"></span>clock wrong</span>
+      {% elif detail.verdict.status == aligned %}
+        <span class="badge badge--ok"><span class="badge__dot"></span>clock agrees</span>
+      {% elif detail.verdict.status == scattered %}
+        <span class="badge badge--warn"><span class="badge__dot"></span>scattered</span>
+      {% else %}
+        <span class="badge badge--ghost">{{ detail.verdict.status }}</span>
+      {% endif %}
+      {{ detail.verdict.message }}
+    </p>
+    {{ detail.histogram }}
+    <p class="tiny faint" style="margin:6px 0 0;">
+      Where the spike actually landed, relative to the stored timestamp. One tall
+      bar at <em>on time</em> is a clock that works. One tall bar anywhere else is
+      a clock that is wrong by that much. A flat spread means the releases are
+      too weak to locate, not that the clock is broken.
+    </p>
+  </div>
+
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Half of the year</th><th class="num">Graded</th><th class="num">Spiked</th>
+                 <th class="num">Modal offset</th><th>Reading</th></tr></thead>
+      <tbody>
+      {% for half in detail.dst %}
+        <tr>
+          <td>{{ half.label }}</td>
+          <td class="num">{{ half.verdict.checked }}</td>
+          <td class="num">{{ half.verdict.spiked }}</td>
+          <td class="num mono">
+            {% if half.verdict.modal_offset_minutes is None %}—
+            {% else %}{{ half.verdict.modal_offset_hours|floatformat:"-1" }}h{% endif %}
+          </td>
+          <td class="small muted">{{ half.verdict.message }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    A daylight-saving bug is the one failure that hides in the pooled number:
+    the same indicator resolves to one offset in US summer and an offset exactly
+    one hour different in US winter, and averaged together the two cancel into
+    “scattered”. Split apart, they name it.
+  </div>
+
+  {% if detail.neighbours %}
+  <div class="card__body">
+    <h4 style="margin:0 0 6px;">What else lands in that hour</h4>
+    <ul class="tiny" style="margin:0; padding-left:18px;">
+      {% for name, n in detail.neighbours %}
+        <li>{{ name }} — {{ n }} time{{ n|pluralize }}</li>
+      {% endfor %}
+    </ul>
+    <p class="tiny faint" style="margin:8px 0 0;">
+      An offset has two readings and the check cannot tell them apart on its
+      own: the clock is wrong by that much, or something bigger reliably
+      happens that much later. If one of these is a heavyweight — a press
+      conference, or the 08:30 New York cluster — the spike belongs to it, and
+      this indicator's own timestamp is fine.
+    </p>
+  </div>
+  {% endif %}
+
+  {% if detail.samples %}
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead><tr><th>Release</th><th class="num">Stored hour vs normal</th>
+                 <th class="num">Spike found at</th><th></th></tr></thead>
+      <tbody>
+      {% for release in detail.samples %}
+        <tr>
+          <td class="small mono">{{ release.release_time_utc|date:"Y-m-d H:i" }}Z</td>
+          <td class="num">{{ release.vol_check_ratio|floatformat:2 }}×</td>
+          <td class="num mono">{{ release.vol_check_offset_min }}m</td>
+          <td class="right">
+            <a class="tiny" href="{% url 'calendar_data:event' release.pk %}">release →</a>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    The releases whose spike landed elsewhere, newest first. A verdict you
+    cannot trace to individual releases is an assertion — open one and look at
+    the candles around it.
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="card card--flush">
+  <div class="card__head">
+    <h3>Verdict by indicator</h3>
+    <span class="spacer"></span>
+    <span class="badge badge--ghost tiny">{{ rows|length }} checked</span>
+  </div>
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead>
+        <tr><th style="width:9%">Verdict</th><th style="width:24%">Indicator</th>
+            <th class="num">Readable</th><th class="num">Spiked</th>
+            <th class="num">In the stored hour</th><th class="num">Modal offset</th>
+            <th class="num">Median move</th><th style="width:28%">Reading</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>
+          <td>
+            {% if row.verdict.status == offset_clock %}
+              <span class="badge badge--err"><span class="badge__dot"></span>clock wrong</span>
+            {% elif row.verdict.status == aligned %}
+              <span class="badge badge--ok"><span class="badge__dot"></span>agrees</span>
+            {% elif row.verdict.status == scattered %}
+              <span class="badge badge--warn"><span class="badge__dot"></span>scattered</span>
+            {% elif row.verdict.status == silent %}
+              <span class="badge badge--ghost">quiet</span>
+            {% else %}
+              <span class="badge badge--ghost">thin</span>
+            {% endif %}
+          </td>
+          <td class="small">
+            {{ row.currency }} {{ row.name }}
+            <span class="sub mono">vs {{ row.symbol }}</span>
+          </td>
+          <td class="num">
+            {{ row.verdict.attributable|intcomma }}
+            {% if row.verdict.confounded %}
+              <span class="sub">{{ row.verdict.confounded|intcomma }} blocked</span>
+            {% endif %}
+          </td>
+          <td class="num">{{ row.verdict.spiked|intcomma }}</td>
+          <td class="num">
+            {% if row.verdict.spiked %}{{ row.verdict.confirmed }}
+              <span class="sub">{{ row.verdict.modal_share|floatformat:0 }}% modal</span>
+            {% else %}—{% endif %}
+          </td>
+          <td class="num mono">
+            {% if row.verdict.modal_offset_minutes is None %}—
+            {% elif row.verdict.modal_offset_minutes == 0 %}on time
+            {% else %}{{ row.verdict.modal_offset_hours|floatformat:"-1" }}h{% endif %}
+          </td>
+          <td class="num">
+            {% if row.verdict.median_ratio %}{{ row.verdict.median_ratio|floatformat:2 }}×{% else %}—{% endif %}
+          </td>
+          <td class="small muted">{{ row.verdict.message }}</td>
+          <td class="right">
+            <a class="tiny" href="{% url 'quality:timestamps' %}?indicator={{ row.indicator_id }}&importance={{ importance }}&currency={{ currency }}">offsets →</a>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="9">
+          <div class="empty">
+            <div class="empty__t">Nothing checked yet.</div>
+            <p class="tiny">
+              Press the button above. Reading is all it does — the grades are
+              stored on the releases, and nothing else is touched.
+            </p>
+          </div>
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    <strong>Readable</strong> counts the releases whose surrounding price action
+    is this indicator's to interpret. A bar of the scan cannot win it if a
+    release at least as important sits in that bar — run without that rule, the
+    check named thirty-nine indicators as systematically offset and every one of
+    them turned out to be pointing at a bigger neighbour: European morning
+    prints at +3h, which is the 13:30 UTC US cluster, and 10:00 New York prints
+    at −2h, which is the 08:30 one.
+    <br><br>
+    <strong>Median move</strong> is the release hour's range as a multiple of
+    what that pair normally does in the same weekday-and-hour slot; anything at
+    or above {{ spike_ratio }}× counts as a spike. The comparison skips look-back
+    windows holding another release of the same indicator — without that, a
+    weekly series is compared against itself and every ratio collapses towards 1.
+  </div>
+</section>
+
+<div class="cols cols--2" style="margin-top:16px;">
+  <section class="card card--flush">
+    <div class="card__head"><h3>What can be checked, by year</h3></div>
+    <div class="tablewrap">
+      <table class="t t--dense">
+        <thead><tr><th>Year</th><th class="num">Timestamped</th><th class="num">Graded</th>
+                   <th class="num">Uncheckable</th></tr></thead>
+        <tbody>
+        {% for row in coverage %}
+          <tr>
+            <td class="mono">{{ row.year }}</td>
+            <td class="num">{{ row.anchorable|intcomma }}</td>
+            <td class="num">{{ row.graded|intcomma }}</td>
+            <td class="num">{{ row.uncheckable|intcomma }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card__foot">
+      Not the same question as a price gap. A month of bars can be complete and
+      still leave a release ungradable, because the comparison needs twelve
+      matched weekday-and-hour slots <em>behind</em> it — so the first weeks of
+      the price history have nothing to be normal against.
+    </div>
+  </section>
+
+  <section class="card card--flush">
+    <div class="card__head"><h3>What this check can and cannot say</h3></div>
+    <div class="card__body prose">
+      <p>
+        The price backbone is hourly, so the affirmative grade here is
+        <strong>confirmed at hour resolution</strong>: the spike landed in the
+        release's own hour. §5.3's stronger grade — within ±2 minutes — needs M1
+        bars around each event and stays reserved for that check, so the two are
+        never conflated in the database.
+      </p>
+      <p>
+        That weaker grade still catches the failure that actually threatens this
+        dataset. A daylight-saving error, a source stamping local time, or an
+        off-by-one in our own conversion all displace a release by a whole hour
+        or more, and an hourly scan resolves every one of them.
+      </p>
+      <p>
+        It also cannot separate this release from a bigger one three hours
+        either side of it, so it does not try: when the spike belongs to a
+        heavier neighbour the grade is <em>attribution refused</em>, and that
+        release votes on nothing. Conservative on purpose — a real offset whose
+        hour happens to hold a big release is missed rather than reported,
+        because a check that exists to find our own bugs is worthless if it
+        cries wolf.
+      </p>
+      <p>
+        A single release's grade is noisy and is not meant to be read alone: one
+        hour of FX can be quiet for reasons that have nothing to do with the
+        release. The signal is the pooled shape — a wrong clock puts most of an
+        indicator's spikes on the <em>same</em> wrong offset.
+      </p>
+    </div>
+  </section>
+</div>
+{% endblock %}

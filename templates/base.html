@@ -55,6 +55,9 @@
         Quality
         {% if nav_counts.quality_flags %}<span class="navlink__count">{{ nav_counts.quality_flags }}</span>{% endif %}
       </a>
+      <a class="navlink {% if nav == 'timestamps' %}is-active{% endif %}" href="{% url 'quality:timestamps' %}">
+        Timestamps <span class="navlink__count">vol-check</span>
+      </a>
       <a class="navlink {% if nav == 'sources' %}is-active{% endif %}" href="{% url 'sources:console' %}">
         Sources <span class="navlink__count">{{ nav_counts.sources }}</span>
       </a>

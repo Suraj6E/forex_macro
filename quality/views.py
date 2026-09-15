@@ -12,12 +12,14 @@ from django.db.models import Count, Q
 from django.http import HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
 
+from analytics import volcheck
 from calendar_data.models import EventRelease, Indicator, IndicatorAlias, ValueRevision
 from consolidation import dedup
 from dashboard import charts
-from quality import checks, stats
+from quality import checks, stats, validation
 from quality.enums import CrossSource, MappingStatus
-from sources.models import FetchRun, Source
+from sources import jobs
+from sources.models import FetchRun, Job, JobStatus, Source
 
 
 def _require_post(request):
@@ -66,6 +68,108 @@ def index(request):
             "sources": Source.objects.exclude(health="unknown"),
         },
     )
+
+
+def timestamps(request):
+    """The validation harness — planning.md §4.1, §12, P2.
+
+    Everything measured in this project is anchored to a timestamp a source
+    handed us. This screen is where price gets to disagree.
+    """
+    importance = request.GET.get("importance") or ""
+    currency = request.GET.get("currency") or ""
+    indicator = Indicator.objects.filter(pk=request.GET.get("indicator")).first()
+
+    # Pooled once over every checked indicator — the false-discovery adjustment
+    # needs the whole sweep — then narrowed for display.
+    pooled = validation.verdicts()
+    rows = validation.matching(
+        pooled, importance=int(importance) if importance else None, currency=currency
+    )
+    pending = (
+        Job.objects.filter(kind="vol_check", status__in=[JobStatus.QUEUED, JobStatus.RUNNING])
+        .order_by("-id")
+        .first()
+    )
+
+    detail = None
+    if indicator is not None:
+        histogram = validation.offset_histogram(indicator.pk)
+        # From the same pooled pass as the table, so the detail page cannot
+        # contradict the row that led here.
+        verdict = next(
+            (row.verdict for row in pooled if row.indicator_id == indicator.pk),
+            volcheck.Verdict(),
+        )
+        detail = {
+            "indicator": indicator,
+            "verdict": verdict,
+            "neighbours": validation.co_timed_at_offset(
+                indicator.pk, verdict.modal_offset_minutes or 0
+            ),
+            "symbol": validation.REFERENCE_PAIR.get(
+                indicator.currency, validation.FALLBACK_PAIR
+            ),
+            "histogram": charts.vbar(
+                histogram,
+                axis_every=1,
+                empty="No release of this indicator has been checked yet.",
+            ),
+            "dst": validation.dst_split(indicator.pk),
+            "samples": validation.offset_samples(indicator.pk),
+        }
+
+    return render(
+        request,
+        "quality/timestamps.html",
+        {
+            "nav": "timestamps",
+            "head": validation.headline(),
+            "rows": rows,
+            "detail": detail,
+            "pending": pending,
+            "importance": importance,
+            "currency": currency,
+            "importances": [(3, "High"), (2, "Medium"), (1, "Low"), (0, "Unrated")],
+            "currencies": sorted(
+                Indicator.objects.exclude(currency="")
+                .values_list("currency", flat=True)
+                .distinct()
+            ),
+            "coverage": validation.coverage_by_year(),
+            "min_n": volcheck.MIN_VERDICT_N,
+            "spike_ratio": volcheck.SPIKE_RATIO,
+            "neighbourhood": volcheck.NEIGHBOURHOOD,
+            # What a share of spikes landing in any one bar would be if the
+            # release had nothing to do with when price moved. Every share on
+            # this page is meaningless without it.
+            "chance_share": round(100 / (2 * volcheck.NEIGHBOURHOOD + 1)),
+            "aligned": volcheck.ALIGNED,
+            "offset_clock": volcheck.OFFSET_CLOCK,
+            "scattered": volcheck.SCATTERED,
+            "silent": volcheck.SILENT,
+        },
+    )
+
+
+def run_timestamps(request):
+    """Queue the check. Minutes of work, so it goes to the worker, not the request."""
+    if (bad := _require_post(request)) is not None:
+        return bad
+
+    params = {
+        key: request.POST.get(key)
+        for key in ("indicator_id", "importance", "currency")
+        if request.POST.get(key)
+    }
+    existing = Job.objects.filter(
+        kind="vol_check", status__in=[JobStatus.QUEUED, JobStatus.RUNNING]
+    ).first()
+    if existing is None:
+        jobs.enqueue("vol_check", **params)
+    else:
+        messages.success(request, "Already checking — showing progress.")
+    return redirect(request.POST.get("next") or "quality:timestamps")
 
 
 def duplicates(request):

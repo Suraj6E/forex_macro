@@ -189,6 +189,20 @@ class EventRelease(models.Model):
     vol_check = models.CharField(
         max_length=16, choices=VolCheck.choices, default=VolCheck.NOT_CHECKED
     )
+    # Not in §9; the grade alone cannot tell you *how* wrong a timestamp is, and
+    # "wrong by exactly one hour, always" is the diagnosis the DST risk needs.
+    vol_check_offset_min = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Signed minutes from the stored timestamp to where the "
+        "volatility spike actually was. 0 when the spike is in the stored bar.",
+    )
+    vol_check_ratio = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Movement in the stored bar as a multiple of what this pair "
+        "normally does in the same weekday-and-hour slot.",
+    )
     confounded = models.BooleanField(
         default=False, help_text="Another event within ±15 min. Window scales with horizon (§6.6)."
     )

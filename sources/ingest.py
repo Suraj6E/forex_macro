@@ -269,6 +269,39 @@ def run_study_job(job: Job) -> dict:
     }
 
 
+@jobs.handler("vol_check")
+def vol_check_job(job: Job) -> dict:
+    """Grade stored timestamps against the price series (§4.1, P2)."""
+    from calendar_data.models import Indicator
+    from quality.validation import run_vol_check
+
+    params = dict(job.params_json or {})
+    indicator = (
+        Indicator.objects.filter(pk=params["indicator_id"]).first()
+        if params.get("indicator_id")
+        else None
+    )
+    importance = params.get("importance")
+
+    result = run_vol_check(
+        indicator=indicator,
+        importance=int(importance) if importance not in (None, "") else None,
+        currency=params.get("currency") or "",
+        max_indicators=params.get("max_indicators"),
+        log=job.append_log,
+        progress=lambda frac, msg: jobs.set_progress(job, frac, msg),
+    )
+    return {
+        "indicators_checked": len(result.indicators),
+        "releases_graded": result.releases_graded,
+        "offset_indicators": [
+            check.label for check in result.indicators if check.verdict and check.verdict.wrong
+        ],
+        "skipped": result.skipped[:20],
+        "summary": result.summary,
+    }
+
+
 @jobs.handler("reparse_snapshot")
 def reparse_snapshot_job(job: Job) -> dict:
     """Re-run the current normaliser over stored bytes — no network call (§5.4)."""

@@ -98,6 +98,16 @@ def _absurd_q() -> Q:
 
 NO_TIMESTAMP = Q(release_time_utc__isnull=True, scheduled_time_utc__isnull=True)
 
+#: Grades that came from an actual comparison against price, as opposed to
+#: "never run" or "we hold no bars there".
+VOL_GRADED = (
+    VolCheck.CONFIRMED,
+    VolCheck.CONFIRMED_HOUR,
+    VolCheck.OFFSET,
+    VolCheck.NO_SPIKE,
+    VolCheck.CONFOUNDED,
+)
+
 
 def release_counts() -> dict:
     """Every release-table count in one scan.
@@ -117,7 +127,12 @@ def release_counts() -> dict:
         sentinel=Count("id", filter=_sentinel_q()),
         absurd=Count("id", filter=_absurd_q()),
         no_period_start=Count("id", filter=Q(reference_period_start__isnull=True)),
-        vol_unchecked=Count("id", filter=Q(vol_check=VolCheck.NOT_CHECKED)),
+        vol_graded=Count("id", filter=Q(vol_check__in=VOL_GRADED)),
+        # The vol check anchors on the *release* time. A row carrying only a
+        # scheduled time can anchor a study by approximation but cannot be
+        # graded here, so it does not belong in this denominator.
+        gradable=Count("id", filter=Q(release_time_utc__isnull=False)),
+        vol_uncheckable=Count("id", filter=Q(vol_check=VolCheck.UNCHECKABLE)),
     )
 
 
@@ -135,6 +150,7 @@ def run_checks() -> list[Finding]:
         _missing_period_start(counts),
         _orphans(),
         _vol_check(counts),
+        _timestamp_offsets(),
         _price_gaps(),
     ]
     order = {BLOCKING: 0, WARNING: 1, INFO: 2, OK: 3}
@@ -366,18 +382,64 @@ def _orphans() -> Finding:
 
 
 def _vol_check(counts: dict) -> Finding:
+    graded = counts["vol_graded"]
+    unchecked = max(counts["gradable"] - graded - counts["vol_uncheckable"], 0)
     return Finding(
         code="vol_check",
         title="Timestamps never verified against price",
-        severity=INFO,
-        count=counts["vol_unchecked"],
+        severity=WARNING if graded == 0 else INFO,
+        count=unchecked,
         total=counts["total"],
-        detail=f"{counts['anchorable']:,} release(s) have a timestamp that could be checked.",
-        why="The check confirms a realised-volatility spike lands within ±2 "
-        "minutes of the stored timestamp, and flags the row if it does not. It "
-        "is how this project finds its own bugs — a timestamp wrong by an hour "
-        "produces output that is wrong but entirely plausible. It needs the M1 "
-        "price backbone, so it arrives with P2.",
+        detail=f"{graded:,} of {counts['gradable']:,} release(s) carrying a "
+        f"release time graded against the price series"
+        + (
+            f"; {counts['vol_uncheckable']:,} had no bars or no usable normal."
+            if counts["vol_uncheckable"]
+            else "."
+        ),
+        why="The check asks whether a volatility spike lands where the stored "
+        "timestamp says it should. It is how this project finds its own bugs — "
+        "a timestamp wrong by an hour produces output that is wrong but "
+        "entirely plausible, and nothing downstream can detect it. The hourly "
+        "backbone resolves the hour; the ±2-minute grade waits on M1 windows.",
+        action_label="Check them",
+        link="/quality/timestamps/",
+    )
+
+
+def _timestamp_offsets() -> Finding:
+    """Indicators where price says the stored clock is systematically wrong."""
+    from quality import validation
+
+    wrong = [
+        (name, verdict)
+        for name, verdict in validation.offset_verdicts_cheap()
+        if verdict.wrong
+    ]
+    detail = ""
+    if wrong:
+        worst = sorted(wrong, key=lambda item: -item[1].checked)[:3]
+        detail = ", ".join(
+            f"{name} ({verdict.modal_offset_hours:+.0f}h)" for name, verdict in worst
+        )
+    return Finding(
+        code="timestamp_offsets",
+        title="Indicators whose spikes land somewhere else",
+        # Blocking *for those indicators*, not for the dataset — which is why
+        # this is a warning that names them rather than an alarm over the whole
+        # calendar. A study anchored to one of them is the thing that is broken.
+        severity=WARNING if wrong else OK,
+        count=len(wrong),
+        detail=detail,
+        why="For these indicators the volatility spikes agree on the same wrong "
+        "offset more often than the whole sweep's false-discovery rate can "
+        "explain, which is what a source-clock or daylight-saving bug looks "
+        "like. Any study anchored to them inherits the error at full "
+        "confidence, so the timestamps are the thing to fix — not the study. "
+        "Check what else sits in that hour first: a bigger neighbour explains "
+        "an offset without any bug at all.",
+        action_label="See the offsets",
+        link="/quality/timestamps/",
     )
 
 
