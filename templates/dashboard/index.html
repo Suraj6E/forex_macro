@@ -141,6 +141,7 @@
             <td class="nowrap" style="width:180px;"><strong>{{ p.title }}</strong></td>
             <td style="width:100px;">
               {% if p.status == 'done' %}<span class="badge badge--solid">built</span>
+              {% elif p.status == 'partial' %}<span class="badge">part built</span>
               {% elif p.status == 'active' %}<span class="badge"><span class="badge__dot"></span>next</span>
               {% else %}<span class="badge badge--ghost faint">planned</span>{% endif %}
             </td>

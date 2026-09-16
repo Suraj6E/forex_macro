@@ -5,7 +5,7 @@ yet.  A screen that hides its own incompleteness is how you end up trusting an
 empty chart.
 """
 
-DONE, ACTIVE, PENDING = "done", "active", "pending"
+DONE, PARTIAL, ACTIVE, PENDING = "done", "partial", "active", "pending"
 
 PHASES = [
     dict(
@@ -18,32 +18,38 @@ PHASES = [
     dict(
         key="P0.5",
         title="Source audit",
-        status=ACTIVE,
-        detail="Four questions: how far back your MT5 calendar reaches, where each "
-        "source thinks 08:30 New York is, whether MT5's forecast is point-in-time, "
-        "and whether HistData and Dukascopy agree. Resolves the plan's biggest "
-        "unknowns in about a day.",
+        status=PARTIAL,
+        detail="Answered: where each source thinks 08:30 New York is — the vol-check "
+        "reads 259 of 359 indicators aligned and the release times track US daylight "
+        "saving correctly. Still open, both waiting on the MQL5 export being run in "
+        "the terminal: how far back your MT5 calendar reaches, and whether its "
+        "forecast is point-in-time. HistData against Dukascopy cannot be settled "
+        "until HistData zips are downloaded by hand — the site serves nothing to a "
+        "non-browser.",
     ),
     dict(
         key="P1",
         title="Vertical slice, Mode A",
-        status=PENDING,
-        detail="US Employment Situation → EUR/USD, full history: fetch → normalise "
-        "→ merge → align → decay curve across the horizon ladder. No forecast "
-        "column required, which is what makes it the right first slice.",
+        status=DONE,
+        detail="Runs for any indicator against any pair, not just the first slice: "
+        "86,450 releases Jan 2007 → today, hourly bars for all seven majors, and the "
+        "decay curve across the horizon ladder measured against the pair's own "
+        "matched weekday-and-hour behaviour.",
     ),
     dict(
         key="P2",
         title="Validation harness",
-        status=PENDING,
-        detail="Volatility-spike cross-check against stored timestamps, cross-source "
-        "comparison, coverage reporting. Manually verify ~20 events against agency "
-        "release pages.",
+        status=PARTIAL,
+        detail="The volatility-spike cross-check is in and has run over all 359 "
+        "indicators: 259 aligned, 97 scattered, 2 genuinely offset. Coverage "
+        "reporting is on the quality screen. Still to do: cross-source comparison, "
+        "which has nothing to compare until a second calendar source is loaded, and "
+        "verifying ~20 events by hand against agency release pages.",
     ),
     dict(
         key="P3",
         title="Breadth and consolidation",
-        status=PENDING,
+        status=ACTIVE,
         detail="Tier-1 across 8 economies and 7 pairs, DBnomics/ALFRED, the "
         "canonical-code mapping, release groups, dataset export. Event ranking "
         "lands here — the first genuinely interesting output.",
