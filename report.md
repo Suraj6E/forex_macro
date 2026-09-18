@@ -781,3 +781,6 @@ In rough order of effort.
 Nothing in the stored numbers disagreed with what the README claims. The problems found are
 in how some of those numbers are labelled and pooled, and in what has not been built yet, not
 in the arithmetic that produced them.
+
+
+Sources used for the literature cross-check: ABDV 2003, AER (https://www.aeaweb.org/articles?id=10.1257%2F000282803321455151), St. Louis Fed 2007 on jumps and macro announcements (https://s3.amazonaws.com/real-dev.stlouisfed.org/wp/2007/2007-032.pdf), Evans and Lyons on news transmission (https://faculty.georgetown.edu/evansm1/wpapers_files/Announcements_dec03.pdf), Haynes, CFTC, on automated trading around announcements (https://www.cftc.gov/sites/default/files/idc/groups/public/@economicanalysis/documents/file/oce_macroannouncement.pdf).
