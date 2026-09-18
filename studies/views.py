@@ -262,3 +262,177 @@ def run(request):
     return redirect(
         f"/studies/event-study/?indicator={indicator.pk}&instrument={instrument.pk}"
     )
+
+
+# --- §6.4 ranking -----------------------------------------------------------
+
+#: The horizon the ranking is read at.  §3.2's reasoning: the event's effect is
+#: roughly fixed while noise grows with the square root of time, so the shortest
+#: post-release window the hourly backbone supports is where a ranking is most
+#: attributable.  Longer horizons stay on the page as columns, not as the order.
+RANK_HORIZON = "+1h"
+
+
+def ranking(request):
+    """Which kinds of news actually move FX — measured, then compared against
+    the rating the calendar publishes (§6.4).
+
+    Ranked on the **ratio**, not on the pip move: a pip is worth a different
+    amount of information in USDJPY than in EURUSD, so pooling raw magnitudes
+    across pairs would rank the volatile pairs rather than the news. The ratio —
+    how many times its own matched-normal move the pair made — is unitless and
+    comparable, which is what pooling across eight economies requires.
+    """
+    from calendar_data.models import Concept
+    from studies.directions import DIRECTION_VERSION
+
+    horizon = request.GET.get("horizon") or RANK_HORIZON
+
+    # Mode A supplies the magnitude. `r_squared` carries abs_ratio for Mode A
+    # rows — an overload inherited from the engine, and the reason this view
+    # never prints that column under its field name.
+    measured = (
+        DecayCurve.objects.filter(
+            mode=Mode.A,
+            engine_version=engine.ENGINE_VERSION,
+            horizon=horizon,
+            effect_size__isnull=False,
+        )
+        .exclude(indicator__concept="")
+        .values(
+            "indicator__id",
+            "indicator__name",
+            "indicator__currency",
+            "indicator__concept",
+            "indicator__importance",
+            "indicator__release_group_id",
+            "indicator__release_group__name",
+            "instrument__symbol",
+        )
+        .annotate(ratio=Max("r_squared"), excess=Max("effect_size"), releases=Max("n"))
+    )
+
+    # Co-timed releases are one measurement wearing several names: NZD
+    # Employment Change and NZD Unemployment Rate are published at the same
+    # instant, so their curves are identical by construction (§3.3 Case B).
+    # Counting both would inflate whichever concept happens to bundle the most
+    # indicators into one report — which is labour, every time.
+    counted: set[tuple] = set()
+
+    by_concept: dict[str, dict] = {}
+    by_indicator: dict[int, dict] = {}
+    for row in measured:
+        ratio = row["ratio"]
+        if ratio is None:
+            continue
+        concept = row["indicator__concept"]
+        group = row["indicator__release_group_id"]
+        token = (
+            ("group", group, row["instrument__symbol"])
+            if group
+            else ("indicator", row["indicator__id"], row["instrument__symbol"])
+        )
+        double_counted = token in counted
+        counted.add(token)
+        bucket = by_concept.setdefault(
+            concept,
+            dict(concept=concept, label=Concept(concept).label, ratios=[], pairs=0,
+                 releases=0, indicators=set(), importances=[], best=0.0, best_name=""),
+        )
+        if not double_counted:
+            bucket["ratios"].append(ratio)
+            bucket["pairs"] += 1
+            bucket["releases"] += row["releases"] or 0
+            bucket["importances"].append(row["indicator__importance"])
+        bucket["indicators"].add(row["indicator__id"])
+        if ratio > bucket["best"]:
+            bucket["best"] = ratio
+            bucket["best_name"] = f"{row['indicator__currency']} {row['indicator__name']}"
+
+        key = row["indicator__id"]
+        entry = by_indicator.setdefault(
+            key,
+            dict(
+                id=key,
+                name=row["indicator__name"],
+                currency=row["indicator__currency"],
+                concept=concept,
+                concept_label=Concept(concept).label.split(" — ")[0],
+                importance=row["indicator__importance"],
+                group=row["indicator__release_group__name"] or "",
+                shared=bool(group),
+                ratios=[],
+                releases=0,
+                pairs=[],
+            ),
+        )
+        entry["ratios"].append(ratio)
+        entry["releases"] = max(entry["releases"], row["releases"] or 0)
+        entry["pairs"].append(row["instrument__symbol"])
+
+    concepts = []
+    for bucket in by_concept.values():
+        ratios = sorted(bucket["ratios"])
+        bucket["median_ratio"] = _median(ratios)
+        bucket["n_indicators"] = len(bucket["indicators"])
+        bucket["published"] = (
+            sum(bucket["importances"]) / len(bucket["importances"])
+            if bucket["importances"]
+            else 0
+        )
+        concepts.append(bucket)
+    concepts.sort(key=lambda b: b["median_ratio"], reverse=True)
+
+    # §6.4's actual question: where does the measured order disagree with the
+    # published traffic light? Both are turned into ranks so a 1-to-3 scale and
+    # a ratio can be compared at all.
+    published_order = sorted(concepts, key=lambda b: b["published"], reverse=True)
+    published_rank = {b["concept"]: i + 1 for i, b in enumerate(published_order)}
+    for index, bucket in enumerate(concepts, start=1):
+        bucket["rank"] = index
+        bucket["published_rank"] = published_rank[bucket["concept"]]
+        bucket["disagreement"] = bucket["published_rank"] - index
+
+    indicators = sorted(
+        by_indicator.values(), key=lambda e: _median(sorted(e["ratios"])), reverse=True
+    )
+    for entry in indicators:
+        entry["median_ratio"] = _median(sorted(entry["ratios"]))
+        entry["pairs"] = sorted(set(entry["pairs"]))
+
+    # Direction: the sign, from the third mode. Read at the same horizon so the
+    # magnitude and the sign on one row describe the same window.
+    directions = {
+        row["indicator_id"]: row
+        for row in DecayCurve.objects.filter(
+            mode=Mode.DIRECTION,
+            engine_version=DIRECTION_VERSION,
+            horizon=horizon,
+            effect_size__isnull=False,
+        ).values("indicator_id", "effect_size", "p_fdr", "n", "instrument__symbol")
+    }
+    for entry in indicators:
+        entry["direction"] = directions.get(entry["id"])
+
+    return render(
+        request,
+        "studies/ranking.html",
+        {
+            "nav": "studies",
+            "horizon": horizon,
+            "ladder": [h for h in LADDER if h.seconds > 0],
+            "concepts": concepts,
+            "indicators": indicators[:60],
+            "indicator_total": len(indicators),
+            "covered_pairs": sum(b["pairs"] for b in concepts),
+        },
+    )
+
+
+def _median(ordered: list[float]) -> float:
+    if not ordered:
+        return 0.0
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2

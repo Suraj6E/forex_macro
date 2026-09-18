@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% load humanize %}
+{% block title %}Event ranking — fxmacro{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div class="page-head__text">
+    <h1>Event ranking</h1>
+    <p class="page-head__sub">
+      Which kinds of news actually move FX, measured from nineteen years of
+      releases — and where that disagrees with the traffic-light rating the
+      calendar publishes. The disagreements are the point: they are what the
+      ranking can tell you that the calendar cannot.
+    </p>
+  </div>
+  <div class="page-head__actions">
+    <form method="get" class="inline-form">
+      <label class="tiny" for="horizon">Horizon</label>
+      <select id="horizon" name="horizon" onchange="this.form.submit()">
+        {% for h in ladder %}
+          <option value="{{ h.label }}" {% if h.label == horizon %}selected{% endif %}>{{ h.label }}</option>
+        {% endfor %}
+      </select>
+      <noscript><button class="btn" type="submit">Go</button></noscript>
+    </form>
+  </div>
+</div>
+
+{% if not concepts %}
+  <p class="msg msg--warning">
+    Nothing to rank yet at {{ horizon }}. The ranking reads stored Mode&nbsp;A
+    decay curves — run event studies first and this fills in on its own.
+  </p>
+{% else %}
+
+<section class="card">
+  <h2>By concept</h2>
+  <p class="note">
+    Ranked on the <strong>ratio</strong> — how many times its own matched-normal
+    move the pair made in this window — not on the pip move. A pip means
+    something different in USDJPY than in EURUSD, so pooling raw magnitudes
+    across pairs would rank the volatile pairs rather than the news.
+  </p>
+  <p class="note">
+    <strong>The two columns answer different questions and the order follows the
+    median.</strong> The median is what a <em>typical</em> release in the family
+    is worth; the strongest is what the family's heaviest release can do. They
+    can be far apart, and when they are it is the concept's composition talking:
+    labour holds weekly Unemployment Claims, ADP and JOLTS alongside payrolls,
+    and each of those contributes seven pairings near 0.9&times; that pull the
+    median down without saying anything about what payrolls do. Read the median
+    for breadth and the strongest for ceiling &mdash; neither alone is "how much
+    this kind of news matters".
+  </p>
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>Concept</th>
+          <th class="num">Median</th>
+          <th class="num">Strongest</th>
+          <th>Strongest member</th>
+          <th class="num">Indicators</th>
+          <th class="num">Pairings</th>
+          <th class="num">Releases</th>
+          <th class="num">Published rank</th>
+          <th>Disagreement</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in concepts %}
+        <tr>
+          <td class="num mono">{{ c.rank }}</td>
+          <td class="small">{{ c.label }}</td>
+          <td class="num mono">{{ c.median_ratio|floatformat:2 }}&times;</td>
+          <td class="num mono"><strong>{{ c.best|floatformat:2 }}&times;</strong></td>
+          <td class="tiny">{{ c.best_name }}</td>
+          <td class="num">{{ c.n_indicators }}</td>
+          <td class="num">{{ c.pairs }}</td>
+          <td class="num">{{ c.releases|intcomma }}</td>
+          <td class="num mono faint">{{ c.published_rank }}</td>
+          <td class="small">
+            {% if c.disagreement > 1 %}
+              <span class="badge">measured higher by {{ c.disagreement }}</span>
+            {% elif c.disagreement < -1 %}
+              <span class="badge badge--ghost">measured lower by {{ c.disagreement|stringformat:"+d" }}</span>
+            {% else %}
+              <span class="faint tiny">agrees</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    Published rank is the mean of the calendar's own high/medium/low rating for
+    the indicators in that concept, turned into a rank so a 1&ndash;3 scale and a
+    ratio can be compared at all. It is <em>their</em> claim, kept as theirs.
+  </div>
+</section>
+
+<section class="card">
+  <h2>By indicator</h2>
+  <p class="note">
+    <strong>Direction</strong> is the third mode: the signed response to the
+    indicator coming in above its own previous print, in abnormal return per one
+    sigma of change. It is <em>not</em> a surprise &mdash; part of any change was
+    already expected and priced, so the coefficient is attenuated against what a
+    true consensus forecast would give. Blank means no direction curve survived
+    the false-discovery correction at this horizon, which is the common case and
+    the honest one.
+  </p>
+  <div class="tablewrap">
+    <table class="t t--dense">
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>Indicator</th>
+          <th>Concept</th>
+          <th class="num">Ratio</th>
+          <th class="num">Releases</th>
+          <th>Pairs</th>
+          <th>Published</th>
+          <th class="num">Direction &beta;</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in indicators %}
+        <tr>
+          <td class="num mono faint">{{ forloop.counter }}</td>
+          <td class="small">
+            <a href="{% url 'studies:event_study' %}?indicator={{ i.id }}">{{ i.currency }} {{ i.name }}</a>
+            {% if i.shared %}
+              <span class="tiny faint" title="Published at the same instant as the rest of {{ i.group }}. Their curves are identical by construction, and the concept ranking above counts the report once, not once per member (§3.3 Case B).">· {{ i.group }}</span>
+            {% endif %}
+          </td>
+          <td class="tiny faint">{{ i.concept_label }}</td>
+          <td class="num mono"><strong>{{ i.median_ratio|floatformat:2 }}&times;</strong></td>
+          <td class="num">{{ i.releases|intcomma }}</td>
+          <td class="tiny mono faint">{{ i.pairs|join:" " }}</td>
+          <td class="tiny">
+            {% if i.importance == 3 %}high{% elif i.importance == 2 %}medium{% elif i.importance == 1 %}low{% else %}&mdash;{% endif %}
+          </td>
+          <td class="num mono">
+            {% if i.direction and i.direction.p_fdr and i.direction.p_fdr < 0.05 %}
+              {{ i.direction.effect_size|floatformat:5 }}
+              <span class="tiny faint">{{ i.direction.instrument__symbol }}</span>
+            {% else %}
+              <span class="faint">&mdash;</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card__foot">
+    Showing {{ indicators|length }} of {{ indicator_total }} measured indicators,
+    across {{ covered_pairs }} indicator&times;pair curves.
+  </div>
+</section>
+
+<p class="note" style="margin-top:16px;">
+  <strong>What this ranking is not.</strong> Every figure is an
+  <em>association under controls</em> &mdash; the tool observes what follows a
+  release against the pair's own matched-normal behaviour, and cannot rule out a
+  common driver or unobserved news (&sect;3.6). It also cannot separate releases
+  that share an instant: where a release group exists, the move belongs to the
+  report, never to one member of it (&sect;3.3 Case&nbsp;B). Speeches and
+  political events are absent because they carry no number and no timestamp in
+  this dataset, not because they were measured and found inert.
+</p>
+
+{% endif %}
+{% endblock %}

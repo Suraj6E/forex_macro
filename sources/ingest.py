@@ -327,3 +327,30 @@ def _fail(run: FetchRun, source: Source, message: str, *, preview_only: bool = F
     run.save(update_fields=["status", "finished_at", "error_text"])
     if not preview_only:
         source.record_outcome(success=False)
+
+
+@jobs.handler("run_direction")
+def run_direction_job(job: Job) -> dict:
+    """Fit the signed response to the change vs previous (direction mode)."""
+    from calendar_data.models import Indicator
+    from prices.models import Instrument
+    from studies.directions import run_direction
+
+    params = dict(job.params_json or {})
+    indicator = Indicator.objects.get(pk=params["indicator_id"])
+    instrument = Instrument.objects.get(pk=params["instrument_id"])
+
+    result = run_direction(
+        indicator,
+        instrument,
+        log=job.append_log,
+        progress=lambda frac, msg: jobs.set_progress(job, frac, msg),
+    )
+    return {
+        "indicator_id": indicator.pk,
+        "instrument_id": instrument.pk,
+        "releases_with_change": result.releases_with_change,
+        "horizons_fitted": result.horizons_fitted,
+        "curve_points": result.curve_points,
+        "summary": result.notes,
+    }

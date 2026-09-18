@@ -60,6 +60,37 @@ class ReleaseGroup(models.Model):
         return self.key
 
 
+class Concept(models.TextChoices):
+    """What *kind* of economic news this is — §6.4's pooling axis.
+
+    Distinct from `canonical_code`, and deliberately so.  A canonical code
+    identifies one series so that two sources naming it differently can be
+    joined; a concept says what family it belongs to, so that "which kinds of
+    news move FX most" can be answered across eight economies at once.  US CPI
+    and German CPI are different series with different codes and the same
+    concept.
+
+    `SPEECH` and `POLITICAL` are separated from the data releases on purpose.
+    They carry no number, so they can never have a direction, and pooling them
+    with releases that do would put an unmeasurable thing in a ranking of
+    measured ones.
+    """
+
+    LABOUR = "labour", "labour — employment, unemployment, claims, wages"
+    INFLATION = "inflation", "inflation — CPI, PPI, price indices"
+    POLICY_RATE = "policy_rate", "policy rate — decisions, minutes, facilities"
+    GROWTH = "growth", "growth — GDP, production, productivity"
+    SURVEY = "survey", "survey — PMI, sentiment, business confidence"
+    CONSUMPTION = "consumption", "consumption — retail sales, spending, durables"
+    HOUSING = "housing", "housing — permits, starts, prices, mortgages"
+    TRADE = "trade", "trade — balance, current account"
+    ENERGY = "energy", "energy — oil and gas inventories"
+    FISCAL = "fiscal", "fiscal — budget, debt, auctions"
+    SPEECH = "speech", "speech — no number, so no direction"
+    POLITICAL = "political", "political — elections, votes, rulings"
+    UNCLASSIFIED = "", "unclassified"
+
+
 class Indicator(models.Model):
     country = models.CharField(max_length=64, blank=True)
     currency = models.CharField(max_length=3, choices=CURRENCIES, db_index=True)
@@ -74,6 +105,16 @@ class Indicator(models.Model):
 
     release_group = models.ForeignKey(
         ReleaseGroup, on_delete=models.SET_NULL, null=True, blank=True, related_name="indicators"
+    )
+
+    concept = models.CharField(
+        max_length=16,
+        choices=Concept.choices,
+        blank=True,
+        default=Concept.UNCLASSIFIED,
+        db_index=True,
+        help_text="§6.4's pooling axis, derived from the name. Not the same thing "
+        "as canonical_code, which identifies one series across sources.",
     )
 
     unit = models.CharField(max_length=32, blank=True)

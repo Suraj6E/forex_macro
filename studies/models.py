@@ -25,9 +25,19 @@ class OutlierPolicy(models.TextChoices):
 
 
 class Mode(models.TextChoices):
-    """§6.  Every study is stamped with which mode produced it."""
+    """§6.  Every study is stamped with which mode produced it.
+
+    `DIRECTION` sits between the two and is never merged with either.  Mode A
+    reports an unsigned magnitude and cannot say which way price went; Mode B
+    reports the response to a *surprise* and needs a forecast the dataset does
+    not yet have.  `DIRECTION` regresses the signed move on the change in the
+    indicator against its own last print, which 99.9% of releases carry — a
+    real and different quantity, attenuated relative to a surprise because part
+    of any change was already priced.  See `analytics/direction.py`.
+    """
 
     A = "A", "A — event-only (timestamps + price)"
+    DIRECTION = "direction", "direction — signed response to the change vs previous"
     B = "B", "B — surprise-conditioned (needs the forecast column)"
 
 
@@ -249,7 +259,7 @@ class DecayCurve(models.Model):
         StudyRun, on_delete=models.CASCADE, null=True, blank=True, related_name="curves"
     )
 
-    mode = models.CharField(max_length=1, choices=Mode.choices)
+    mode = models.CharField(max_length=16, choices=Mode.choices)
     horizon = models.CharField(max_length=16, choices=HORIZON_CHOICES)
 
     effect_size = models.FloatField(null=True, blank=True)

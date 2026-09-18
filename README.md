@@ -35,6 +35,16 @@ stored instant.
 | **offset** | 2 | EUR Retail Sales (+1h) and Belgian NBB Business Climate (−3h) |
 | insufficient | 1 | too few readable releases to say anything |
 
+**And the agencies agree.** Twenty-one releases — payrolls, CPI and FOMC
+decisions between 2008 and 2024 — have been checked by hand against the
+publisher's own release page, and all twenty-one match on value, reporting
+month and release time ([`docs/agency_verification.md`](docs/agency_verification.md)).
+March 2008 is the one worth knowing about: BLS published payrolls on the 7th
+under an **EST** embargo and CPI on the 14th under an **EDT** one, same 8:30
+local time, and our two stored instants differ by exactly the hour the agency's
+own wording says they should. That is the daylight-saving question answered
+from the publisher's side rather than from price.
+
 **The clocks are sound.** Federal Funds Rate puts 90% of its spikes in the
 stored hour at 5.0× the normal hourly range; NZD Official Cash Rate 92% at 4.5×;
 payrolls 83% at 2.5× — against the ~14% each hour would get if the release had
@@ -70,6 +80,40 @@ forced:
 Every source has a **Preview** button: it fetches and parses exactly as a real
 run would, shows a sample of the resulting rows, and writes nothing.
 
+## The three modes
+
+Every study is stamped with the mode that produced it, and the three are never
+merged into one column.
+
+| Mode | The question | What it needs | State |
+|---|---|---|---|
+| **A** | Does this release move price more than usual? | timestamps + price | working |
+| **direction** | Does the currency strengthen when this indicator *rises*? | `actual` and `previous` | working |
+| **B** | Does it strengthen when the indicator beats *expectations*? | a point-in-time forecast | blocked |
+
+**A** reports an unsigned magnitude. It cannot say which way price went, and
+for a symmetric event the mean signed move is ~0 by construction — that is the
+expected result, not a failure.
+
+**direction** regresses the signed abnormal return on the change against the
+indicator's own last print, standardised by its own trailing sigma. 99.9% of
+timestamped releases carry both numbers, so it runs over the whole history now,
+without a forecast. The signs it recovers are mutually consistent across
+independent economies: CAD Employment Change up puts CAD up and CAD
+Unemployment Rate up puts CAD down; the same mirrored pair holds for NZD.
+
+**It is not Mode B**, and the distinction is not pedantry. It measures *higher
+than last time*, not *higher than expected*. Part of any change was already
+priced, which pulls the coefficient toward zero; and when the market expected a
+rise and got a smaller one, the change is positive while the surprise is
+negative — the two can carry opposite signs on the same release. Different
+quantity, own mode, own label, exactly as §6.7 requires of modelled
+expectations.
+
+**B** stays blocked on §4.3: a historical calendar scrape shows today's
+consensus, so only the weekly forward capture earns the label, and it currently
+holds 16 forecasts.
+
 ## Setup
 
 ```powershell
@@ -97,6 +141,7 @@ then create a login with `manage.py createsuperuser`.
 | **Duplicates** | Merge indicators that different sources named differently; collapse duplicate releases; purge a source's contributions. Exact name matches can be merged in bulk; similar ones need a human. |
 | **Calendar** | Every release held, filterable, with per-field provenance. |
 | **Event detail** | One release: each field with its supplying source, what every source said verbatim, the revision log, co-timed releases. |
+| **Event ranking** | **Which kinds of news actually move FX**, ranked on how many times its own normal move the pair made — and where that disagrees with the calendar's own high/medium/low. Pools across economies on the concept; counts a co-timed report once. |
 | **Indicators** | Assign canonical codes, importance and release groups — the §9 mapping surface. |
 | **Prices** | Coverage ledger per instrument, bar size and month, plus known dislocations (§4.6). |
 | **Price chart** | **Candlesticks with calendar releases marked on them** (TradingView `lightweight-charts`, vendored). Overlay up to 4 indicators, filtered by impact and currency. Scroll left to load earlier history. Jump straight from any release to the chart centred on it. |
@@ -119,7 +164,16 @@ and for the Task Scheduler entry, not because you are expected to use it.
 | `run_job <id> --force` | Job detail → **Run again** (the CLI variant prints the traceback inline instead of storing it) |
 | `prune_history` | Activity → **Clear history** (add `--dry-run` to see what would go) |
 | `vol_check` | Timestamps → **Check these timestamps against price** |
+| `group_releases --apply` | — derive release groups from co-timed releases (§3.3) |
+| `classify_indicators --apply` | — derive the concept of each indicator from its name (§6.4) |
+| `run_direction` | — fit the signed response to the change vs previous |
+| `mt5_audit` | — P0.5 Q1 and Q3, once the MT5 CSV is imported |
+| `price_compare --symbol <pair>` | — P0.5 Q4, once HistData zips are imported |
 | `test tests` | — unit tests for the Django-free layer |
+
+`mt5_audit` and `price_compare` each wait on one manual step and say exactly
+which. Run either now and it will tell you what to go and fetch; run it after
+the import and it answers its question.
 
 Set `FXMACRO_WORKER=0` to keep a command from spawning the background worker.
 
@@ -186,6 +240,16 @@ Suggested cadence: Sunday before the week opens.
 - **A quiet indicator's clock cannot be validated this way at all.** If price
   does not move when a release lands, price cannot say where it landed. Those
   read `no_spike` and the verdict says *unverified*, never *correct*.
+- **A per-release `vol_check` grade is not a verdict about that release.** Its
+  label reads *"offset — spike found, but not where the timestamp says"*, which
+  on a single event page asserts something the check cannot support: three of
+  the twenty-one hand-verified releases carry `offset` against an agency page
+  that confirms the stored timestamp exactly, and 87 of CPI m/m's 235 releases
+  are graded `offset` while the series as a whole is comfortably aligned. For
+  one release, the strongest bar landing elsewhere in a ±3 hour window is noise.
+  Only the indicator-level binomial test decides a clock. The wording should
+  change and the event page should show the series verdict beside the release's
+  own grade; neither is done.
 - Only `forexfactory_weekly` has a collector. The other nine source rows exist
   in the register with their clocks and policies recorded, awaiting one.
 - The FF feed carries no reporting period, so its rows use a provisional
