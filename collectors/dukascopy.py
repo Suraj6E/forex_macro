@@ -214,24 +214,37 @@ def _months(start: date, end: date) -> list[date]:
     return out
 
 
-def _get(ctx: FetchContext, url: str, retries: int, delay: float) -> bytes | None:
-    """Bytes, or None when the feed will not serve this period.
+#: Why the feed would not serve a period. The two are not interchangeable and
+#: collapsing them is how a caller ends up advising a retry that can never
+#: succeed: MISSING is permanent until Dukascopy publishes the file — the
+#: current month has no monthly candle file while it is still running —
+#: whereas THROTTLED is the feed saying "not now" and is worth re-running.
+MISSING = "missing"
+THROTTLED = "throttled"
+
+
+def _get(
+    ctx: FetchContext, url: str, retries: int, delay: float
+) -> tuple[bytes | None, str | None]:
+    """`(payload, None)`, or `(None, reason)` when the feed will not serve it.
 
     404 means it does not exist. 503 means "not now" — this feed throttles
     bursts aggressively, so that is retried with growing backoff rather than
     treated as a gap, and only counted as unavailable once the retries run out.
+    The reason is returned rather than swallowed so the caller can say which
+    happened instead of guessing.
     """
     for attempt in range(retries + 1):
         try:
-            return http_request(ctx, url, missing_statuses=(404,)).content
+            return http_request(ctx, url, missing_statuses=(404,)).content, None
         except MissingResource:
-            return None
+            return None, MISSING
         except TransientError:
             if attempt == retries:
                 ctx.log(f"unavailable after {retries + 1} attempts: {url}")
-                return None
+                return None, THROTTLED
             time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1) + delay)
-    return None
+    return None, THROTTLED
 
 
 def fetch(ctx: FetchContext) -> FetchResult:
@@ -283,6 +296,7 @@ def _fetch_candles(ctx: FetchContext, timeframe: str) -> FetchResult:
     preview_rows: list[list] = []
     total_bars = 0
     unavailable: list[str] = []
+    reasons: dict[str, int] = {MISSING: 0, THROTTLED: 0}
     done = 0
 
     # These downloads take seconds each and are entirely independent, so the
@@ -292,16 +306,18 @@ def _fetch_candles(ctx: FetchContext, timeframe: str) -> FetchResult:
     def download(target):
         symbol, month = target
         url = candle_url(symbol, month, timeframe)
-        payload = _get(ctx, url, retries, delay)
-        return target, url, payload
+        payload, reason = _get(ctx, url, retries, delay)
+        return target, url, payload, reason
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for (symbol, month), url, payload in pool.map(download, targets):
+        for (symbol, month), url, payload, reason in pool.map(download, targets):
             done += 1
             key = f"{symbol}:{month:%Y-%m}"
 
             if payload is None:
                 unavailable.append(key)
+                if reason in reasons:
+                    reasons[reason] += 1
             elif payload:
                 snapshots.append(
                     write_snapshot(
@@ -349,11 +365,28 @@ def _fetch_candles(ctx: FetchContext, timeframe: str) -> FetchResult:
     ctx.log(notes)
 
     if not frames and not skipped:
+        # Which of the two it was decides whether re-running is sensible at
+        # all, so say it rather than assuming the throttle.
+        if reasons[THROTTLED] and not reasons[MISSING]:
+            raise CollectorError(
+                "Nothing was returned. This feed throttles bursts — every request "
+                "came back 503 or timed out. Wait a few minutes and re-run: months "
+                "already stored are skipped, so a resumed fetch picks up where this "
+                "one stopped."
+            )
+        if reasons[MISSING] and not reasons[THROTTLED]:
+            raise CollectorError(
+                f"The feed has no {timeframe} file for any of these periods "
+                f"({reasons[MISSING]} requested, all 404). Dukascopy publishes a "
+                "monthly candle file once the month is over, so the month in "
+                "progress is never available this way — re-running will not change "
+                "that. Use m1 (tick-derived) for the current month, or wait until "
+                "the month closes."
+            )
         raise CollectorError(
-            "Nothing was returned. This feed throttles bursts — every request "
-            "came back 503 or timed out. Wait a few minutes and re-run: months "
-            "already stored are skipped, so a resumed fetch picks up where this "
-            "one stopped."
+            f"Nothing was returned: {reasons[MISSING]} period(s) the feed does not "
+            f"have (404) and {reasons[THROTTLED]} it declined to serve (503 or "
+            "timeout). Re-running can recover the second group but not the first."
         )
 
     return FetchResult(

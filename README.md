@@ -9,7 +9,7 @@ model, the job runner, the full screen set, six collectors, the Parquet price
 store, the event study across the horizon ladder, and — new — the check that
 asks price whether our release timestamps are where we think they are.
 
-**The calendar is loaded: 86,450 releases, Jan 2007 → today.** 66,186 carry an
+**The calendar is loaded: 86,564 releases, Jan 2007 → 22 Sep 2026.** 66,273 carry an
 exact release time and an actual; 56,111 a forecast, 26,090 a revised previous.
 The other 20,264 are bank holidays, bond auctions, speeches and other all-day or
 tentative entries that carry a scheduled time but no instant — they can be read,
@@ -69,9 +69,9 @@ forced:
 
 | Source | How it collects | State |
 |---|---|---|
-| **ForexFactory pages** | HTTP, one request per month | **The calendar.** 86,450 events loaded, Jan 2007 → today. Nothing exists before Jan 2007 — months back to 2000 return a valid page with zero events. |
+| **ForexFactory pages** | HTTP, one request per month | **The calendar.** 86,564 events loaded, Jan 2007 → 22 Sep 2026. Nothing exists before Jan 2007 — months back to 2000 return a valid page with zero events. |
 | **ForexFactory weekly** | HTTP, weekly cadence | Working. The *only* point-in-time forecast channel (§7.3) — the pages source cannot be, because it shows today's forecast. Rate-limits hard; cooldown enforced from the DB. |
-| **DBnomics** | HTTP API, series list configurable per source | Working but **not loaded** — purged once ForexFactory covered the span. Available as a cross-check; it carries no release timestamps, so it can fill an `actual` but never anchor a study. |
+| **DBnomics** | HTTP API, series list configurable per source | Working, **deliberately not loaded**. Previewed 22 Sep 2026: 889 observations parse cleanly, but they key on reference period (`2007-01`) where ForexFactory keys on `release:<UTC minute>`, so nothing joins — and it serves the CPI *index level* (203.437) where ForexFactory serves CPI *m/m* (0.4%), so even joined the values are not comparable. Importing it as-is would add 889 orphan rows. It becomes a real cross-check once the m/m transform and §4.4 re-keying exist. |
 | **MT5 calendar** | MQL5 script → UTF-8 CSV → upload or watched folder | Working. Run `mql5/CalendarExport.mq5` in the terminal. Handles the ×1,000,000 scaling and the `LONG_MIN` null sentinel. |
 | **Dukascopy** | HTTP, one LZMA file per instrument-hour → M1 bars | Working; decode verified against live ticks. The feed throttles, so sweeps retry with backoff and record unavailable hours. Ticks are for event windows only — bulk would be ~800 GB. |
 | **HistData** | Import: upload zips or point `import_dir` at a folder | Import path working. **Automated download is not possible** — the form posts an empty token and the site returns HTTP 200 with zero bytes to anything that is not a browser. §14 Q4 anticipated this. |
@@ -111,8 +111,12 @@ quantity, own mode, own label, exactly as §6.7 requires of modelled
 expectations.
 
 **B** stays blocked on §4.3: a historical calendar scrape shows today's
-consensus, so only the weekly forward capture earns the label, and it currently
-holds 16 forecasts.
+consensus, so only the weekly forward capture earns the label. It holds **48**
+forecasts, and the gap in them is the point: the capture ran on 10 September and
+then not again until the 22nd, so the week of 14–18 September has no
+point-in-time forecast and never will. That is §7.3's "a missed week is
+permanently lost", observed rather than predicted — the Task Scheduler entry is
+what prevents it.
 
 ## Setup
 
@@ -261,6 +265,19 @@ Suggested cadence: Sunday before the week opens.
   period, so rows use a `release:<UTC minute>` key instead of the §4.4 identity.
   They cannot be joined to an agency figure by period until a source that does
   carry `period` — MT5 or an agency — supplies one and they are re-keyed.
+- **That key silently merges 70 releases**, and the Data Quality screen now says
+  so. ForexFactory masks the time on some rows, and a masked row carries a
+  placeholder minute rather than its own, so two reporting periods of the same
+  indicator collide on one key and consolidate into a single row — `actual` from
+  one period, `previous` from the other. You can tell they are consecutive
+  prints rather than one event listed twice because the later one's `previous`
+  equals the earlier one's `actual`. It reaches nine high-importance indicators,
+  payrolls among them, and 770 measured impacts sit on affected rows. This is
+  precisely the silent merge the provisional key was chosen to avoid, arriving
+  by a route the choice did not cover. **The fix is available and not applied:**
+  ForexFactory's payload carries its own `id`, unique per release, which is what
+  the key should use. Re-keying 86,000 rows is a deliberate migration, not a
+  side effect of a session.
 - **No forecast in the dataset is point-in-time.** A historical scrape shows
   today's consensus, and calendar sites revise those (§4.3). Only the weekly
   forward capture earns that label; it currently holds 16 such forecasts and
@@ -277,7 +294,12 @@ Suggested cadence: Sunday before the week opens.
 - HistData cannot be downloaded automatically (see the sources table above).
 - Dukascopy throttles sustained sweeps. Unavailable hours are counted and
   reported; re-running the same range is cheap because payloads are
-  content-addressed and never downloaded twice.
+  content-addressed and never downloaded twice. **The month in progress cannot
+  be fetched at `h1` at all** — Dukascopy publishes a monthly candle file only
+  once the month is over, so September bars arrive on 1 October. The collector
+  used to report that 404 as a throttle and advise a retry that could never
+  succeed; it now distinguishes "the feed does not have this" from "the feed
+  declined to serve it" and says which.
 - Charts are server-rendered inline SVG — no chart library, no CDN, no build
   step, no JavaScript. Every hue was run through a palette validator against
   the app's own surfaces in both themes: actual vs forecast separate at CVD

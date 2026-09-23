@@ -143,6 +143,7 @@ def run_checks() -> list[Finding]:
         _provisional_periods(counts),
         _duplicate_indicators(),
         _provisional_duplicates(),
+        _fused_releases(counts),
         _unmapped_indicators(),
         _cross_source_disagreements(counts),
         _sentinel_values(counts),
@@ -460,4 +461,92 @@ def _price_gaps() -> Finding:
         "holidays. A gap inside a window silently shortens it, and a shortened "
         "window looks like a smaller effect.",
         link="/instruments/",
+    )
+
+
+#: How many fused releases to name in the finding. The query behind it is the
+#: expensive one on this page, so it is bounded rather than exhaustive.
+FUSED_SAMPLE_LIMIT = 5
+
+
+def fused_release_ids(limit: int | None = None) -> list[int]:
+    """Releases holding two different ForexFactory events with different actuals.
+
+    `_provisional_duplicates` states the trade-off behind `release:<UTC minute>`
+    keys: a shifted minute forks a duplicate, which is visible and recoverable,
+    and that was preferred to keying on the date alone because that "would
+    instead have silently merged two genuinely different same-day releases".
+
+    This finds the case where the silent merge happens anyway. ForexFactory
+    masks the time on some rows (`timeMasked`), and a masked row carries a
+    placeholder minute rather than its own. Two different reporting periods of
+    the same indicator then land on the same provisional key and consolidate
+    into one row — so `actual` comes from one period and `previous` from the
+    other, and nothing downstream can tell.
+
+    Detected on ForexFactory's own `id`, which is unique per release and is
+    what the key should have been using all along.
+    """
+    from django.db import connection
+
+    sql = """
+        SELECT o.event_release_id
+        FROM calendar_data_sourceobservation o
+        JOIN sources_source s ON s.id = o.source_id
+        WHERE s.key = 'forexfactory_pages'
+          AND json_extract(o.raw_json, '$.payload.id') IS NOT NULL
+        GROUP BY o.event_release_id
+        HAVING COUNT(DISTINCT json_extract(o.raw_json, '$.payload.id')) > 1
+           AND COUNT(DISTINCT json_extract(o.raw_json, '$.payload.actual')) > 1
+    """
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    with connection.cursor() as cursor:
+        cursor.execute(sql)
+        return [row[0] for row in cursor.fetchall()]
+
+
+def _fused_releases(counts: dict) -> Finding:
+    ids = fused_release_ids()
+    rows = (
+        EventRelease.objects.filter(pk__in=ids[:FUSED_SAMPLE_LIMIT])
+        .select_related("indicator")
+        .order_by("release_time_utc")
+        if ids
+        else []
+    )
+    samples = [
+        [
+            f"{r.indicator.currency} {r.indicator.name}",
+            r.release_time_utc.strftime("%Y-%m-%d %H:%M") if r.release_time_utc else "—",
+            f"actual {r.actual_current}",
+            f"previous {r.previous}",
+        ]
+        for r in rows
+    ]
+    return Finding(
+        code="fused_releases",
+        title="Two reporting periods merged into one release",
+        severity=WARNING if ids else OK,
+        count=len(ids),
+        total=counts.get("total", 0),
+        detail=(
+            f"{len(ids)} release(s) hold two different ForexFactory events whose "
+            "actuals differ. In each one the previous of the later print equals "
+            "the actual of the earlier, which is how you can tell they are "
+            "consecutive periods rather than one event listed twice."
+            if ids
+            else "No release holds two ForexFactory events with different actuals."
+        ),
+        why="ForexFactory masks the time on some rows, and a masked row carries a "
+        "placeholder minute instead of its own. Two reporting periods of the same "
+        "indicator then collide on the provisional `release:<UTC minute>` key and "
+        "consolidate into a single row, so the actual comes from one period and "
+        "the previous from another. That is the silent merge the provisional key "
+        "was chosen to avoid, arriving by a route the choice did not cover. The "
+        "fix is to key on ForexFactory's own event id, which is unique per "
+        "release; re-keying is not done, so treat these rows as unreliable and "
+        "anything measured against them as carrying an unknown period.",
+        link="quality:duplicates",
+        samples=samples,
     )

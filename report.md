@@ -6,6 +6,31 @@ own `analytics/` functions. Where I ran a check the project does not run itself,
 
 ---
 
+## Interactive version
+
+**[What Moves FX →](https://claude.ai/artifact/JAbC6hkifjwduLep15L3hW)**
+
+The findings below as a page you can operate rather than scroll. It carries the four
+charts this document can only tabulate:
+
+| On the page | What it lets you do that the text cannot |
+|---|---|
+| **Concept ranking** | Toggle between the *median* release in a family and its *heaviest* member. The two disagree sharply — inflation sits last on the median and third on the ceiling — and the toggle is the fastest way to see that the median is describing family composition, not impact. |
+| **Horizon curves** | Switch between the FOMC, the Employment Situation, the ECB and CPI on one scale, so the shapes are comparable: the FOMC's two-week tail against payrolls' three days, and the negative pre-release bars that are the liquidity-withdrawal signature. |
+| **Regime split** | Step through §4.4's seven regimes per event. CPI going from 2 pips to 36 is the single most striking thing in this review and it is close to invisible as a table row. |
+| **Direction survivors** | The count surviving FDR at each horizon, with the pre-release window shaded, so the +1h spike and the leakage test read as one picture. |
+
+Every figure is transcribed from the sections below — the page is a reading surface, not a
+second analysis, and it recomputes nothing. Two things found after this review was written
+(the 70 fused releases, and Dukascopy's current-month limit) are carried there as a dated
+addendum rather than folded into the original findings.
+
+The empirical null of 0.70 (§3.3a) is drawn on the ranking chart as a reference line,
+because that correction is the one most likely to be lost when a number is read out of
+context.
+
+---
+
 ## 0. The short version
 
 **What this is.** A local, single-user Django application that holds 86,450 ForexFactory
