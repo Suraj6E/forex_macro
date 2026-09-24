@@ -22,9 +22,10 @@ Parquet files the UI reads.
 from __future__ import annotations
 
 import math
+import weakref
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -115,10 +116,64 @@ def _price_frame(bars: pd.DataFrame) -> pd.DataFrame:
     return frame.sort_values("ts_utc").reset_index(drop=True)
 
 
+@dataclass(frozen=True)
+class _Columns:
+    """The bar columns as plain arrays, timestamps as UTC nanoseconds.
+
+    A study makes hundreds of thousands of single-bar lookups; through pandas
+    each one costs a column box and an `iloc`, which was three quarters of a
+    study's run time.
+    """
+
+    ts: np.ndarray
+    open: np.ndarray
+    high: np.ndarray
+    low: np.ndarray
+    close: np.ndarray
+
+
+#: Arrays for frames that went through `prepare_bars`, keyed by id and
+#: dropped when the frame is collected. Not in `frame.attrs`: pandas deep-
+#: copies attrs on every slice.
+_COLUMNS: dict[int, _Columns] = {}
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _build_columns(bars: pd.DataFrame) -> _Columns:
+    stamps = bars["ts_utc"].dt.tz_convert("UTC").dt.tz_localize(None)
+    return _Columns(
+        ts=stamps.to_numpy(dtype="datetime64[ns]").view("int64"),
+        open=bars["open"].to_numpy(dtype=float),
+        high=bars["high"].to_numpy(dtype=float),
+        low=bars["low"].to_numpy(dtype=float),
+        close=bars["close"].to_numpy(dtype=float),
+    )
+
+
+def _columns(bars: pd.DataFrame) -> _Columns:
+    cached = _COLUMNS.get(id(bars))
+    if cached is not None:
+        return cached
+    return _build_columns(_price_frame(bars))
+
+
+def _ns(moment: datetime) -> int:
+    """Exact UTC nanoseconds; float seconds would lose the low digits."""
+    return (moment - _EPOCH) // timedelta(microseconds=1) * 1000
+
+
 def prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
-    """Sorted, UTC-typed bars, marked so `measure_event` does not redo it."""
+    """Sorted, UTC-typed bars with their lookup arrays built once.
+
+    The frame is treated as read-only from here on: the arrays are not
+    rebuilt if it is edited in place.
+    """
     frame = _price_frame(bars)
     frame.attrs["prepared"] = True
+    key = id(frame)
+    _COLUMNS[key] = _build_columns(frame)
+    weakref.finalize(frame, _COLUMNS.pop, key, None)
     return frame
 
 
@@ -137,23 +192,20 @@ def price_before(bars: pd.DataFrame, moment: datetime) -> float | None:
     bar early; the granularity is a property of the data, and stating it is
     better than interpolating a number that implies precision we do not have.
     """
-    index = bars["ts_utc"].searchsorted(moment, side="right") - 1
-    if index < 0 or index >= len(bars):
+    cols = _columns(bars)
+    index = int(np.searchsorted(cols.ts, _ns(moment), side="right")) - 1
+    if index < 0 or index >= cols.ts.size:
         return None
-    return float(bars["open"].iloc[index])
+    return float(cols.open[index])
 
 
 def price_at(bars: pd.DataFrame, moment: datetime) -> float | None:
     """Close of the bar containing `moment`."""
-    index = bars["ts_utc"].searchsorted(moment, side="right") - 1
-    if index < 0 or index >= len(bars):
+    cols = _columns(bars)
+    index = int(np.searchsorted(cols.ts, _ns(moment), side="right")) - 1
+    if index < 0 or index >= cols.ts.size:
         return None
-    return float(bars["close"].iloc[index])
-
-
-def _slice(bars: pd.DataFrame, start: datetime, end: datetime) -> pd.DataFrame:
-    mask = (bars["ts_utc"] >= start) & (bars["ts_utc"] <= end)
-    return bars.loc[mask]
+    return float(cols.close[index])
 
 
 def raw_return(bars: pd.DataFrame, t0: datetime, horizon: Horizon) -> float | None:
@@ -187,12 +239,14 @@ def measure_window(bars: pd.DataFrame, t0: datetime, horizon: Horizon,
 
     start = min(t0, t0 + timedelta(seconds=horizon.seconds))
     end = max(t0, t0 + timedelta(seconds=horizon.seconds))
-    window = _slice(bars, start, end)
+    cols = _columns(bars)
+    lo = int(np.searchsorted(cols.ts, _ns(start), side="left"))
+    hi = int(np.searchsorted(cols.ts, _ns(end), side="right"))
 
     # Against *open* hours, not calendar hours — see open_seconds_between.
     open_seconds = open_seconds_between(start, end)
     result.bars_expected = max(int(open_seconds // bar_seconds), 1)
-    result.n_bars = len(window)
+    result.n_bars = hi - lo
 
     ret = raw_return(bars, t0, horizon)
     if ret is None or result.n_bars < result.bars_expected * MIN_BAR_COVERAGE:
@@ -201,18 +255,16 @@ def measure_window(bars: pd.DataFrame, t0: datetime, horizon: Horizon,
     result.ret = ret
     result.abs_ret = abs(ret)
 
-    if len(window) > 1:
-        steps = np.log(window["close"].to_numpy() / window["open"].to_numpy())
+    if result.n_bars > 1:
+        steps = np.log(cols.close[lo:hi] / cols.open[lo:hi])
         steps = steps[np.isfinite(steps)]
         if steps.size:
             result.realized_vol = float(np.sqrt(np.sum(steps ** 2)))
 
     anchor = price_before(bars, t0)
-    if anchor and len(window):
-        highs = window["high"].to_numpy()
-        lows = window["low"].to_numpy()
-        result.mfe = float(np.log(np.max(highs) / anchor))
-        result.mae = float(np.log(np.min(lows) / anchor))
+    if anchor and result.n_bars:
+        result.mfe = float(np.log(np.max(cols.high[lo:hi]) / anchor))
+        result.mae = float(np.log(np.min(cols.low[lo:hi]) / anchor))
 
     return result
 
@@ -306,15 +358,23 @@ def _window_contains(excluded: list[datetime], moment: datetime, horizon: Horizo
 
 def _others_in_window(excluded: list[datetime], moment: datetime, horizon: Horizon,
                       skip: datetime | None = None) -> int:
-    """How many excluded releases fall in the window, ends inclusive.
+    """How many excluded releases the window's measured move contains.
 
-    Inclusive because the ends are measured with the bar that contains them: a
-    release at the far end moves the close that the window reads.
+    The ends follow how `raw_return` reads them. A post-release window runs
+    from the open of the bar holding `moment` to the close of the bar holding
+    the far end, so a release at either end is inside it. A pre-release window
+    ends at the *open* of the bar holding `moment`, before anything released
+    at that instant has moved price, so its near end is open.
     """
     if not excluded:
         return 0
     start = min(moment, moment + timedelta(seconds=horizon.seconds))
     end = max(moment, moment + timedelta(seconds=horizon.seconds))
+    if horizon.seconds < 0:
+        count = bisect_left(excluded, end) - bisect_left(excluded, start)
+        if skip is not None and start <= skip < end:
+            count -= bisect_right(excluded, skip) - bisect_left(excluded, skip)
+        return count
     count = bisect_right(excluded, end) - bisect_left(excluded, start)
     if skip is not None and start <= skip <= end:
         count -= bisect_right(excluded, skip) - bisect_left(excluded, skip)

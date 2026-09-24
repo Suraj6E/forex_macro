@@ -208,6 +208,18 @@ class BaselineTests(unittest.TestCase):
             )
             self.assertLess(moment.weekday(), 5, "never a weekend stand-in")
 
+    def test_a_release_at_the_close_of_a_pre_window_is_outside_it(self):
+        # "-1d" ends at the open of the release bar, before the release moves
+        # anything, so last week's instance there does not contaminate it and
+        # the same weekday stays usable.
+        probe = T0 - timedelta(weeks=1)
+        self.assertFalse(
+            eventstudy._window_contains([probe], probe, Horizon("-1d", -86400))
+        )
+        self.assertTrue(
+            eventstudy._window_contains([probe], probe, Horizon("+1d", 86400))
+        )
+
     def test_long_windows_on_a_weekly_series_keep_their_baseline(self):
         # A +1w window after a weekly release necessarily holds the next one,
         # so a baseline window holding one release is like-for-like. es-2

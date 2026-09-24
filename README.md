@@ -170,6 +170,7 @@ and for the Task Scheduler entry, not because you are expected to use it.
 | `vol_check` | Timestamps → **Check these timestamps against price** |
 | `group_releases --apply` | — derive release groups from co-timed releases (§3.3) |
 | `classify_indicators --apply` | — derive the concept of each indicator from its name (§6.4) |
+| `run_studies` | — re-measure every pairing an older engine left behind (after an engine bump); resumable |
 | `run_direction` | — fit the signed response to the change vs previous |
 | `mt5_audit` | — P0.5 Q1 and Q3, once the MT5 CSV is imported |
 | `price_compare --symbol <pair>` | — P0.5 Q4, once HistData zips are imported |
@@ -219,6 +220,29 @@ Environment: FXMACRO_WORKER=0
 ```
 
 Suggested cadence: Sunday before the week opens.
+
+## Engine es-3 (September 2026)
+
+Three corrections from the review in [`report.md`](report.md) §3.3, applied and
+re-run over all 238 pairings (`run_studies`, then `run_direction`):
+
+- **The ratio reads 1.0 for "normal".** It is now mean move over mean normal
+  move. The old median-of-ratios read ~0.70 at +1h for nothing at all. At 400
+  random non-event EUR/USD hours the new figure reads 0.97–1.04 at most
+  horizons. Across pairings the +1h median moved from 0.97 to 1.19; the
+  p-values were never affected (104 of 236 pairings significant at +1h, was 106
+  of 229).
+- **Weekly series keep their baseline.** A contaminated look-back week is
+  replaced by the same hour a day or two away, and a long window may hold as
+  many of the indicator's releases as the event window does. Unemployment
+  Claims at +1w: n 41 → 970; Natural Gas Storage: 0 → 958. Every weekly
+  long-horizon "effect" es-2 reported (Claims +1M, Crude +1w) is gone.
+- **Outliers are flagged (§4.6).** A row is flagged when a registered market
+  shock sits inside its window or its abnormal move is over 10 robust sigmas
+  from the pairing's median: 463 of 583,246 rows. Mode A keeps them and draws
+  them hollow on the scatter; the direction fit leaves them out and says so.
+  The CHF Libor result (R² 0.35, p_fdr 0.0001) was one day, 15 January 2015,
+  and without it is nothing (R² 0.04, p_fdr 0.31).
 
 ## Known limits at P2
 
