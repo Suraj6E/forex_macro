@@ -188,6 +188,8 @@
   <div class="card__foot">
     One dot per release, so you can see whether the average is steady or driven
     by a handful of crises. The dashed line is the normal move for that window.
+    Hollow rings are flagged outliers: a known shock inside the window, or a move
+    far outside this pairing's usual range. They are still counted in the average.
   </div>
 </section>
 {% endif %}
@@ -209,7 +211,9 @@
       <thead>
         <tr><th>Horizon</th><th>Verdict</th><th class="num">× normal</th>
             <th class="num">Excess (pips)</th><th class="num">± se</th>
-            <th class="num">n</th><th class="num">p (FDR)</th>
+            <th class="num">n</th><th class="num" title="Median matched weeks behind each release's normal; twelve is the target">Weeks</th>
+            <th class="num" title="Releases flagged as outliers (§4.6). Flagged, not excluded.">Flagged</th>
+            <th class="num">p (FDR)</th>
             <th class="num">Floor (pips)</th><th>Attribution</th></tr>
       </thead>
       <tbody>
@@ -222,10 +226,12 @@
             {% elif item.significant %}<span class="badge badge--ok">moves more</span>
             {% else %}<span class="badge badge--ghost">no signal</span>{% endif %}
           </td>
-          <td class="num">{{ item.row.r_squared|floatformat:2|default_if_none:"—" }}×</td>
+          <td class="num">{{ item.row.abs_ratio|floatformat:2|default_if_none:"—" }}×</td>
           <td class="num small">{{ item.pips|floatformat:1|default_if_none:"—" }}</td>
           <td class="num small muted">{{ item.pips_error|floatformat:1|default_if_none:"—" }}</td>
           <td class="num">{{ item.row.n }}</td>
+          <td class="num small muted">{{ item.row.baseline_n|default_if_none:"—" }}</td>
+          <td class="num small{% if item.row.n_outliers %}{% else %} muted{% endif %}">{{ item.row.n_outliers }}</td>
           <td class="num small">
             {% if item.row.p_fdr != None %}
               {% if item.significant %}<strong>{{ item.row.p_fdr|floatformat:4 }}</strong>

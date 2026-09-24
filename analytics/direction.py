@@ -88,6 +88,9 @@ class DirectionFit:
     #: a null reads as "no effect larger than X" rather than "no effect".
     detectability_floor: float | None = None
 
+    #: Rows at this horizon left out because the event study flagged them.
+    n_outliers: int = 0
+
     samples: list = field(default_factory=list)
 
     @property

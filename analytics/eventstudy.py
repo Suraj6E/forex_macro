@@ -22,7 +22,7 @@ Parquet files the UI reads.
 from __future__ import annotations
 
 import math
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -113,6 +113,13 @@ def _price_frame(bars: pd.DataFrame) -> pd.DataFrame:
     frame = bars.copy()
     frame["ts_utc"] = pd.to_datetime(frame["ts_utc"], utc=True)
     return frame.sort_values("ts_utc").reset_index(drop=True)
+
+
+def prepare_bars(bars: pd.DataFrame) -> pd.DataFrame:
+    """Sorted, UTC-typed bars, marked so `measure_event` does not redo it."""
+    frame = _price_frame(bars)
+    frame.attrs["prepared"] = True
+    return frame
 
 
 def _bar_seconds(bars: pd.DataFrame) -> int:
@@ -210,6 +217,11 @@ def measure_window(bars: pd.DataFrame, t0: datetime, horizon: Horizon,
     return result
 
 
+#: Same-hour substitutes, nearest first, for a week whose matched slot is
+#: contaminated. Weekends are skipped when they come up.
+SUBSTITUTE_DAYS = (-1, 1, -2, 2)
+
+
 def matched_baseline(
     bars: pd.DataFrame,
     t0: datetime,
@@ -230,22 +242,48 @@ def matched_baseline(
     previous instance of the event itself — measured on the real data, 69% of
     Natural Gas Storage baseline windows contained another Natural Gas Storage
     release. The event is then compared against itself and the ratio collapses
-    to 1 by construction. Passing the indicator's own release times here skips
-    those windows and keeps walking back until enough clean ones are found.
+    to 1 by construction.
+
+    es-2 skipped such windows and walked further back, which fails for a weekly
+    series: *every* same-weekday look-back holds a release, so the survivors
+    were the holiday-shifted weeks and DST crossings (Claims kept 469 of 1,020
+    releases at +1h and 41 at +1w; Natural Gas Storage kept none at +1w). Two
+    changes fix that:
+
+    - **A contaminated week is replaced, not skipped.** The same hour one or
+      two days either side stands in for it, so the sample stays within the
+      twelve weeks it is meant to come from. A monthly series only ever needs
+      this for the one week the previous print lands in.
+    - **Contamination is counted, not detected.** A +1w window after a weekly
+      release necessarily contains the next one, so a baseline window holding
+      one release is like-for-like there, not circular. A candidate may hold
+      as many of the indicator's releases as the event window holds besides
+      the event itself — at +1h that is zero, which is the old rule.
+
+    A baseline window may never contain `t0` itself: at +1M the one-week
+    look-back would otherwise measure the event as its own normal.
     """
     excluded = sorted(exclude or [])
     ceiling = max_lookback_weeks or weeks * 4
+    allowed = _others_in_window(excluded, t0, horizon, t0)
 
     samples = []
-    week = 1
-    while len(samples) < weeks and week <= ceiling:
-        moment = t0 - timedelta(weeks=week)
-        week += 1
-        if _window_contains(excluded, moment, horizon):
-            continue
-        value = raw_return(bars, moment, horizon)
-        if value is not None and math.isfinite(value):
-            samples.append(value)
+    for week in range(1, ceiling + 1):
+        if len(samples) >= weeks:
+            break
+        slot = t0 - timedelta(weeks=week)
+        for shift in (0, *SUBSTITUTE_DAYS):
+            moment = slot + timedelta(days=shift)
+            if shift and moment.weekday() >= 5:
+                continue
+            if max(moment, moment + timedelta(seconds=horizon.seconds)) >= t0:
+                continue
+            if _others_in_window(excluded, moment, horizon) > allowed:
+                continue
+            value = raw_return(bars, moment, horizon)
+            if value is not None and math.isfinite(value):
+                samples.append(value)
+                break
 
     if len(samples) < 3:
         return None, None, None, len(samples)
@@ -263,12 +301,24 @@ def matched_baseline(
 
 def _window_contains(excluded: list[datetime], moment: datetime, horizon: Horizon) -> bool:
     """Does this candidate baseline window hold an excluded release?"""
+    return _others_in_window(excluded, moment, horizon) > 0
+
+
+def _others_in_window(excluded: list[datetime], moment: datetime, horizon: Horizon,
+                      skip: datetime | None = None) -> int:
+    """How many excluded releases fall in the window, ends inclusive.
+
+    Inclusive because the ends are measured with the bar that contains them: a
+    release at the far end moves the close that the window reads.
+    """
     if not excluded:
-        return False
+        return 0
     start = min(moment, moment + timedelta(seconds=horizon.seconds))
     end = max(moment, moment + timedelta(seconds=horizon.seconds))
-    index = bisect_left(excluded, start)
-    return index < len(excluded) and excluded[index] <= end
+    count = bisect_right(excluded, end) - bisect_left(excluded, start)
+    if skip is not None and start <= skip <= end:
+        count -= bisect_right(excluded, skip) - bisect_left(excluded, skip)
+    return count
 
 
 def measure_event(
@@ -279,8 +329,13 @@ def measure_event(
     baseline_weeks: int = BASELINE_WEEKS,
     exclude: list[datetime] | None = None,
 ) -> list[WindowMeasurement]:
-    """One release against one instrument, across the whole ladder."""
-    bars = _price_frame(bars)
+    """One release against one instrument, across the whole ladder.
+
+    Pass bars through `prepare_bars` once when measuring many releases against
+    the same frame; otherwise every call copies and sorts the whole history.
+    """
+    if not bars.attrs.get("prepared"):
+        bars = prepare_bars(bars)
     if bars.empty:
         return []
 
@@ -326,6 +381,9 @@ class PooledPoint:
     abs_t_stat: float | None = None
     abs_p_value: float | None = None
     abs_ratio: float | None = None
+    #: Median matched weeks behind each release's normal. Low means the
+    #: baseline search struggled, and the ratio rests on a thin denominator.
+    baseline_n: int | None = None
 
     hit_rate: float | None = None
     detectability_floor: float | None = None
@@ -394,13 +452,61 @@ def pool(measurements_by_event: list[list[WindowMeasurement]]) -> list[PooledPoi
                     point.abs_t_stat = abs_mean / abs_se
                     point.abs_p_value = _two_sided_p(point.abs_t_stat, excess.size - 1)
 
-            ratios = np.array(
-                [m.abs_ratio for m in group if m.abs_ratio is not None], dtype=float
-            )
-            if ratios.size:
-                point.abs_ratio = float(np.median(ratios))
+            point.abs_ratio = pooled_ratio(group)
+            counts = [m.baseline_n for m in group if m.baseline_n]
+            if counts:
+                point.baseline_n = int(np.median(counts))
         points.append(point)
     return points
+
+
+def pooled_ratio(group: list[WindowMeasurement]) -> float | None:
+    """Mean observed move over mean normal move — reads 1.0 when nothing happened.
+
+    es-2 took the median of per-event ratios, whose denominator is a mean. For
+    a Gaussian, median|x| / mean|x| is 0.845, and hourly FX returns are fatter
+    tailed than that: at 400 random non-event hours on EUR/USD the old figure
+    read 0.70 at +1h, so "1.0×" on the ranking meant a 43% excess and Core
+    PCE's 0.76× was normal, not quiet. A ratio of means has the same numerator
+    and denominator statistic, so its neutral point is 1.0 at every horizon.
+    """
+    pairs = [
+        (m.abs_ret, m.baseline_abs_mean)
+        for m in group
+        if m.abs_ret is not None and m.baseline_abs_mean
+    ]
+    if not pairs:
+        return None
+    normal = sum(b for _a, b in pairs)
+    return sum(a for a, _b in pairs) / normal if normal > 0 else None
+
+
+#: Robust z beyond which one release is flagged. Chosen on the stored es-2
+#: rows at +1h and +1d: it flags about 3 in 10,000 — the SNB floor removal
+#: (z −43) and introduction, the Brexit night, the October 2008 prints. It
+#: also catches genuine reactions (US CPI, November 2022, USDJPY at z −11),
+#: which is why a flag marks a row and never silently drops it.
+OUTLIER_Z = 10.0
+
+
+def outlier_mask(values: list[float | None], threshold: float = OUTLIER_Z) -> list[bool]:
+    """§4.6's `flag`: which values sit implausibly far from the rest.
+
+    Median and MAD, not mean and SD — one 1,133-pip hour inflates the SD enough
+    to hide itself. A flag is a mark on the row, not an exclusion: what a
+    flagged row does to a result is the pooling step's decision.
+    """
+    finite = np.array([v for v in values if v is not None and math.isfinite(v)], dtype=float)
+    if finite.size < 5:
+        return [False] * len(values)
+    centre = float(np.median(finite))
+    spread = float(np.median(np.abs(finite - centre))) * 1.4826
+    if spread <= 0:
+        return [False] * len(values)
+    return [
+        v is not None and math.isfinite(v) and abs(v - centre) / spread > threshold
+        for v in values
+    ]
 
 
 def _two_sided_p(t_stat: float, degrees: int) -> float | None:

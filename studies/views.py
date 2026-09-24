@@ -139,7 +139,7 @@ def event_study(request):
                 "horizon": row.horizon,
                 "value": row.effect_size,
                 "error": row.std_error,
-                "ratio": row.r_squared,      # stored as the observed/normal ratio
+                "ratio": row.abs_ratio,
                 "p": row.p_fdr,
                 "n": row.n,
                 "significant": significant,
@@ -288,9 +288,8 @@ def ranking(request):
 
     horizon = request.GET.get("horizon") or RANK_HORIZON
 
-    # Mode A supplies the magnitude. `r_squared` carries abs_ratio for Mode A
-    # rows — an overload inherited from the engine, and the reason this view
-    # never prints that column under its field name.
+    # Mode A supplies the magnitude: mean move over mean matched-normal move,
+    # so 1.0 is an ordinary window (es-3; es-2's median ratio read ~0.70).
     measured = (
         DecayCurve.objects.filter(
             mode=Mode.A,
@@ -309,7 +308,7 @@ def ranking(request):
             "indicator__release_group__name",
             "instrument__symbol",
         )
-        .annotate(ratio=Max("r_squared"), excess=Max("effect_size"), releases=Max("n"))
+        .annotate(ratio=Max("abs_ratio"), excess=Max("effect_size"), releases=Max("n"))
     )
 
     # Co-timed releases are one measurement wearing several names: NZD

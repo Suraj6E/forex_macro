@@ -639,7 +639,11 @@ def dots(points, *, width: int = 780, height: int = 240, reference: float | None
     healthy too, because an average hides whether an effect is steady or driven
     by a handful of crises.
     """
-    points = [(w, v) for w, v in points if v is not None]
+    # A third element, when present, marks a flagged outlier (§4.6): drawn
+    # hollow, so it stays visible without passing for an ordinary release.
+    points = [
+        (p[0], p[1], len(p) > 2 and bool(p[2])) for p in points if p[1] is not None
+    ]
     if not points:
         return empty_chart(empty)
 
@@ -647,12 +651,12 @@ def dots(points, *, width: int = 780, height: int = 240, reference: float | None
     plot_w = width - pad_left - pad_right
     plot_h = height - pad_top - pad_bottom
 
-    values = [v for _, v in points] + ([reference] if reference else [])
+    values = [v for _, v, _f in points] + ([reference] if reference else [])
     high = max(values) * 1.05
     low = 0.0
     span = (high - low) or 1.0
 
-    stamps = [w for w, _ in points]
+    stamps = [w for w, _v, _f in points]
     first, last = min(stamps), max(stamps)
     total = max((last - first).total_seconds(), 1)
 
@@ -690,10 +694,13 @@ def dots(points, *, width: int = 780, height: int = 240, reference: float | None
             f'text-anchor="end">{_esc(reference_label)}</text>'
         )
 
-    for when, value in points:
+    for when, value, flagged in points:
+        css = "dot dot--outlier" if flagged else "dot dot--event"
+        note = " (flagged outlier)" if flagged else ""
         parts.append(
-            f'<circle class="dot dot--event" cx="{x_at(when):.1f}" cy="{y_at(value):.1f}" r="2.5">'
-            f"<title>{_esc(f'{when:%Y-%m-%d}')}: {_esc(compact(value))}</title></circle>"
+            f'<circle class="{css}" cx="{x_at(when):.1f}" cy="{y_at(value):.1f}" '
+            f'r="{3.5 if flagged else 2.5}">'
+            f"<title>{_esc(f'{when:%Y-%m-%d}')}: {_esc(compact(value))}{note}</title></circle>"
         )
 
     baseline_y = pad_top + plot_h

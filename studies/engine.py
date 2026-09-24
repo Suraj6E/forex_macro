@@ -26,7 +26,13 @@ from prices.models import (
     PriceCoverage,
 )
 from prices.store import read_range
-from studies.models import AttributionConfidence, DecayCurve, EventImpact, Mode
+from studies.models import (
+    AttributionConfidence,
+    DecayCurve,
+    EventImpact,
+    Mode,
+    OutlierPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +42,13 @@ logger = logging.getLogger(__name__)
 #: es-2 — the matched baseline now skips look-back windows containing another
 #: release of the same indicator. Without it a weekly release is compared
 #: against itself and its measured effect collapses to ~1× by construction.
-ENGINE_VERSION = "es-2"
+#:
+#: es-3 — three corrections from the September 2026 review (report.md §3.3):
+#: the pooled ratio is mean over mean, so 1.0 means normal (it read ~0.70 for
+#: nothing at +1h); a contaminated baseline week is replaced by the same hour a
+#: day or two away instead of skipped, so weekly series keep their baseline at
+#: every horizon; and rows are flagged as outliers (§4.6) rather than never.
+ENGINE_VERSION = "es-3"
 
 PRICE_SOURCE = DEFAULT_PRICE_SOURCE
 
@@ -127,8 +139,9 @@ def run_study(
         return result
 
     # One read covering every window, rather than a Parquet read per release.
-    # The baseline reaches twelve weeks back and the ladder a month forward.
-    span_before = timedelta(weeks=eventstudy.BASELINE_WEEKS + 1)
+    # The baseline can walk up to four times its twelve weeks back, and the
+    # ladder reaches a month forward.
+    span_before = timedelta(weeks=eventstudy.BASELINE_WEEKS * 4 + 1)
     span_after = timedelta(seconds=max(h.seconds for h in horizons) + 86400)
     bars = read_range(
         instrument.symbol,
@@ -137,6 +150,7 @@ def run_study(
         releases[-1].release_time_utc + span_after,
         timeframe,
     )
+    bars = eventstudy.prepare_bars(bars)
     log(f"{len(bars):,} {timeframe} bars loaded for {instrument.symbol}")
     if bars.empty:
         result.notes = f"No {timeframe} bars cover these releases."
@@ -147,6 +161,7 @@ def run_study(
     own_releases = [r.release_time_utc for r in releases]
 
     measurements_by_event = []
+    measured_releases = []
     rows: list[EventImpact] = []
 
     for index, release in enumerate(releases, start=1):
@@ -160,13 +175,24 @@ def run_study(
 
         result.events_measured += 1
         measurements_by_event.append(per_event)
+        measured_releases.append(release)
 
-        for measurement in usable:
+        if index % 20 == 0 or index == len(releases):
+            progress(index / len(releases), f"{index}/{len(releases)} releases")
+
+    flags = _outlier_flags(instrument, measured_releases, measurements_by_event, bar_seconds)
+    price_source_id = _price_source_id()
+
+    for release, per_event in zip(measured_releases, measurements_by_event):
+        for measurement in per_event:
+            if not measurement.usable:
+                continue
+            reason = flags.get((release.pk, measurement.horizon), "")
             rows.append(
                 EventImpact(
                     event_release=release,
                     instrument=instrument,
-                    price_source_id=_price_source_id(),
+                    price_source_id=price_source_id,
                     horizon=measurement.horizon,
                     window_scheme=WindowScheme.FIXED,
                     window_seconds=measurement.seconds,
@@ -176,14 +202,15 @@ def run_study(
                     realized_vol=measurement.realized_vol,
                     mfe=measurement.mfe,
                     mae=measurement.mae,
+                    baseline_abs_mean=measurement.baseline_abs_mean,
+                    baseline_n=measurement.baseline_n,
                     n_bars=measurement.n_bars,
                     bars_missing=max(measurement.bars_expected - measurement.n_bars, 0),
+                    is_outlier=bool(reason),
+                    outlier_reason=reason,
                     engine_version=ENGINE_VERSION,
                 )
             )
-
-        if index % 20 == 0 or index == len(releases):
-            progress(index / len(releases), f"{index}/{len(releases)} releases")
 
     with transaction.atomic():
         EventImpact.objects.filter(
@@ -194,8 +221,11 @@ def run_study(
         EventImpact.objects.bulk_create(rows, batch_size=2000)
         result.impacts_written = len(rows)
 
+        outliers_by_horizon: dict[str, int] = {}
+        for _release_id, horizon in flags:
+            outliers_by_horizon[horizon] = outliers_by_horizon.get(horizon, 0) + 1
         result.curve_points = _write_curve(
-            indicator, instrument, measurements_by_event
+            indicator, instrument, measurements_by_event, outliers_by_horizon
         )
 
     result.notes = (
@@ -212,7 +242,60 @@ def _price_source_id() -> int:
     return Source.objects.only("id").get(key=PRICE_SOURCE).pk
 
 
-def _write_curve(indicator, instrument, measurements_by_event) -> int:
+def _outlier_flags(instrument, releases, measurements_by_event, bar_seconds) -> dict:
+    """§4.6's default policy, `flag`: {(release id, horizon): reason}.
+
+    Two independent reasons; the first one found is recorded:
+
+    - a registered instant `MarketEvent` (the SNB floor, a flash crash) falls
+      inside the window, a known shock that is not this release;
+    - the abnormal move is more than `OUTLIER_Z` robust sigmas from the
+      pairing's median at that horizon.
+
+    Crisis *periods* are not flags. They are regimes: a release is not an
+    outlier for having happened during COVID.
+    """
+    from prices.models import MarketEvent
+
+    shocks = []
+    for event in MarketEvent.objects.filter(end_ts_utc__isnull=True).prefetch_related(
+        "instruments"
+    ):
+        applies_to = {i.pk for i in event.instruments.all()}
+        if not applies_to or instrument.pk in applies_to:
+            shocks.append((event.ts_utc, event.label))
+
+    flags: dict[tuple[int, str], str] = {}
+    by_horizon: dict[str, list[tuple[int, float]]] = {}
+    for release, per_event in zip(releases, measurements_by_event):
+        t0 = release.release_time_utc
+        for m in per_event:
+            if not m.usable:
+                continue
+            by_horizon.setdefault(m.horizon, []).append((release.pk, m.abnormal_ret))
+            start = min(t0, t0 + timedelta(seconds=m.seconds))
+            end = max(t0, t0 + timedelta(seconds=m.seconds))
+            # Widened to whole bars: the window is read from the bar holding
+            # its start to the bar holding its end.
+            start -= timedelta(seconds=start.timestamp() % bar_seconds)
+            end += timedelta(seconds=bar_seconds - end.timestamp() % bar_seconds)
+            for when, label in shocks:
+                if start <= when < end:
+                    flags[(release.pk, m.horizon)] = f"window contains: {label}"
+                    break
+
+    for horizon, members in by_horizon.items():
+        mask = eventstudy.outlier_mask([value for _pk, value in members])
+        for (pk, _value), flagged in zip(members, mask):
+            if flagged and (pk, horizon) not in flags:
+                flags[(pk, horizon)] = (
+                    f"abnormal move over {eventstudy.OUTLIER_Z:g} robust sigmas "
+                    "from the pairing's median"
+                )
+    return flags
+
+
+def _write_curve(indicator, instrument, measurements_by_event, outliers_by_horizon) -> int:
     """Pool the per-event measurements into the §6.2 decay curve."""
     points = eventstudy.pool(measurements_by_event)
     if not points:
@@ -241,7 +324,10 @@ def _write_curve(indicator, instrument, measurements_by_event) -> int:
                 # that as "the effect" would report every event as inert.
                 effect_size=None if gated else point.mean_abs_excess,
                 std_error=None if gated else point.abs_std_error,
-                r_squared=None if gated else point.abs_ratio,
+                abs_ratio=None if gated else point.abs_ratio,
+                baseline_n=point.baseline_n,
+                n_outliers=outliers_by_horizon.get(point.horizon, 0),
+                outlier_policy=OutlierPolicy.FLAG,
                 p_raw=None if gated else point.abs_p_value,
                 p_fdr=None if gated else p_fdr,
                 detectability_floor=point.detectability_floor,
@@ -304,7 +390,7 @@ def summarise_curve(rows: list[DecayCurve], pip: float) -> dict:
         "peak": peak,
         "peak_pips": None if peak is None or peak.effect_size is None
                      else peak.effect_size / pip,
-        "peak_ratio": None if peak is None else peak.r_squared,
+        "peak_ratio": None if peak is None else peak.abs_ratio,
         "last_significant": sig_post[-1].horizon if sig_post else None,
         "first_insignificant": next(
             (r.horizon for r in post if not is_sig(r)
@@ -313,7 +399,7 @@ def summarise_curve(rows: list[DecayCurve], pip: float) -> dict:
             None,
         ),
         "quiet_before": quiet[-1].horizon if quiet else None,
-        "quiet_ratio": quiet[-1].r_squared if quiet else None,
+        "quiet_ratio": quiet[-1].abs_ratio if quiet else None,
         "any_effect": bool(sig_post),
     }
 
@@ -333,9 +419,10 @@ def event_scatter(indicator_id: int, instrument_id: int, horizon: str, pip: floa
             abs_ret__isnull=False,
         )
         .order_by("event_release__release_time_utc")
-        .values_list("event_release__release_time_utc", "abs_ret", "abnormal_ret")
+        .values_list("event_release__release_time_utc", "abs_ret", "is_outlier")
     )
-    scatter = [(when, abs_ret / pip) for when, abs_ret, _abn in rows]
+    # The flag rides along so the chart can draw flagged releases hollow.
+    scatter = [(when, abs_ret / pip, flagged) for when, abs_ret, flagged in rows]
 
     normal = None
     curve = DecayCurve.objects.filter(
@@ -343,7 +430,7 @@ def event_scatter(indicator_id: int, instrument_id: int, horizon: str, pip: floa
         horizon=horizon, engine_version=ENGINE_VERSION,
     ).first()
     if curve and curve.effect_size is not None and scatter:
-        mean_abs = sum(v for _w, v in scatter) / len(scatter)
+        mean_abs = sum(v for _w, v, _f in scatter) / len(scatter)
         normal = mean_abs - curve.effect_size / pip
     return scatter, normal
 

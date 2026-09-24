@@ -184,6 +184,7 @@ MARKET_EVENTS = [
         note="Not an economic release, but it lands inside event windows and will "
         "dominate any USDCHF variance calculation it is included in. "
         "Instant approximate — verify against the price series (§4.1 vol-check).",
+        instruments=["USDCHF"],
     ),
     dict(
         ts_utc=datetime(2016, 10, 6, 23, 7, tzinfo=timezone.utc),
@@ -193,13 +194,36 @@ MARKET_EVENTS = [
         note="Provider-dependent: different feeds show different extremes because "
         "there was no consolidated price. A concrete reason to cross-validate "
         "HistData against Dukascopy (§4.6). Instant approximate.",
+        instruments=["GBPUSD"],
     ),
     dict(
         ts_utc=datetime(2019, 1, 2, 22, 30, tzinfo=timezone.utc),
         label="JPY flash crash",
         kind=MarketEventKind.DISLOCATION,
         regime=Regime.NORMALISATION,
-        note="Provider-dependent, as above. Instant approximate — verify.",
+        note="Provider-dependent, as above. Instant approximate — verify. The crash "
+        "ran through AUDJPY, so AUDUSD took it as well as USDJPY.",
+        instruments=["USDJPY", "AUDUSD"],
+    ),
+    dict(
+        ts_utc=datetime(2011, 9, 6, 8, 0, tzinfo=timezone.utc),
+        label="SNB sets the EUR/CHF floor at 1.20",
+        kind=MarketEventKind.POLICY_SHOCK,
+        regime=Regime.ZIRP_QE,
+        note="Announced 10:00 Zurich. Found by the outlier flag, not looked up: it "
+        "lands inside the +1h window of that morning's Swiss CPI (07:15 UTC), which "
+        "read as a 34-sigma CPI reaction until the two were told apart.",
+        instruments=["USDCHF"],
+    ),
+    dict(
+        ts_utc=datetime(2016, 6, 23, 23, 0, tzinfo=timezone.utc),
+        label="Brexit referendum result",
+        kind=MarketEventKind.POLICY_SHOCK,
+        regime=Regime.NORMALISATION,
+        note="Counts ran overnight; the first decisive results came around "
+        "23:00–01:00 UTC. Instant approximate. Any GBPUSD window spanning that "
+        "night measures the vote, not the release it is anchored to.",
+        instruments=["GBPUSD"],
     ),
     dict(
         ts_utc=datetime(2020, 3, 1, 0, 0, tzinfo=timezone.utc),
@@ -255,10 +279,16 @@ def seed_reference(log=lambda msg: None) -> dict:
         )
 
     for spec in MARKET_EVENTS:
-        MarketEvent.objects.update_or_create(
+        event, _ = MarketEvent.objects.update_or_create(
             label=spec["label"],
             ts_utc=spec["ts_utc"],
-            defaults={k: v for k, v in spec.items() if k not in ("label", "ts_utc")},
+            defaults={
+                k: v for k, v in spec.items() if k not in ("label", "ts_utc", "instruments")
+            },
+        )
+        # No instruments means every pair: a crisis period is market-wide.
+        event.instruments.set(
+            Instrument.objects.filter(symbol__in=spec.get("instruments", []))
         )
 
     summary = (

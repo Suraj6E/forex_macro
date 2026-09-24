@@ -96,9 +96,24 @@ class EventImpact(models.Model):
     mae = models.FloatField(null=True, blank=True, help_text="Maximum adverse excursion.")
     spread_avg = models.FloatField(null=True, blank=True)
 
+    baseline_abs_mean = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="The matched-normal absolute move this row is compared against.",
+    )
+    baseline_n = models.IntegerField(
+        default=0, help_text="Matched weeks behind the normal (§6.1 asks for twelve)."
+    )
+
     n_bars = models.IntegerField(default=0)
     bars_missing = models.IntegerField(default=0)
     is_outlier = models.BooleanField(default=False)
+    outlier_reason = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Why the row is flagged: a registered market event inside the "
+        "window, or its distance from the pairing's median (§4.6).",
+    )
 
     engine_version = models.CharField(max_length=32, db_index=True)
     computed_at = models.DateTimeField(auto_now=True)
@@ -264,7 +279,20 @@ class DecayCurve(models.Model):
 
     effect_size = models.FloatField(null=True, blank=True)
     std_error = models.FloatField(null=True, blank=True)
-    r_squared = models.FloatField(null=True, blank=True)
+    r_squared = models.FloatField(
+        null=True, blank=True, help_text="Direction fits only. Mode A reads abs_ratio."
+    )
+    abs_ratio = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Mode A: mean move over mean matched-normal move. 1.0 is normal.",
+    )
+    baseline_n = models.IntegerField(
+        null=True, blank=True, help_text="Median matched weeks behind each release's normal."
+    )
+    n_outliers = models.IntegerField(
+        default=0, help_text="Flagged rows at this horizon, whatever the policy did with them."
+    )
     p_raw = models.FloatField(null=True, blank=True)
     p_fdr = models.FloatField(
         null=True, blank=True, help_text="Benjamini–Hochberg, beside the raw p (§6.6)."

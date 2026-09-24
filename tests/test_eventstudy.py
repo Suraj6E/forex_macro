@@ -178,7 +178,69 @@ class BaselineTests(unittest.TestCase):
         _mean, _sd, _abs, n = eventstudy.matched_baseline(
             bars, T0, Horizon("+1h", 3600), weeks=6, exclude=weekly
         )
-        self.assertEqual(n, 0, "every weekly window is excluded, so none qualify")
+        # es-2 returned 0 here and the release went unmeasured. Each
+        # contaminated week is now stood in for by the same hour a day away.
+        self.assertEqual(n, 6, "a weekly series keeps a full baseline")
+
+    def test_substitute_windows_never_hold_the_event(self):
+        # Record every window the baseline actually reads, and check none of
+        # them contains a release of the weekly series.
+        weekly = sorted(T0 - timedelta(weeks=w) for w in range(0, 30))
+        seen = []
+        original = eventstudy.raw_return
+
+        def spy(bars, moment, horizon):
+            seen.append(moment)
+            return original(bars, moment, horizon)
+
+        eventstudy.raw_return = spy
+        try:
+            eventstudy.matched_baseline(
+                flat_bars(), T0, Horizon("+1h", 3600), weeks=6, exclude=weekly
+            )
+        finally:
+            eventstudy.raw_return = original
+
+        self.assertEqual(len(seen), 6)
+        for moment in seen:
+            self.assertFalse(
+                eventstudy._window_contains(weekly, moment, Horizon("+1h", 3600))
+            )
+            self.assertLess(moment.weekday(), 5, "never a weekend stand-in")
+
+    def test_long_windows_on_a_weekly_series_keep_their_baseline(self):
+        # A +1w window after a weekly release necessarily holds the next one,
+        # so a baseline window holding one release is like-for-like. es-2
+        # demanded zero and Natural Gas Storage kept 0 of 1,027 at +1w.
+        t0 = START + timedelta(weeks=40, days=5, hours=12, minutes=30)   # a Thursday
+        weekly = sorted(t0 - timedelta(weeks=w) for w in range(-2, 40))
+        bars = flat_bars(hours=24 * 7 * 45)
+        horizon = Horizon("+1w", 7 * 86400)
+        _mean, _sd, _abs, n = eventstudy.matched_baseline(
+            bars, t0, horizon, weeks=6, exclude=weekly
+        )
+        self.assertEqual(n, 6)
+
+    def test_a_baseline_window_never_contains_the_event_itself(self):
+        # At +1M a one-week look-back ends three weeks after t0. Without the
+        # guard the event would be measured as part of its own normal.
+        seen = []
+        original = eventstudy.raw_return
+
+        def spy(bars, moment, horizon):
+            seen.append(moment)
+            return original(bars, moment, horizon)
+
+        eventstudy.raw_return = spy
+        try:
+            eventstudy.matched_baseline(
+                flat_bars(hours=24 * 7 * 40), START + timedelta(weeks=30),
+                Horizon("+1M", 30 * 86400), weeks=6,
+            )
+        finally:
+            eventstudy.raw_return = original
+        for moment in seen:
+            self.assertLess(moment + timedelta(days=30), START + timedelta(weeks=30))
 
     def test_baseline_walks_further_back_to_find_clean_windows(self):
         # Monthly events contaminate roughly one window in four; the search
@@ -294,6 +356,26 @@ class PoolingTests(unittest.TestCase):
         events = [self._event("+1h", 0.008, normal_abs=0.004) for _ in range(10)]
         self.assertAlmostEqual(eventstudy.pool(events)[0].abs_ratio, 2.0, places=6)
 
+    def test_ratio_reads_one_when_nothing_happened(self):
+        # The review's finding (report.md §3.3a): with fat-tailed returns the
+        # median of per-event ratios reads ~0.70 for pure noise. Event and
+        # baseline here are drawn from the same Student-t distribution, so
+        # the honest answer is 1.0.
+        rng = np.random.default_rng(5)
+        events = []
+        for _ in range(3000):
+            m = eventstudy.WindowMeasurement(horizon="+1h", seconds=3600)
+            m.ret = float(rng.standard_t(3)) * 0.001
+            m.abs_ret = abs(m.ret)
+            m.abnormal_ret = m.ret
+            m.baseline_abs_mean = float(np.abs(rng.standard_t(3, 12)).mean()) * 0.001
+            events.append([m])
+        point = eventstudy.pool(events)[0]
+        self.assertAlmostEqual(point.abs_ratio, 1.0, delta=0.05)
+
+        per_event = np.median([e[0].abs_ratio for e in events])
+        self.assertLess(per_event, 0.85, "the old statistic is biased low")
+
     def test_detectability_floor_is_reported_so_nulls_mean_something(self):
         rng = np.random.default_rng(11)
         events = [self._event("+1h", float(v)) for v in rng.normal(0, 0.01, 50)]
@@ -313,6 +395,27 @@ class PoolingTests(unittest.TestCase):
             events.append([m])
         labels = [p.horizon for p in eventstudy.pool(events)]
         self.assertEqual(labels, ["-1h", "+1h", "+1d"])
+
+
+class OutlierTests(unittest.TestCase):
+    def test_one_extreme_move_is_flagged_and_nothing_else(self):
+        # The SNB day on USDCHF Libor: dozens of ordinary hours and one that
+        # moved over a thousand pips.
+        rng = np.random.default_rng(2)
+        values = list(rng.normal(0, 0.002, 54)) + [-0.11]
+        mask = eventstudy.outlier_mask(values)
+        self.assertTrue(mask[-1])
+        self.assertEqual(sum(mask), 1)
+
+    def test_missing_values_are_never_flagged(self):
+        values = [0.001, None, -0.002, 0.0015, float("nan"), 0.0005, -0.001, 0.5]
+        mask = eventstudy.outlier_mask(values)
+        self.assertFalse(mask[1])
+        self.assertFalse(mask[4])
+        self.assertTrue(mask[-1])
+
+    def test_too_few_values_flag_nothing(self):
+        self.assertEqual(eventstudy.outlier_mask([0.001, 0.5, 0.002]), [False] * 3)
 
 
 class FdrTests(unittest.TestCase):

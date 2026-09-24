@@ -23,14 +23,18 @@ from analytics.horizons import BY_LABEL
 from calendar_data.models import EventRelease, Indicator
 from prices.models import Instrument
 from studies.engine import ENGINE_VERSION, _attribution
-from studies.models import DecayCurve, EventImpact, Mode
+from studies.models import DecayCurve, EventImpact, Mode, OutlierPolicy
 
 logger = logging.getLogger(__name__)
 
 #: Bumped when the fit changes, so a methodology change invalidates the cache
 #: instead of mixing generations (§9). Tracks the Mode A engine version because
 #: the inputs are its output.
-DIRECTION_VERSION = f"{ENGINE_VERSION}+dir-1"
+#:
+#: dir-2 — rows the event study flagged as outliers (§4.6) are left out of the
+#: fit. OLS on 55 releases is one observation away from any answer: the SNB
+#: Libor "finding" (R2 0.35) was 15 January 2015 and nothing else.
+DIRECTION_VERSION = f"{ENGINE_VERSION}+dir-2"
 
 
 class DirectionResult:
@@ -84,13 +88,17 @@ def run_direction(
         event_release__in=releases,
         instrument=instrument,
         engine_version=ENGINE_VERSION,
-    ).values_list("event_release_id", "horizon", "abnormal_ret")
+    ).values_list("event_release_id", "horizon", "abnormal_ret", "is_outlier")
 
+    # Flagged rows are held apart rather than dropped, so the note can say what
+    # including them would have done to the answer.
     by_horizon: dict[str, dict[int, float]] = {}
-    for release_id, horizon, abnormal in impacts.iterator():
+    flagged: dict[str, dict[int, float]] = {}
+    for release_id, horizon, abnormal, is_outlier in impacts.iterator():
         if abnormal is None:
             continue
-        by_horizon.setdefault(horizon, {})[release_id] = abnormal
+        target = flagged if is_outlier else by_horizon
+        target.setdefault(horizon, {})[release_id] = abnormal
 
     if not by_horizon:
         result.notes = (
@@ -102,6 +110,7 @@ def run_direction(
         return result
 
     fits = []
+    with_outliers = {}
     ordered = sorted(
         by_horizon, key=lambda label: BY_LABEL[label].seconds if label in BY_LABEL else 0
     )
@@ -114,7 +123,13 @@ def run_direction(
 
         seconds = BY_LABEL[horizon].seconds if horizon in BY_LABEL else 0
         fit = direction.fit(horizon, seconds, aligned_x, aligned_y)
+        fit.n_outliers = len(flagged.get(horizon, {}))
         fits.append(fit)
+        if fit.n_outliers:
+            everything = {**returns_by_release, **flagged[horizon]}
+            with_outliers[horizon] = direction.fit(
+                horizon, seconds, aligned_x, [everything.get(r.pk) for r in releases]
+            )
         progress(index / len(ordered), f"{index}/{len(ordered)} horizons")
 
     # FDR across the ladder before anything is called a finding, and before the
@@ -172,6 +187,30 @@ def run_direction(
             f"predictable from data published earlier."
         )
 
+    moved = [
+        (f, with_outliers[f.horizon])
+        for f in fits
+        if f.horizon in with_outliers and not f.gated and f.beta is not None
+        and with_outliers[f.horizon].beta is not None
+        and (
+            (f.beta > 0) != (with_outliers[f.horizon].beta > 0)
+            or f.significant != with_outliers[f.horizon].significant
+        )
+    ]
+    excluded = sum(f.n_outliers for f in fits)
+    if excluded:
+        result.notes += (
+            f" {excluded} flagged outlier row(s) left out of the fit across the ladder."
+        )
+    if moved:
+        f, full = moved[0]
+        result.notes += (
+            f" They matter: at {f.horizon} the fit gives beta {f.beta:+.5f} "
+            f"(p {f.p_value or 1:.3f}) without them and {full.beta:+.5f} "
+            f"(p {full.p_value or 1:.3f}, R2 {full.r_squared or 0:.3f}) with them"
+            + (f", and {len(moved) - 1} other horizon(s) change the same way." if len(moved) > 1 else ".")
+        )
+
     log(result.notes)
     return result
 
@@ -203,6 +242,8 @@ def _store(indicator, instrument, fits) -> int:
                 p_fdr=None if gated else fit.p_fdr,
                 detectability_floor=fit.detectability_floor,
                 n=fit.n,
+                n_outliers=fit.n_outliers,
+                outlier_policy=OutlierPolicy.EXCLUDE,
                 attribution_confidence=_attribution(fit.seconds),
                 engine_version=DIRECTION_VERSION,
             )
