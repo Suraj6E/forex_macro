@@ -61,6 +61,12 @@
       <dt>Actual provenance</dt><dd class="small">{{ release.get_actual_provenance_display }}</dd>
       <dt>Cross-source</dt><dd class="small">{{ release.get_cross_source_display }}</dd>
       <dt>Volatility check</dt><dd class="small">{{ release.get_vol_check_display }}</dd>
+      <dt>Indicator's clock</dt><dd class="small">
+        {% if clock %}
+          <strong>{{ clock.status }}</strong> — {{ clock.message }}
+          <span class="faint tiny">— pooled over {{ clock.attributable }} releases; this, not the line above, is the verdict on the timestamp</span>
+        {% else %}<span class="faint">not checked</span>{% endif %}
+      </dd>
       <dt>Confounded</dt><dd class="small">{% if release.confounded %}yes — another event within ±15 min{% else %}not flagged{% endif %}</dd>
       <dt>Trading day</dt><dd class="small">{{ release.trading_day|date:"j M Y"|default:"—" }}
         <span class="faint tiny">— anchored to 17:00 New York, not the UTC date</span></dd>

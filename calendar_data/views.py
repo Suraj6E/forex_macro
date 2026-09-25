@@ -217,6 +217,12 @@ def event(request, pk: int):
     pairs = list(Instrument.objects.filter(enabled=True).values_list("symbol", flat=True))
     related_pairs = [s for s in pairs if currency in s] or pairs
 
+    # One release's grade is noise about its clock; the indicator's pooled
+    # verdict is what decides it, so the page shows both side by side.
+    from quality.validation import series_verdict
+
+    clock = series_verdict(release.indicator_id)
+
     return render(
         request,
         "calendar_data/event.html",
@@ -229,6 +235,7 @@ def event(request, pk: int):
             "revisions": revisions,
             "siblings": siblings,
             "co_timed": co_timed,
+            "clock": clock,
         },
     )
 

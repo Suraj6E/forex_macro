@@ -50,7 +50,12 @@ class VolCheck(models.TextChoices):
 
     CONFIRMED = "confirmed", "confirmed — spike within ±2 minutes"
     CONFIRMED_HOUR = "confirmed_hour", "confirmed at hour resolution — spike in the stored hour"
-    OFFSET = "offset", "offset — spike found, but not where the timestamp says"
+    # Worded as an observation, not a verdict: for one release the strongest bar
+    # in a ±3h window landing elsewhere is usually noise. Three of the 21
+    # releases verified against the agency's own page carry this grade, and
+    # CPI m/m carries it on 87 of 235 while its clock is plainly right. Only
+    # the indicator-level test decides a clock (docs/agency_verification.md).
+    OFFSET = "offset", "largest move in another hour — one release, not a verdict on the clock"
     NO_SPIKE = "no_spike", "no spike — nothing measurable happened here"
     CONFOUNDED = "confounded", "confounded — the nearby spike belongs to a bigger release"
     UNCHECKABLE = "uncheckable", "uncheckable — no bars, or no usable normal to compare against"

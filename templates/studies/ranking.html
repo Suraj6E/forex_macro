@@ -49,8 +49,9 @@
     is worth; the strongest is what the family's heaviest release can do. They
     can be far apart, and when they are it is the concept's composition talking:
     labour holds weekly Unemployment Claims, ADP and JOLTS alongside payrolls,
-    and each of those contributes seven pairings near 0.9&times; that pull the
-    median down without saying anything about what payrolls do. Read the median
+    and each of those contributes seven pairings near 1.1&times; (payrolls reads
+    about 1.9&times; at +1h) that pull the median down without saying anything
+    about what payrolls do. Read the median
     for breadth and the strongest for ceiling &mdash; neither alone is "how much
     this kind of news matters".
   </p>
@@ -65,6 +66,7 @@
           <th>Strongest member</th>
           <th class="num">Indicators</th>
           <th class="num">Pairings</th>
+          <th class="num" title="Pairings whose excess movement survives false-discovery correction across every pairing on this page">Distinguishable</th>
           <th class="num">Releases</th>
           <th class="num">Published rank</th>
           <th>Disagreement</th>
@@ -80,6 +82,7 @@
           <td class="tiny">{{ c.best_name }}</td>
           <td class="num">{{ c.n_indicators }}</td>
           <td class="num">{{ c.pairs }}</td>
+          <td class="num{% if not c.significant %} faint{% endif %}">{{ c.significant }}</td>
           <td class="num">{{ c.releases|intcomma }}</td>
           <td class="num mono faint">{{ c.published_rank }}</td>
           <td class="small">
@@ -122,6 +125,7 @@
           <th>Indicator</th>
           <th>Concept</th>
           <th class="num">Ratio</th>
+          <th class="num" title="Pairs whose excess movement survives false-discovery correction across every pairing on this page">Distinguishable</th>
           <th class="num">Releases</th>
           <th>Pairs</th>
           <th>Published</th>
@@ -140,6 +144,7 @@
           </td>
           <td class="tiny faint">{{ i.concept_label }}</td>
           <td class="num mono"><strong>{{ i.median_ratio|floatformat:2 }}&times;</strong></td>
+          <td class="num small{% if not i.significant %} faint{% endif %}">{{ i.significant }} of {{ i.pairs|length }}</td>
           <td class="num">{{ i.releases|intcomma }}</td>
           <td class="tiny mono faint">{{ i.pairs|join:" " }}</td>
           <td class="tiny">
@@ -161,6 +166,11 @@
   <div class="card__foot">
     Showing {{ indicators|length }} of {{ indicator_total }} measured indicators,
     across {{ covered_pairs }} indicator&times;pair curves.
+    <strong>Distinguishable</strong> is corrected for reading this page as a whole:
+    {{ sweep_significant }} of {{ sweep_tests }} pairings survive
+    Benjamini&ndash;Hochberg across all of them at {{ horizon }}. The per-pairing
+    p-values on the event-study page correct only across that pairing's own
+    horizons, and are the wrong family for a ranking.
   </div>
 </section>
 

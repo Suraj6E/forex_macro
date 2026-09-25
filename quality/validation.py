@@ -476,6 +476,23 @@ def headline() -> dict:
 
 
 def offset_verdicts_cheap() -> list[tuple[str, volcheck.Verdict]]:
+    """Every checked indicator's verdict, by name. See `verdicts_by_id`."""
+    by_id = verdicts_by_id()
+    names = dict(Indicator.objects.filter(pk__in=by_id).values_list("id", "name"))
+    return [(names.get(pk, str(pk)), verdict) for pk, verdict in by_id.items()]
+
+
+def series_verdict(indicator_id: int) -> volcheck.Verdict | None:
+    """The clock verdict for one indicator, as the Timestamps screen gives it.
+
+    Computed over the whole sweep, not the one indicator: the false-discovery
+    correction is across all of them, so a verdict taken alone would be
+    graded more leniently than the screen grades it.
+    """
+    return verdicts_by_id().get(indicator_id)
+
+
+def verdicts_by_id() -> dict[int, volcheck.Verdict]:
     """Every checked indicator's verdict from two GROUP BYs.
 
     The Data Quality screen wants one number — how many clocks are wrong — and
@@ -504,19 +521,18 @@ def offset_verdicts_cheap() -> list[tuple[str, volcheck.Verdict]]:
         offsets.setdefault(row["indicator_id"], {})[row["vol_check_offset_min"]] = row["n"]
 
     seen = set(offsets) | set(quiet) | set(blocked)
-    names = dict(Indicator.objects.filter(pk__in=seen).values_list("id", "name"))
-    out = []
-    for indicator_id in seen:
-        verdict = volcheck.summarise_counts(
+    out = {
+        indicator_id: volcheck.summarise_counts(
             offsets=offsets.get(indicator_id, {}),
             no_spike=quiet.get(indicator_id, 0),
             confounded=blocked.get(indicator_id, 0),
         )
-        out.append((names.get(indicator_id, str(indicator_id)), verdict))
+        for indicator_id in seen
+    }
 
     # Same sweep-wide false-discovery control as the Timestamps screen, or the
     # two pages would count a different number of broken clocks.
-    volcheck.apply_fdr([verdict for _name, verdict in out])
+    volcheck.apply_fdr(list(out.values()))
     return out
 
 

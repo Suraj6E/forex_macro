@@ -268,16 +268,15 @@ re-run over all 238 pairings (`run_studies`, then `run_direction`):
 - **A quiet indicator's clock cannot be validated this way at all.** If price
   does not move when a release lands, price cannot say where it landed. Those
   read `no_spike` and the verdict says *unverified*, never *correct*.
-- **A per-release `vol_check` grade is not a verdict about that release.** Its
-  label reads *"offset — spike found, but not where the timestamp says"*, which
-  on a single event page asserts something the check cannot support: three of
-  the twenty-one hand-verified releases carry `offset` against an agency page
-  that confirms the stored timestamp exactly, and 87 of CPI m/m's 235 releases
-  are graded `offset` while the series as a whole is comfortably aligned. For
-  one release, the strongest bar landing elsewhere in a ±3 hour window is noise.
-  Only the indicator-level binomial test decides a clock. The wording should
-  change and the event page should show the series verdict beside the release's
-  own grade; neither is done.
+- **A per-release `vol_check` grade is not a verdict about that release.**
+  Three of the twenty-one hand-verified releases carry `offset` against an
+  agency page that confirms the stored timestamp exactly, and 87 of CPI m/m's
+  235 releases are graded `offset` while the series as a whole is comfortably
+  aligned. For one release, the strongest bar landing elsewhere in a ±3 hour
+  window is noise; only the indicator-level binomial test decides a clock. The
+  label now says so (*"largest move in another hour — one release, not a
+  verdict on the clock"*), and the event page shows the indicator's pooled
+  verdict beside it.
 - Only `forexfactory_weekly` has a collector. The other nine source rows exist
   in the register with their clocks and policies recorded, awaiting one.
 - The FF feed carries no reporting period, so its rows use a provisional

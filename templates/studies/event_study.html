@@ -250,13 +250,26 @@
     </table>
   </div>
   <div class="card__foot">
-    <strong>× normal</strong> is the median move as a multiple of an ordinary
-    window — 1.0 is a typical hour. <strong>Floor</strong> is the smallest effect
+    <strong>× normal</strong> is the mean move over the mean move of an ordinary
+    window for the same weekday and hour — 1.0 is a typical hour.
+    <strong>Weeks</strong> is how many matched weeks each release's normal is
+    built from (twelve is the target); <strong>Flagged</strong> counts outliers,
+    which stay in the average and show as hollow rings on the scatter.
+    <strong>Floor</strong> is the smallest effect
     this many observations could have resolved, so a non-significant row reads
     as “no effect larger than this”, not “no effect”. <strong>Attribution</strong>
     degrades with horizon because the event's contribution is roughly fixed
     while noise grows with the square root of time. Below {{ min_n }}
     observations no coefficient is reported at all.
+    {% if hourly %}
+    <br><strong>These are hourly bars, so each window is up to one bar longer
+    than its label.</strong> A window starts at the open of the bar the release
+    lands in: for a 12:30 release <span class="mono">+1h</span> runs
+    12:00&ndash;14:00, half an hour of it before the release; for an FOMC
+    decision at 18:00 it runs 18:00&ndash;20:00. The normal is built the same
+    way, so the comparison is fair, but read <span class="mono">+1h</span> as
+    "the release bar and the one after", not as sixty minutes.
+    {% endif %}
   </div>
 </section>
 

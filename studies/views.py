@@ -200,6 +200,9 @@ def event_study(request):
             "stored_version": stored_version,
             "stale": bool(stored_version and stored_version != engine.ENGINE_VERSION),
             "min_n": engine.MIN_N,
+            # §3.3b: on hourly bars every rung is read from the open of the
+            # release's own bar, so the window runs longer than its label.
+            "hourly": bool(instrument) and engine.available_timeframe(instrument) == "h1",
         },
     )
 
@@ -308,8 +311,27 @@ def ranking(request):
             "indicator__release_group__name",
             "instrument__symbol",
         )
-        .annotate(ratio=Max("abs_ratio"), excess=Max("effect_size"), releases=Max("n"))
+        .annotate(
+            ratio=Max("abs_ratio"),
+            excess=Max("effect_size"),
+            releases=Max("n"),
+            p_raw=Max("p_raw"),
+        )
     )
+    measured = list(measured)
+
+    # The stored p_fdr corrects across one pairing's own ladder. This page
+    # reads one horizon across every pairing at once, which is a different
+    # family: some 230 tests, where p<0.05 alone would admit about a dozen by
+    # chance. Benjamini-Hochberg across the page is the correction that
+    # matches what is being read (§6.6).
+    from analytics.eventstudy import benjamini_hochberg
+
+    for row, p_sweep in zip(
+        measured, benjamini_hochberg([row["p_raw"] for row in measured])
+    ):
+        row["p_sweep"] = p_sweep
+        row["sweep_significant"] = p_sweep is not None and p_sweep < 0.05
 
     # Co-timed releases are one measurement wearing several names: NZD
     # Employment Change and NZD Unemployment Rate are published at the same
@@ -336,11 +358,13 @@ def ranking(request):
         bucket = by_concept.setdefault(
             concept,
             dict(concept=concept, label=Concept(concept).label, ratios=[], pairs=0,
-                 releases=0, indicators=set(), importances=[], best=0.0, best_name=""),
+                 significant=0, releases=0, indicators=set(), importances=[],
+                 best=0.0, best_name=""),
         )
         if not double_counted:
             bucket["ratios"].append(ratio)
             bucket["pairs"] += 1
+            bucket["significant"] += row["sweep_significant"]
             bucket["releases"] += row["releases"] or 0
             bucket["importances"].append(row["indicator__importance"])
         bucket["indicators"].add(row["indicator__id"])
@@ -363,9 +387,11 @@ def ranking(request):
                 ratios=[],
                 releases=0,
                 pairs=[],
+                significant=0,
             ),
         )
         entry["ratios"].append(ratio)
+        entry["significant"] += row["sweep_significant"]
         entry["releases"] = max(entry["releases"], row["releases"] or 0)
         entry["pairs"].append(row["instrument__symbol"])
 
@@ -401,15 +427,19 @@ def ranking(request):
 
     # Direction: the sign, from the third mode. Read at the same horizon so the
     # magnitude and the sign on one row describe the same window.
-    directions = {
-        row["indicator_id"]: row
-        for row in DecayCurve.objects.filter(
-            mode=Mode.DIRECTION,
-            engine_version=DIRECTION_VERSION,
-            horizon=horizon,
-            effect_size__isnull=False,
-        ).values("indicator_id", "effect_size", "p_fdr", "n", "instrument__symbol")
-    }
+    # One curve per pair; keep the best-supported one, not whichever the
+    # query happened to return last.
+    directions: dict[int, dict] = {}
+    for row in DecayCurve.objects.filter(
+        mode=Mode.DIRECTION,
+        engine_version=DIRECTION_VERSION,
+        horizon=horizon,
+        effect_size__isnull=False,
+        p_fdr__isnull=False,
+    ).values("indicator_id", "effect_size", "p_fdr", "n", "instrument__symbol"):
+        held = directions.get(row["indicator_id"])
+        if held is None or row["p_fdr"] < held["p_fdr"]:
+            directions[row["indicator_id"]] = row
     for entry in indicators:
         entry["direction"] = directions.get(entry["id"])
 
@@ -424,6 +454,8 @@ def ranking(request):
             "indicators": indicators[:60],
             "indicator_total": len(indicators),
             "covered_pairs": sum(b["pairs"] for b in concepts),
+            "sweep_tests": sum(1 for row in measured if row["p_raw"] is not None),
+            "sweep_significant": sum(row["sweep_significant"] for row in measured),
         },
     )
 
