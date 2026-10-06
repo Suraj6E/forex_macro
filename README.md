@@ -20,7 +20,7 @@ history — Nov 2008 payrolls read −533K, Apr 2020 read −20,537K, Aug 2024 r
 York is 13:30 UTC in winter, 12:30 in summer, and only those two values
 appear).
 
-**Prices: hourly bars for all seven majors, Jan 2007 → Aug 2026**, from
+**Prices: hourly bars for all seven majors, Jan 2007 → Sep 2026**, from
 Dukascopy, in the Parquet store.
 
 **The timestamps have now been checked against price (§4.1, P2).** All 359
