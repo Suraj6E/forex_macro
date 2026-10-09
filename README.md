@@ -125,8 +125,13 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe manage.py migrate
 .\.venv\Scripts\python.exe manage.py runserver
+
 ```
 
+Localhost run on windows: 
+```
+py manage.py runserver
+```
 Then open <http://127.0.0.1:8000/>. **There is no login.** It is a local
 single-user tool, so an account would protect nothing; every screen is open.
 Django's admin — the generic table editor behind a username and password — is
