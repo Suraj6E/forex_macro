@@ -1,10 +1,14 @@
-"""Tick access, one UTC day at a time (guide step 1).
+"""Tick storage, one UTC day per file (guide step 1).
 
-The Layer 0 file holds ~46M EUR/USD ticks in 44 row groups of ~1M rows each,
-so any day filter reads a whole ~9-day block. `build_tick_cache` rewrites it
-once into one small file per day under `cache/ticks/`, and `load_day` reads
-that file. Without the cache, `load_day` falls back to a filtered read of the
-source, which is correct but slower.
+A feed directory holds `ticks/YYYY-MM-DD.parquet` with every tick of the day
+(`ts`, `bid`, `ask`, `flag`) and a `manifest.json` describing each day: where
+it came from, how many ticks, whether it is complete. Quality flags are
+stored, not applied; `KEEP_FLAGS` filters when a day is read, so changing it
+never means fetching anything again.
+
+The Dukascopy feed is filled from two places: the Layer 0 file of
+trading-research (2023-2024, imported once by `import_layer0`) and the
+Dukascopy datafeed itself for everything after (`dukascopy.update`).
 
 Times are int64 nanoseconds since the epoch, UTC, throughout the engine.
 Layer 0 writes naive timestamps that are UTC; nothing here localises them.
@@ -13,8 +17,8 @@ Layer 0 writes naive timestamps that are UTC; nothing here localises them.
 from __future__ import annotations
 
 import json
+import os
 import threading
-from bisect import bisect_left
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -35,7 +39,7 @@ _EPOCH = date(1970, 1, 1)
 
 @dataclass(frozen=True)
 class DayTicks:
-    """Every kept tick of one UTC day, sorted by time."""
+    """The kept ticks of one UTC day, sorted by time."""
 
     day: date
     ts: np.ndarray  # int64 ns
@@ -67,17 +71,14 @@ def ns_to_datetime(ns: int) -> datetime:
     return datetime.fromtimestamp(ns / NS_PER_SECOND, tz=timezone.utc)
 
 
-def datetime_to_ns(value: datetime) -> int:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    delta = value - datetime(1970, 1, 1, tzinfo=timezone.utc)
-    return (delta.days * 86_400 + delta.seconds) * NS_PER_SECOND + delta.microseconds * 1000
+def now_ns() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1e9)
 
 
 _UNIT_NS = {"s": NS_PER_SECOND, "ms": 1_000_000, "us": 1_000, "ns": 1}
 
 
-def _ts_to_ns(column: pa.ChunkedArray | pa.Array) -> np.ndarray:
+def ts_to_ns(column: pa.ChunkedArray | pa.Array) -> np.ndarray:
     """Arrow timestamp column -> int64 ns since the epoch.
 
     Reads the stored integers directly, so neither a naive nor a UTC-aware
@@ -89,54 +90,136 @@ def _ts_to_ns(column: pa.ChunkedArray | pa.Array) -> np.ndarray:
     return raw.to_numpy(zero_copy_only=False).astype(np.int64) * _UNIT_NS[column.type.unit]
 
 
+def _atomic_write_table(table: pa.Table, path: Path) -> None:
+    tmp = path.with_suffix(".tmp")
+    pq.write_table(table, tmp, compression="zstd")
+    os.replace(tmp, path)
+
+
+def _atomic_write_json(data: dict, path: Path) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+class FeedStore:
+    """Read and write one feed directory: day files plus the manifest."""
+
+    def __init__(self, feed_dir: Path) -> None:
+        self.dir = Path(feed_dir)
+        self.ticks_dir = self.dir / "ticks"
+        self.manifest_path = self.dir / "manifest.json"
+        self.lock = threading.Lock()
+
+    def exists(self) -> bool:
+        return self.manifest_path.exists()
+
+    def manifest(self) -> dict:
+        if not self.manifest_path.exists():
+            return {"days": {}}
+        return json.loads(self.manifest_path.read_text(encoding="utf-8"))
+
+    def save_manifest(self, manifest: dict) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        manifest["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _atomic_write_json(manifest, self.manifest_path)
+
+    def day_path(self, day: date) -> Path:
+        return self.ticks_dir / f"{day.isoformat()}.parquet"
+
+    def write_day(self, day: date, ts: np.ndarray, bid: np.ndarray, ask: np.ndarray, flag: np.ndarray) -> None:
+        self.ticks_dir.mkdir(parents=True, exist_ok=True)
+        table = pa.table(
+            {
+                "ts": pa.array(np.asarray(ts, np.int64).view("datetime64[ns]"), pa.timestamp("ns", tz="UTC")),
+                "bid": np.asarray(bid, np.float64),
+                "ask": np.asarray(ask, np.float64),
+                "flag": np.asarray(flag, np.int8),
+            }
+        )
+        _atomic_write_table(table, self.day_path(day))
+
+    def read_day(self, day: date) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Every stored tick of the day, flags included."""
+        path = self.day_path(day)
+        if not path.exists():
+            e = np.empty(0)
+            return e.astype(np.int64), e, e, e.astype(np.int8)
+        t = pq.read_table(path)
+        return (
+            ts_to_ns(t.column("ts")),
+            t.column("bid").to_numpy().astype(np.float64),
+            t.column("ask").to_numpy().astype(np.float64),
+            t.column("flag").to_numpy().astype(np.int8),
+        )
+
+
+def day_entry(source: str, ts: np.ndarray, flag: np.ndarray, **extra) -> dict:
+    counts = np.bincount(flag.astype(np.int64), minlength=5) if len(flag) else np.zeros(5, np.int64)
+    return {
+        "source": source,
+        "ticks": int(len(ts)),
+        "flags": [int(c) for c in counts[:5]],
+        "first_ns": int(ts[0]) if len(ts) else None,
+        "last_ns": int(ts[-1]) if len(ts) else None,
+        **extra,
+    }
+
+
 class ParquetTickSource:
-    """Ticks from the per-day cache, or straight from the Layer 0 file.
+    """Kept ticks of a feed, a day at a time.
 
     Keeps a few recently used days in memory, shared by every session: a
     replay touches the current day and its neighbour, and a forming candle is
-    recomputed from the current day many times per second.
+    recomputed from the current day many times per second. `refresh()` picks
+    up days added by an update while the server runs.
     """
 
     def __init__(
         self,
-        tick_file: Path = config.TICK_FILE,
-        cache_dir: Path = config.TICK_CACHE_DIR,
+        feed_dir: Path = config.DUKA_DIR,
         keep_flags: Iterable[int] = config.KEEP_FLAGS,
         memory_days: int = 8,
     ) -> None:
-        self.tick_file = Path(tick_file)
-        self.cache_dir = Path(cache_dir)
+        self.store = FeedStore(feed_dir)
         self.keep_flags = tuple(sorted(set(keep_flags)))
+        self._keep = np.zeros(256, bool)
+        self._keep[list(self.keep_flags)] = True
         self._memory: OrderedDict[date, DayTicks] = OrderedDict()
         self._memory_days = memory_days
         self._lock = threading.Lock()
-        self._days: list[date] | None = None
-
-    # -- discovery ---------------------------------------------------------
+        self._days: list[date] = []
+        self._entries: dict = {}
+        self._version = None
+        self.refresh()
 
     @property
-    def cached(self) -> bool:
-        return (self.cache_dir / "manifest.json").exists()
+    def ready(self) -> bool:
+        return bool(self._days)
 
-    def manifest(self) -> dict | None:
-        path = self.cache_dir / "manifest.json"
-        if not path.exists():
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
+    def refresh(self) -> bool:
+        """Reload the manifest if it changed. True when it did."""
+        try:
+            version = self.store.manifest_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            version = None
+        if version == self._version:
+            return False
+        entries = self.store.manifest()["days"]
+        days = sorted(date.fromisoformat(d) for d, e in entries.items() if e.get("ticks"))
+        with self._lock:
+            # A day whose entry changed (a partial day that grew) is re-read.
+            for d in list(self._memory):
+                if self._entries.get(d.isoformat()) != entries.get(d.isoformat()):
+                    self._memory.pop(d, None)
+            self._entries = entries
+            self._days = days
+            self._version = version
+        return True
 
     def days(self) -> list[date]:
-        """Every UTC day that holds at least one kept tick, ascending."""
-        if self._days is None:
-            manifest = self.manifest()
-            if manifest is not None:
-                self._days = [date.fromisoformat(d) for d in manifest["days"]]
-            else:
-                ts = pq.read_table(self.tick_file, columns=["timestamp"]).column("timestamp")
-                day_index = np.unique(_ts_to_ns(ts) // NS_PER_DAY)
-                self._days = [_EPOCH + timedelta(days=int(i)) for i in day_index]
+        """Every UTC day that holds at least one tick, ascending."""
         return self._days
-
-    # -- loading -----------------------------------------------------------
 
     def load_day(self, day: date) -> DayTicks:
         with self._lock:
@@ -144,7 +227,9 @@ class ParquetTickSource:
             if hit is not None:
                 self._memory.move_to_end(day)
                 return hit
-        ticks = self._read_day(day)
+        ts, bid, ask, flag = self.store.read_day(day)
+        keep = self._keep[flag]
+        ticks = DayTicks(day, ts[keep], bid[keep], ask[keep])
         with self._lock:
             self._memory[day] = ticks
             self._memory.move_to_end(day)
@@ -152,101 +237,50 @@ class ParquetTickSource:
                 self._memory.popitem(last=False)
         return ticks
 
-    def _read_day(self, day: date) -> DayTicks:
-        if self.cached:
-            path = self.cache_dir / f"{day.isoformat()}.parquet"
-            if not path.exists():
-                return DayTicks.empty(day)  # weekend, holiday, or outside the data
-            table = pq.read_table(path)
-            return DayTicks(
-                day,
-                _ts_to_ns(table.column("ts")),
-                table.column("bid").to_numpy().astype(np.float64),
-                table.column("ask").to_numpy().astype(np.float64),
-            )
-        return self._read_day_from_source(day)
 
-    def _read_day_from_source(self, day: date) -> DayTicks:
-        start = datetime(day.year, day.month, day.day)
-        end = start + timedelta(days=1)
-        table = pq.read_table(
-            self.tick_file,
-            columns=["timestamp", "Bid", "Ask", "quality_flag"],
-            filters=[("timestamp", ">=", start), ("timestamp", "<", end)],
-        )
-        table = table.filter(pc.is_in(table.column("quality_flag"), pa.array(self.keep_flags, pa.int64())))
-        return _sorted_day(
-            day,
-            _ts_to_ns(table.column("timestamp")),
-            table.column("Bid").to_numpy().astype(np.float64),
-            table.column("Ask").to_numpy().astype(np.float64),
-        )
-
-
-def _sorted_day(day: date, ts: np.ndarray, bid: np.ndarray, ask: np.ndarray) -> DayTicks:
-    good = np.isfinite(bid) & np.isfinite(ask) & (bid > 0) & (ask >= bid)
-    ts, bid, ask = ts[good], bid[good], ask[good]
-    if len(ts) and np.any(np.diff(ts) < 0):
-        order = np.argsort(ts, kind="stable")
-        ts, bid, ask = ts[order], bid[order], ask[order]
-    return DayTicks(day, ts, bid, ask)
-
-
-def build_tick_cache(
+def import_layer0(
     tick_file: Path = config.TICK_FILE,
-    cache_dir: Path = config.TICK_CACHE_DIR,
-    keep_flags: Iterable[int] = config.KEEP_FLAGS,
+    feed_dir: Path = config.DUKA_DIR,
     progress=print,
 ) -> dict:
-    """Split the Layer 0 file into one Parquet file per UTC day.
+    """Copy the Layer 0 file into the feed, one file per UTC day.
 
-    Streams row group by row group, so memory holds one ~1M-row block plus
-    the day that straddles two blocks. Rerunning replaces the cache.
+    Every tick is copied with its Layer 0 quality flag. Streams row group by
+    row group, so memory holds one ~1M-row block plus the day that straddles
+    two blocks. Days already in the feed from Dukascopy downloads are left
+    alone; days from a previous import are replaced.
     """
-    tick_file, cache_dir = Path(tick_file), Path(cache_dir)
-    keep_flags = tuple(sorted(set(keep_flags)))
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    for old in cache_dir.glob("*.parquet"):
-        old.unlink()
-    manifest_path = cache_dir / "manifest.json"
-    if manifest_path.exists():
-        manifest_path.unlink()
-
+    tick_file = Path(tick_file)
+    store = FeedStore(feed_dir)
+    manifest = store.manifest()
     source = pq.ParquetFile(tick_file)
-    keep = pa.array(keep_flags, pa.int64())
     flag_counts: dict[int, int] = {}
-    day_counts: dict[str, int] = {}
+    imported: dict[str, dict] = {}
 
     pending_day: int | None = None
-    pending: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    pending: list[tuple[np.ndarray, ...]] = []
 
     def flush(day_idx: int, parts) -> None:
         ts = np.concatenate([p[0] for p in parts])
         bid = np.concatenate([p[1] for p in parts])
         ask = np.concatenate([p[2] for p in parts])
+        flag = np.concatenate([p[3] for p in parts])
+        order = np.argsort(ts, kind="stable")
+        ts, bid, ask, flag = ts[order], bid[order], ask[order], flag[order]
         day = _EPOCH + timedelta(days=day_idx)
-        ticks = _sorted_day(day, ts, bid, ask)
-        if not len(ticks):
+        if manifest["days"].get(day.isoformat(), {}).get("source") == "dukascopy":
             return
-        table = pa.table(
-            {
-                "ts": pa.array(ticks.ts.view("datetime64[ns]"), pa.timestamp("ns", tz="UTC")),
-                "bid": ticks.bid,
-                "ask": ticks.ask,
-            }
-        )
-        pq.write_table(table, cache_dir / f"{day.isoformat()}.parquet", compression="zstd")
-        day_counts[day.isoformat()] = len(ticks)
+        store.write_day(day, ts, bid, ask, flag)
+        imported[day.isoformat()] = day_entry("layer0", ts, flag, complete=True)
 
     for group in range(source.metadata.num_row_groups):
         table = source.read_row_group(group, columns=["timestamp", "Bid", "Ask", "quality_flag"])
-        flags, counts = np.unique(table.column("quality_flag").to_numpy(), return_counts=True)
-        for f, c in zip(flags, counts):
-            flag_counts[int(f)] = flag_counts.get(int(f), 0) + int(c)
-        table = table.filter(pc.is_in(table.column("quality_flag"), keep))
-        ts = _ts_to_ns(table.column("timestamp"))
+        ts = ts_to_ns(table.column("timestamp"))
         bid = table.column("Bid").to_numpy().astype(np.float64)
         ask = table.column("Ask").to_numpy().astype(np.float64)
+        flag = table.column("quality_flag").to_numpy().astype(np.int8)
+        for f, c in zip(*np.unique(flag, return_counts=True)):
+            flag_counts[int(f)] = flag_counts.get(int(f), 0) + int(c)
         if not len(ts):
             continue
         day_idx = ts // NS_PER_DAY
@@ -258,23 +292,25 @@ def build_tick_cache(
                 flush(pending_day, pending)
                 pending = []
             pending_day = d
-            pending.append((ts[a:b], bid[a:b], ask[a:b]))
+            pending.append((ts[a:b], bid[a:b], ask[a:b], flag[a:b]))
         progress(f"  row group {group + 1}/{source.metadata.num_row_groups}")
     if pending_day is not None:
         flush(pending_day, pending)
 
     stat = tick_file.stat()
-    manifest = {
+    manifest = store.manifest()  # re-read: an update may have run meanwhile
+    manifest["symbol"] = config.SYMBOL
+    manifest["layer0"] = {
         "source": str(tick_file),
-        "source_size": stat.st_size,
-        "source_mtime": stat.st_mtime,
-        "keep_flags": list(keep_flags),
+        "size": stat.st_size,
+        "mtime": stat.st_mtime,
         "flag_counts": {str(k): v for k, v in sorted(flag_counts.items())},
-        "days": sorted(day_counts),
-        "ticks_per_day": day_counts,
-        "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "days": len(imported),
+        "imported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    manifest_path.write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+    manifest["days"].update(imported)
+    manifest["days"] = dict(sorted(manifest["days"].items()))
+    store.save_manifest(manifest)
     return manifest
 
 
@@ -301,7 +337,5 @@ class MemoryTickSource:
     def load_day(self, day: date) -> DayTicks:
         return self._by_day.get(day) or DayTicks.empty(day)
 
-
-def trading_day_index(days: list[date], day: date) -> int:
-    """Index of the first trading day on or after `day`."""
-    return bisect_left(days, day)
+    def refresh(self) -> bool:
+        return False

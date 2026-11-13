@@ -24,7 +24,10 @@ WEB_DIR = SIM_DIR / "web"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("SIM_PORT", "8001"))
 
-#: Layer 0 output of trading-research: one file of EUR/USD ticks, UTC.
+SYMBOL = "EURUSD"
+
+#: Layer 0 output of trading-research: one file of EUR/USD ticks, UTC,
+#: 2023-01-02 to 2024-12-31. Imported once into the store.
 TICK_FILE = Path(
     os.environ.get(
         "SIM_TICK_FILE",
@@ -32,21 +35,34 @@ TICK_FILE = Path(
     )
 )
 
-#: Regenerable: rebuilt from TICK_FILE by `python -m simulator build-cache`.
-CACHE_DIR = Path(os.environ.get("SIM_CACHE_DIR", SIM_DIR / "cache"))
-TICK_CACHE_DIR = CACHE_DIR / "ticks"
-BAR_CACHE_DIR = CACHE_DIR / "bars"
+#: Market data the simulator owns: imported, downloaded and recorded ticks,
+#: plus the candles built from them. Durable: downloads take time to redo
+#: and live recordings cannot be redone at all.
+STORE_DIR = Path(os.environ.get("SIM_STORE_DIR", SIM_DIR / "store"))
+
+#: The replay feed: Layer 0 history plus Dukascopy downloads, one source.
+DUKA_DIR = STORE_DIR / "dukascopy" / SYMBOL
+
+#: Live recordings, one folder per MT5 trade server (prices differ by broker,
+#: so feeds are never mixed).
+MT5_DIR = STORE_DIR / "mt5"
+
+#: Recorder settings chosen in the UI (terminal path, start with the app).
+LIVE_SETTINGS = STORE_DIR / "live_settings.json"
 
 #: Not regenerable: sessions, orders, trades, notes, drawings, snapshots.
 JOURNAL_DB = Path(os.environ.get("SIM_JOURNAL_DB", SIM_DIR / "journal.sqlite3"))
 
-SYMBOL = "EURUSD"
+#: Fetch new Dukascopy hours in the background whenever the server starts.
+AUTO_UPDATE = os.environ.get("SIM_AUTO_UPDATE", "1") != "0"
 
-#: Layer 0 quality flags: 0 clean, 1 spread > 10x median, 2 suspect price,
-#: 3 first tick after a > 5 s pause, 4 > 5 sigma outlier.
+#: Quality flags, the same in every feed (Layer 0's definitions):
+#: 0 clean, 1 spread > 10x the day's median, 2 bad price, 3 first quote after
+#: a > 5 s pause, 4 > 5 sigma from the rolling median.
 #: Flag 3 is a timing label on a genuine quote, often the first price after
 #: news. Dropping it would hide exactly the jumps a stop loss must see, so it
-#: is kept. Flags 1, 2 and 4 are price problems and are dropped.
+#: is kept. Flags 1, 2 and 4 are price problems and are dropped. Every tick
+#: is stored with its flag; this filter applies when ticks are read.
 KEEP_FLAGS = (0, 3)
 
 # EUR/USD in a USD account.

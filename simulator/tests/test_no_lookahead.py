@@ -152,12 +152,12 @@ class SyntheticNoLookahead(unittest.TestCase):
         self.assertEqual(len(s.broker.positions), len(ref.positions))
 
 
-@unittest.skipUnless(BarStore.exists() and (config.TICK_CACHE_DIR / "manifest.json").exists(), "cache not built")
+@unittest.skipUnless(BarStore.exists(config.DUKA_DIR / "bars", config.KEEP_FLAGS), "store not built")
 class RealDataNoLookahead(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = ParquetTickSource()
-        cls.bars = BarStore.load()
+        cls.bars = BarStore.load(config.DUKA_DIR / "bars")
 
     def test_100_random_times(self):
         rng = random.Random(11)

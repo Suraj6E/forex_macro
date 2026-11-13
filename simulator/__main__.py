@@ -49,11 +49,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         return 1
 
-    from simulator.data.bars import BarStore
-    from simulator.data.ticks import ParquetTickSource
-
-    if config.TICK_FILE.exists() and not (ParquetTickSource().cached and BarStore.exists()):
-        print("First run: building the tick and candle cache (about 20 seconds, once).")
+    if not _store_ready():
+        print("First run: building the market data (about 30 seconds, once).")
         if cmd_build_cache(args) != 0:
             return 1
 
@@ -75,27 +72,72 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_build_cache(args: argparse.Namespace) -> int:
+def _store_ready() -> bool:
     from simulator.data.bars import BarStore
-    from simulator.data.ticks import ParquetTickSource, build_tick_cache
+    from simulator.data.ticks import ParquetTickSource
 
-    if not config.TICK_FILE.exists():
-        print(f"Tick file not found: {config.TICK_FILE}\nSet SIM_TICK_FILE to its path.")
-        return 1
+    return ParquetTickSource().ready and BarStore.exists(config.DUKA_DIR / "bars", config.KEEP_FLAGS)
+
+
+def cmd_build_cache(args: argparse.Namespace) -> int:
+    """Import the Layer 0 file into the store (if not yet) and build candles."""
+    from simulator.data.bars import BarStore
+    from simulator.data.ticks import FeedStore, ParquetTickSource, import_layer0
+
     t0 = time.time()
-    print(f"Splitting {config.TICK_FILE} into one file per day ...")
-    manifest = build_tick_cache(progress=print)
-    kept = sum(manifest["ticks_per_day"].values())
-    print(
-        f"  {len(manifest['days'])} trading days, {kept:,} ticks kept "
-        f"(flags {manifest['keep_flags']}; all flags seen: {manifest['flag_counts']})"
-    )
-    print("Building Bid candles for every timeframe ...")
+    if not FeedStore(config.DUKA_DIR).manifest().get("layer0"):
+        if not config.TICK_FILE.exists():
+            print(f"Tick file not found: {config.TICK_FILE}. Set SIM_TICK_FILE to its path.")
+            return 1
+        print(f"Importing {config.TICK_FILE} ...")
+        m = import_layer0(progress=lambda msg: None)
+        print(f"  {m['layer0']['days']} days; flags in the file: {m['layer0']['flag_counts']}")
+    print(f"Building Bid candles (keeping flags {list(config.KEEP_FLAGS)}) ...")
     store = BarStore.build(ParquetTickSource(), progress=print)
-    store.save()
-    for tf, bars in store.by_tf.items():
-        print(f"  {tf}: {len(bars):,} candles")
-    print(f"Done in {time.time() - t0:.0f}s. Cache: {config.CACHE_DIR}")
+    store.save(config.DUKA_DIR / "bars", config.KEEP_FLAGS)
+    print(f"Done in {time.time() - t0:.0f}s. Store: {config.STORE_DIR}")
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Fetch missing Dukascopy hours (new days and holes), then rebuild candles."""
+    from simulator.data import dukascopy
+    from simulator.data.bars import BarStore
+    from simulator.data.ticks import ParquetTickSource
+
+    if not _store_ready() and cmd_build_cache(args) != 0:
+        return 1
+    print("Fetching missing hours from Dukascopy (Ctrl+C stops; rerun resumes) ...")
+    summary = dukascopy.update(progress=lambda day, done, total: print(f"  {day} ({done}/{total})"))
+    print(f"  {summary['days']} days written, {summary['ticks']:,} ticks, {summary['failed_hours']} hours to retry")
+    if summary["first_changed"] is not None:
+        source = ParquetTickSource()
+        bars = BarStore.load(config.DUKA_DIR / "bars")
+        bars.rebuild_from(source, summary["first_changed"])
+        bars.save(config.DUKA_DIR / "bars", config.KEEP_FLAGS)
+        print("  candles rebuilt")
+    return 0
+
+
+def cmd_record(args: argparse.Namespace) -> int:
+    """Record live ticks from an MT5 terminal you have opened (never starts one)."""
+    from simulator.live.mt5rec import MT5Recorder
+    from simulator.live.winproc import running_terminals
+
+    terminal = args.terminal or next(iter(running_terminals()), None)
+    if not terminal:
+        print("No MT5 terminal is running. Open one (a demo account is safest), then rerun.")
+        return 1
+    rec = MT5Recorder(terminal)
+    rec.start()
+    print(f"Recording from {terminal}. Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(5)
+            st = rec.status
+            print(f"  {st.get('state')}: {st.get('message')} | last tick {st.get('last_tick_ms')} | today {st.get('ticks_today')}")
+    except KeyboardInterrupt:
+        rec.stop()
     return 0
 
 
@@ -113,7 +155,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     meta = pq.ParquetFile(config.TICK_FILE).metadata
     print(f"{config.TICK_FILE}\n  {meta.num_rows:,} rows in {meta.num_row_groups} row groups")
     source = ParquetTickSource()
-    print(f"  per-day cache: {'built' if source.cached else 'not built - run build-cache'}")
+    print(f"  per-day cache: {'built' if source.ready else 'not built - run build-cache'}")
     days = source.days()
     print(f"  {len(days)} trading days, {days[0]} to {days[-1]}")
     for day in random.sample(days, 3) + [date(2024, 3, 16)]:
@@ -129,12 +171,15 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd")
     run = sub.add_parser("run", help="start the simulator and open it (default)")
     run.add_argument("--no-browser", action="store_true", default=argparse.SUPPRESS)
-    sub.add_parser("build-cache", help="split ticks per day and build candles (run once)")
+    sub.add_parser("build-cache", help="import the Layer 0 file and build candles (run once)")
+    sub.add_parser("update", help="fetch missing Dukascopy hours, then rebuild candles")
+    rec = sub.add_parser("record", help="record live ticks from a running MT5 terminal")
+    rec.add_argument("--terminal", help="path of the terminal64.exe to attach to")
     sub.add_parser("check", help="step 1 check: tick file, row groups, day load times")
     args = parser.parse_args(argv)
     if args.cmd in (None, "run"):
         return cmd_run(args)
-    return {"build-cache": cmd_build_cache, "check": cmd_check}[args.cmd](args)
+    return {"build-cache": cmd_build_cache, "update": cmd_update, "record": cmd_record, "check": cmd_check}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -43,11 +43,23 @@ HISTORY_LIMIT = 1500
 MAX_FRAME_BARS = 400
 
 
+#: Live sessions have no end of data.
+OPEN_END = 2**62
+
+
 class SessionError(ValueError):
     """A request the session refuses; the message is shown as is."""
 
 
 class ReplaySession:
+    """A replay, or with `live=True` a session whose clock is the wall clock.
+
+    Live is the same engine on a growing feed: the clock is set to now on
+    every frame, every tick that arrived is given to the broker, and there
+    is nothing to step into or jump to, because the future does not exist
+    yet. Orders still fill on the tick after the one on screen.
+    """
+
     def __init__(
         self,
         source: TickSource,
@@ -56,26 +68,46 @@ class ReplaySession:
         start_ns: int,
         timeframe: str = "m15",
         session_id: str = "",
+        live: bool = False,
     ) -> None:
         self.id = session_id
         self.source = source
         self.bars = bars
         self.broker = broker
-        self.days: list[date] = source.days()
+        self.live = live
         if not self.days:
             raise SessionError("No tick data available")
         tf_seconds(timeframe)
         self.timeframe = timeframe
-        self.clock = Clock()
-        first = source.load_day(self.days[0])
-        last = source.load_day(self.days[-1])
-        self.first_ns = int(first.ts[0])
-        self.end_ns = int(last.ts[-1])
+        self.clock = Clock(speed=1.0, playing=True) if live else Clock()
+        self.first_ns = int(source.load_day(self.days[0]).ts[0])
+        self.end_ns = OPEN_END if live else self._last_tick_ns()
         self.sim_ns = start_ns
         self.last_tick: tuple[int, float, float] | None = None
         self.finished = False
         self._last_sent_time: int | None = None
         self._reset_to(start_ns)
+
+    @property
+    def days(self) -> list[date]:
+        return self.source.days()
+
+    def _last_tick_ns(self) -> int:
+        for day in reversed(self.days[-5:]):
+            t = self.source.load_day(day)
+            if len(t):
+                return int(t.ts[-1])
+        raise SessionError("No tick data available")
+
+    def refresh(self) -> bool:
+        """Pick up data added since the session started (an update ran).
+        A replay that had reached the end can then play on."""
+        if self.live or not self.source.refresh():
+            return False
+        self.end_ns = self._last_tick_ns()
+        if self.sim_ns < self.end_ns:
+            self.finished = False
+        return True
 
     # -- time --------------------------------------------------------------
 
@@ -102,6 +134,8 @@ class ReplaySession:
         clock simply moves and history reloads strictly before the new time.
         """
         ns = int(ns)
+        if self.live:
+            raise SessionError("A live session follows the clock; there is nowhere to jump")
         busy = bool(self.broker.pending or self.broker.positions)
         if ns < self.sim_ns and busy:
             raise SessionError("Close positions and cancel orders before jumping back in time")
@@ -136,7 +170,7 @@ class ReplaySession:
         return True
 
     def _skip_dead_time(self) -> None:
-        if self.finished:
+        if self.finished or self.live:
             return
         if self.last_tick is not None and self.sim_ns - self.last_tick[0] < DEAD_GAP_NS:
             return
@@ -150,6 +184,8 @@ class ReplaySession:
     def step(self, kind: str) -> None:
         """'tick': to the next tick. 'candle': to the next candle of the
         visible timeframe, so the forming one completes."""
+        if self.live:
+            raise SessionError("A live session cannot step ahead of the market")
         if kind == "tick":
             nxt = self._next_tick_after(self.sim_ns)
             if nxt is None:
@@ -268,7 +304,8 @@ class ReplaySession:
             "playing": self.clock.playing,
             "finished": self.finished,
             "first_ms": self.first_ns // 1_000_000,
-            "end_ms": self.end_ns // 1_000_000,
+            "end_ms": None if self.live else self.end_ns // 1_000_000,
+            "live": self.live,
         }
 
     # -- persistence -------------------------------------------------------
@@ -282,10 +319,16 @@ class ReplaySession:
         }
 
     @classmethod
-    def from_state(cls, source: TickSource, bars: BarStore, state: dict, session_id: str) -> "ReplaySession":
+    def from_state(cls, source: TickSource, bars: BarStore, state: dict, session_id: str,
+                   live: bool = False, now: int | None = None) -> "ReplaySession":
         broker = Broker.from_state(state["broker"])
-        session = cls(source, bars, broker, state["sim_ns"], state["timeframe"], session_id)
-        session.clock.speed = state.get("speed", 60.0)
+        session = cls(source, bars, broker, state["sim_ns"], state["timeframe"], session_id, live=live)
+        if live:
+            # Everything that arrived while the session was closed is given
+            # to its orders and positions, in order, before it is shown.
+            session.advance(now if now is not None else state["sim_ns"])
+        else:
+            session.clock.speed = state.get("speed", 60.0)
         return session
 
 

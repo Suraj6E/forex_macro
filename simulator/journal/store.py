@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     slippage_pips REAL NOT NULL,
     hide_dates INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
+    mode TEXT NOT NULL DEFAULT 'replay',
+    feed TEXT NOT NULL DEFAULT 'dukascopy',
     state TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS orders (
@@ -133,6 +135,12 @@ class Journal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as db:
             db.executescript(SCHEMA)
+            # Journals made before live sessions existed: add the columns.
+            have = {r["name"] for r in db.execute("PRAGMA table_info(sessions)")}
+            if "mode" not in have:
+                db.execute("ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'replay'")
+            if "feed" not in have:
+                db.execute("ALTER TABLE sessions ADD COLUMN feed TEXT NOT NULL DEFAULT 'dukascopy'")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -148,7 +156,8 @@ class Journal:
 
     # -- sessions ----------------------------------------------------------
 
-    def create_session(self, *, start_ns: int, timeframe: str, broker_state: dict, hide_dates: bool, name: str = "") -> str:
+    def create_session(self, *, start_ns: int, timeframe: str, broker_state: dict, hide_dates: bool, name: str = "",
+                       mode: str = "replay", feed: str = "dukascopy") -> str:
         sid = uuid.uuid4().hex[:12]
         now = _now()
         state = {"sim_ns": start_ns, "timeframe": timeframe, "speed": 60.0, "broker": broker_state}
@@ -156,13 +165,13 @@ class Journal:
             db.execute(
                 """INSERT INTO sessions (id, name, symbol, created_at, updated_at, start_ns, sim_ns,
                    timeframe, starting_balance, leverage, commission_per_lot, slippage_pips,
-                   hide_dates, status, state)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)""",
+                   hide_dates, status, mode, feed, state)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
                 (
                     sid, name, config.SYMBOL, now, now, start_ns, start_ns, timeframe,
                     broker_state["starting_balance"], broker_state["leverage"],
                     broker_state["commission_per_lot"], broker_state["slippage_pips"],
-                    int(hide_dates), json.dumps(state),
+                    int(hide_dates), mode, feed, json.dumps(state),
                 ),
             )
         return sid
@@ -200,7 +209,7 @@ class Journal:
             rows = db.execute(
                 """SELECT s.id, s.name, s.symbol, s.created_at, s.updated_at, s.start_ns, s.sim_ns,
                           s.timeframe, s.starting_balance, s.leverage, s.commission_per_lot,
-                          s.slippage_pips, s.hide_dates, s.status,
+                          s.slippage_pips, s.hide_dates, s.status, s.mode, s.feed,
                           COUNT(t.id) AS trades, COALESCE(SUM(t.net_usd), 0) AS net_usd
                    FROM sessions s LEFT JOIN trades t ON t.session_id = s.id
                    GROUP BY s.id ORDER BY s.updated_at DESC"""

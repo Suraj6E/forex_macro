@@ -1,43 +1,61 @@
 """The simulator's web server (guide step 3).
 
 FastAPI serves the pages and one WebSocket per browser tab. The engine runs
-here and the browser only draws. Each replay session is driven by its own
-clock task, which advances time every 50 ms and sends at most one screen
-update per frame (20 per second); the broker still sees every tick.
+here and the browser only draws. Each session is driven by its own clock
+task, which advances time every 50 ms and sends at most one screen update
+per frame (20 per second); the broker still sees every tick.
 
 A session belongs to one tab at a time. Opening it in a second tab moves it
 there and tells the first tab, so there is never a second copy advancing the
 same account.
+
+Two kinds of feed: the replay feed (Layer 0 history plus Dukascopy
+downloads, kept current by a background update) and live feeds recorded
+from an MT5 terminal, one per trade server. A live session runs on a live
+feed with the wall clock.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from simulator import config
+from simulator.data import dukascopy
 from simulator.data.bars import TIMEFRAMES, BarStore, tf_seconds
-from simulator.data.ticks import NS_PER_SECOND, ParquetTickSource
+from simulator.data.ticks import NS_PER_SECOND, ParquetTickSource, now_ns
 from simulator.engine.broker import UNSET, Broker, OrderError
 from simulator.engine.clock import FRAME_SECONDS, SPEEDS
 from simulator.engine.session import ReplaySession, SessionError, random_start_ns
 from simulator.journal import stats
 from simulator.journal.store import Journal
+from simulator.live import mt5rec
+from simulator.live.feed import FeedBars, LiveFeedSource
+from simulator.live.winproc import running_terminals, same_path
 
 SAVE_EVERY_SECONDS = 5.0
 MAX_SNAPSHOT_BYTES = 6_000_000
+REPLAY_FEED = "dukascopy"
+
+
+class Feed:
+    def __init__(self, key: str, label: str, source, bars, live: bool) -> None:
+        self.key, self.label, self.source, self.bars, self.live = key, label, source, bars, live
 
 
 class Hub:
-    """Shared, read-only market data plus the live sessions."""
+    """Market data, the background updater and recorder, and live sessions."""
 
     def __init__(self) -> None:
         self.journal = Journal()
@@ -45,24 +63,120 @@ class Hub:
         self.bars: BarStore | None = None
         self.problem: str | None = None
         self.live: dict[str, Live] = {}
+        self._mt5_feeds: dict[str, Feed] = {}
+        self.update_state: dict = {"running": False}
+        self._update_thread: threading.Thread | None = None
+        self._update_stop = threading.Event()
+        self.recorder: mt5rec.MT5Recorder | None = None
+
+    # -- the replay feed -------------------------------------------------------
 
     def load(self) -> None:
         source = ParquetTickSource()
-        if not source.cached or not BarStore.exists():
+        if not source.ready or not BarStore.exists(config.DUKA_DIR / "bars", config.KEEP_FLAGS):
             self.problem = (
-                "The tick and candle cache is not built. Stop the server and run "
-                "`python -m simulator build-cache` (about 20 seconds), then start it again."
+                "The market data is not built yet. Stop the server and start it with "
+                "`python -m simulator`, which builds it first (about 30 seconds, once)."
             )
-            if not config.TICK_FILE.exists():
+            if not config.TICK_FILE.exists() and not source.ready:
                 self.problem = f"Tick file not found: {config.TICK_FILE}. Set SIM_TICK_FILE to its path."
             return
         self.source = source
-        self.bars = BarStore.load()
+        self.bars = BarStore.load(config.DUKA_DIR / "bars")
         self.problem = None
 
     @property
     def ready(self) -> bool:
         return self.source is not None and self.bars is not None
+
+    def start_update(self) -> bool:
+        """Fetch new Dukascopy hours in a background thread."""
+        if not self.ready or (self._update_thread and self._update_thread.is_alive()):
+            return False
+        self._update_stop.clear()
+        self.update_state = {"running": True, "started_ms": int(time.time() * 1000), "done": 0, "total": 0,
+                             "day": None, "message": "Checking for new hours"}
+        self._update_thread = threading.Thread(target=self._run_update, name="dukascopy-update", daemon=True)
+        self._update_thread.start()
+        return True
+
+    def stop_update(self) -> None:
+        self._update_stop.set()
+
+    def _run_update(self) -> None:
+        state = self.update_state
+
+        def progress(day, done, total):
+            state.update(day=day.isoformat(), done=done, total=total,
+                         message=f"Fetching {day.isoformat()} ({done}/{total} days)")
+
+        try:
+            summary = dukascopy.update(progress=progress, stop=self._update_stop)
+            if summary["first_changed"] is not None:
+                state["message"] = "Building candles for the new days"
+                self.source.refresh()
+                self.bars.rebuild_from(self.source, summary["first_changed"])
+                self.bars.save(config.DUKA_DIR / "bars", config.KEEP_FLAGS)
+            gaps = f"; {summary['failed_hours']} hours failed and will be retried" if summary["failed_hours"] else ""
+            state.update(running=False, finished_ms=int(time.time() * 1000), summary={
+                k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in summary.items()},
+                message=("Stopped" if summary["stopped"] else
+                         f"Up to date: {summary['days']} days, {summary['ticks']:,} new ticks{gaps}"))
+        except Exception as exc:
+            state.update(running=False, finished_ms=int(time.time() * 1000), error=f"{type(exc).__name__}: {exc}",
+                         message=f"Update failed: {exc}")
+
+    # -- live feeds --------------------------------------------------------------
+
+    def feeds(self) -> dict[str, Feed]:
+        out = {}
+        if self.ready:
+            out[REPLAY_FEED] = Feed(REPLAY_FEED, "Dukascopy history", self.source, self.bars, live=False)
+        for feed_dir in sorted(config.MT5_DIR.glob(f"*/{config.SYMBOL}")):
+            key = f"mt5:{feed_dir.parent.name}"
+            if key not in self._mt5_feeds:
+                if not ((feed_dir / "manifest.json").exists() or any((feed_dir / "live").glob("*.csv"))):
+                    continue
+                src = LiveFeedSource(feed_dir)
+                manifest = src.store.manifest()
+                label = f"MT5 {manifest.get('server', feed_dir.parent.name)}"
+                self._mt5_feeds[key] = Feed(key, label, src, FeedBars(src), live=True)
+            out[key] = self._mt5_feeds[key]
+        return out
+
+    def feed(self, key: str | None) -> Feed:
+        feeds = self.feeds()
+        key = key or REPLAY_FEED
+        if key not in feeds:
+            raise SessionError(f"No data for feed {key!r} yet")
+        if not feeds[key].source.days():
+            raise SessionError(f"{feeds[key].label} has no ticks recorded yet")
+        return feeds[key]
+
+    def live_settings(self) -> dict:
+        try:
+            return json.loads(config.LIVE_SETTINGS.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            return {}
+
+    def save_live_settings(self, settings: dict) -> None:
+        config.LIVE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        config.LIVE_SETTINGS.write_text(json.dumps(settings, indent=1), encoding="utf-8")
+
+    def start_recorder(self, terminal: str) -> None:
+        if self.recorder is not None:
+            self.recorder.stop()
+        self.recorder = mt5rec.MT5Recorder(terminal)
+        self.recorder.start()
+        self.save_live_settings({"terminal": terminal, "autostart": True})
+
+    def stop_recorder(self) -> None:
+        if self.recorder is not None:
+            self.recorder.stop()
+        self.recorder = None
+        settings = self.live_settings()
+        settings["autostart"] = False
+        self.save_live_settings(settings)
 
 
 hub = Hub()
@@ -71,9 +185,19 @@ hub = Hub()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     hub.load()
+    if hub.ready and config.AUTO_UPDATE:
+        hub.start_update()
+    settings = hub.live_settings()
+    if settings.get("autostart") and settings.get("terminal"):
+        # Waits harmlessly until the trader opens that terminal.
+        hub.recorder = mt5rec.MT5Recorder(settings["terminal"])
+        hub.recorder.start()
     yield
     for live in list(hub.live.values()):
         live.save()
+    hub.stop_update()
+    if hub.recorder is not None:
+        hub.recorder.stop(wait=3)
 
 
 app = FastAPI(title="FX Replay Simulator", lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -183,13 +307,26 @@ class Live:
             now = time.perf_counter()
             dt, last = now - last, now
             s = self.session
+            if s.live:
+                # The clock is the wall clock. A tick stamped a moment ahead
+                # of this machine's clock still exists, so it is shown.
+                latest = s.source.latest_ns() or 0
+                s.advance(max(now_ns(), latest))
+                if self.ws is not None:
+                    await self.send_frame()
+                if now - self.last_save > SAVE_EVERY_SECONDS:
+                    self.save()
+                continue
             if not s.clock.playing or self.ws is None:
                 continue
             s.advance(s.sim_ns + s.clock.market_ns(dt))
+            if s.finished and s.refresh():  # new data arrived: play on
+                s.clock.playing = True
             await self.send_frame()
             if s.finished:
                 s.clock.playing = False
-                await self.send({"type": "status", "status": s.status(), "message": "End of the tick data."})
+                await self.send({"type": "status", "status": s.status(),
+                                 "message": "End of the data. Newer hours appear here as the update fetches them."})
                 self.save()
             elif now - self.last_save > SAVE_EVERY_SECONDS:
                 self.save()
@@ -225,7 +362,10 @@ def _restore(sid: str) -> Live | None:
     row = hub.journal.get_session(sid)
     if row is None or row["status"] != "active":
         return None
-    session = ReplaySession.from_state(hub.source, hub.bars, row["state"], sid)
+    feed = hub.feed(row.get("feed") or REPLAY_FEED)
+    is_live = row.get("mode") == "live"
+    session = ReplaySession.from_state(feed.source, feed.bars, row["state"], sid,
+                                       live=is_live, now=now_ns() if is_live else None)
     meta = {k: v for k, v in row.items() if k != "state"}
     live = Live(session, meta)
     hub.live[sid] = live
@@ -242,7 +382,9 @@ async def _attach(live: Live, ws: WebSocket) -> None:
         except Exception:
             pass
     live.ws = ws
-    live.session.clock.playing = False
+    if not live.session.live:
+        live.session.clock.playing = False
+        live.session.refresh()
     live.start_clock()
     await live.send({"type": "session", "session": _session_info(live)})
     await live.send_history()
@@ -255,6 +397,9 @@ def _session_info(live: Live) -> dict:
         "name": m.get("name", ""),
         "start_ms": m["start_ns"] // 1_000_000,
         "hide_dates": bool(m.get("hide_dates")),
+        "mode": m.get("mode") or "replay",
+        "feed": m.get("feed") or REPLAY_FEED,
+        "feed_label": hub.feeds().get(m.get("feed") or REPLAY_FEED, Feed("", m.get("feed") or "", None, None, False)).label,
         "timeframes": [{"key": k, "label": v[1], "seconds": v[0]} for k, v in TIMEFRAMES.items()],
         "speeds": list(SPEEDS),
     }
@@ -335,8 +480,14 @@ async def _handle(ws: WebSocket, live: Live | None, msg: dict) -> Live | None:
         return found
 
     if kind == "new":
-        if msg.get("random") or not msg.get("start"):
-            start_ns = random_start_ns(hub.source.days())
+        mode = "live" if msg.get("mode") == "live" else "replay"
+        feed = hub.feed(msg.get("feed") or REPLAY_FEED)
+        if mode == "live" and not feed.live:
+            raise SessionError("Live sessions need a live feed: start the MT5 recorder in Data")
+        if mode == "live":
+            start_ns = max(now_ns(), feed.source.latest_ns() or 0)
+        elif msg.get("random") or not msg.get("start"):
+            start_ns = random_start_ns(feed.source.days())
         else:
             start_ns = _parse_time(msg["start"])
         tf = msg.get("timeframe") or config.DEFAULT_TIMEFRAME
@@ -349,9 +500,10 @@ async def _handle(ws: WebSocket, live: Live | None, msg: dict) -> Live | None:
         )
         sid = hub.journal.create_session(
             start_ns=start_ns, timeframe=tf, broker_state=broker.to_state(),
-            hide_dates=bool(msg.get("hide_dates")), name=str(msg.get("name") or "")[:120],
+            hide_dates=bool(msg.get("hide_dates")) and mode == "replay", name=str(msg.get("name") or "")[:120],
+            mode=mode, feed=feed.key,
         )
-        session = ReplaySession(hub.source, hub.bars, broker, start_ns, tf, sid)
+        session = ReplaySession(feed.source, feed.bars, broker, start_ns, tf, sid, live=mode == "live")
         row = hub.journal.get_session(sid)
         new_live = Live(session, {k: v for k, v in row.items() if k != "state"})
         hub.live[sid] = new_live
@@ -367,9 +519,13 @@ async def _handle(ws: WebSocket, live: Live | None, msg: dict) -> Live | None:
         raise SessionError("No session is open in this tab")
     s = live.session
 
+    if kind in ("play", "pause", "speed", "step", "jump") and s.live:
+        raise SessionError("A live session follows the market's own clock")
+
     if kind == "play":
+        s.refresh()
         if s.finished:
-            raise SessionError("The replay has reached the end of the tick data")
+            raise SessionError("The replay has reached the end of the data. Newer hours appear as the update fetches them.")
         s.clock.playing = True
         await live.send({"type": "status", "status": s.status()})
     elif kind == "pause":
