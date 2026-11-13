@@ -13,3 +13,10 @@ data/exports/
 .env
 .idea/
 .vscode/
+
+# Replay simulator: the cache is rebuilt from the tick file; the journal is
+# your trading history and stays on this machine.
+simulator/cache/
+simulator/journal.sqlite3
+simulator/journal.sqlite3-wal
+simulator/journal.sqlite3-shm

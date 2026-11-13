@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Replay Journal</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='3' y='4' width='3' height='8' fill='%233987e5'/%3E%3Crect x='10' y='2' width='3' height='9' fill='%23e66767'/%3E%3C/svg%3E">
+<script>
+  try { var th = localStorage.getItem("sim-theme"); if (th) document.documentElement.dataset.theme = th; } catch (e) {}
+</script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="jpage">
+  <div class="jhead">
+    <h1>Journal</h1>
+    <select id="sessionSel" title="Session"></select>
+    <button id="renameBtn" class="hidden">Rename</button>
+    <button id="resumeBtn" class="hidden">Resume replay</button>
+    <button id="deleteBtn" class="hidden">Delete session</button>
+    <span class="spacer" style="flex:1"></span>
+    <a href="/"><button type="button" class="primary">Replay</button></a>
+    <button id="themeBtn" class="ghost" title="Light / dark">◐</button>
+  </div>
+
+  <p class="muted tiny" id="sessionMeta"></p>
+  <div class="cards" id="cards"></div>
+
+  <div class="box">
+    <h2 id="curveTitle">Equity by trade</h2>
+    <div id="curve"></div>
+  </div>
+
+  <div class="grid2">
+    <div class="box"><h2>By trading session (entry time)</h2><div class="tablewrap" id="bySession"></div></div>
+    <div class="box"><h2>By weekday (entry)</h2><div class="tablewrap" id="byWeekday"></div></div>
+    <div class="box"><h2>By tag</h2><div class="tablewrap" id="byTag"></div></div>
+    <div class="box"><h2>By exit</h2><div class="tablewrap" id="byExit"></div></div>
+  </div>
+
+  <div class="box">
+    <h2>Trades <span class="faint tiny">· tags and notes save as you leave the field</span></h2>
+    <div class="tablewrap" id="trades"></div>
+  </div>
+
+  <div class="box hidden" id="notesBox">
+    <h2>Session notes</h2>
+    <div id="notes"></div>
+  </div>
+</div>
+<div class="toasts" id="toasts"></div>
+<script src="/static/journal.js"></script>
+</body>
+</html>

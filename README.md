@@ -138,6 +138,19 @@ Django's admin — the generic table editor behind a username and password — i
 off by default for the same reason. Set `FXMACRO_ADMIN=1` if you ever want it,
 then create a login with `manage.py createsuperuser`.
 
+## Replay simulator
+
+A separate app on its own port: candle-by-candle EUR/USD tick replay with
+simulated orders, an automatic journal and drawing tools.
+
+```
+.\simulator.cmd
+```
+
+It always opens at <http://127.0.0.1:8001/>, while Django stays on 8000;
+launching it again opens the running one. Details, fill rules and what was
+measured are in [`simulator/README.md`](simulator/README.md).
+
 ## Screens
 
 | Screen | What it is for |

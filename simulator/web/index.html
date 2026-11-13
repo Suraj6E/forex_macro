@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FX Replay</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='3' y='4' width='3' height='8' fill='%233987e5'/%3E%3Crect x='10' y='2' width='3' height='9' fill='%23e66767'/%3E%3C/svg%3E">
+<script>
+  try { var th = localStorage.getItem("sim-theme"); if (th) document.documentElement.dataset.theme = th; } catch (e) {}
+</script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">FX Replay<small id="symbolLabel">EUR/USD</small></div>
+    <div class="sep"></div>
+
+    <div class="group tf" id="tfGroup" role="group" aria-label="Timeframe"></div>
+    <div class="sep"></div>
+
+    <div class="group replay-only">
+      <button id="stepTick" title="Next tick (Shift + Right)">+1 tick</button>
+      <button id="stepCandle" title="Next candle (Right)">+1 candle</button>
+      <button id="playBtn" class="primary" title="Play / pause (Space)">Play</button>
+      <select id="speedSel" title="Market seconds per real second"></select>
+    </div>
+    <div class="clock replay-only" id="clock" title="Simulation time, UTC">--</div>
+    <div class="group replay-only">
+      <input type="datetime-local" id="jumpInput" step="60" title="Jump to (UTC)">
+      <button id="jumpBtn">Jump</button>
+    </div>
+
+    <div class="group review-only">
+      <span class="muted" id="reviewTitle">Review</span>
+      <button id="replayFromEntry" class="primary">Replay from this entry</button>
+    </div>
+
+    <div class="spacer"></div>
+    <div class="group">
+      <button id="sessionBtn" class="replay-only" title="New or resume a session">Sessions</button>
+      <a href="/journal"><button type="button">Journal</button></a>
+      <button id="themeBtn" class="ghost" title="Light / dark">◐</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <nav class="tools replay-only" aria-label="Drawing tools">
+      <button data-tool="" class="on" title="Cursor (Esc)"><svg viewBox="0 0 24 24"><path d="M5 3l6 16 2-7 7-2z"/></svg></button>
+      <button data-tool="hline" title="Horizontal line"><svg viewBox="0 0 24 24"><path d="M3 12h18"/></svg></button>
+      <button data-tool="trend" title="Trend line"><svg viewBox="0 0 24 24"><path d="M4 19L20 5"/><circle cx="4" cy="19" r="1.6"/><circle cx="20" cy="5" r="1.6"/></svg></button>
+      <button data-tool="rect" title="Rectangle"><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12"/></svg></button>
+      <button data-tool="position" title="Position box: click entry, then stop"><svg viewBox="0 0 24 24"><path d="M4 12h16M4 5h16v14H4z"/></svg></button>
+      <button id="delDrawing" title="Delete selected drawing (Delete)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13"/></svg></button>
+    </nav>
+
+    <div class="chartwrap">
+      <div id="chart"></div>
+      <div class="chart-overlay"><span class="sym">EUR/USD</span> · <span id="tfLabel">15M</span> · Bid · <span id="ohlc"></span></div>
+      <div class="drawbar hidden" id="drawbar">
+        <button id="drawToOrder" class="primary hidden">Send as order</button>
+        <button id="drawDelete">Delete</button>
+      </div>
+    </div>
+
+    <aside class="side">
+      <section class="panel ticket replay-only">
+        <h3>Order <span class="faint" id="orderHint"></span></h3>
+        <div class="sides">
+          <button class="sell" id="sideSell"><b>SELL</b><span id="bidPx">-</span></button>
+          <button class="buy on" id="sideBuy"><b>BUY</b><span id="askPx">-</span></button>
+        </div>
+        <div class="spreadline">spread <span id="spreadPx" class="mono">-</span> pips</div>
+        <div class="seg" id="typeSeg">
+          <button data-type="market" class="on">Market</button>
+          <button data-type="limit">Limit</button>
+          <button data-type="stop">Stop</button>
+        </div>
+        <div class="seg" id="sizeSeg">
+          <button data-size="lots" class="on">Lots</button>
+          <button data-size="risk">Risk %</button>
+        </div>
+        <div class="fields">
+          <label for="sizeIn" id="sizeLabel">Lots</label><input id="sizeIn" type="number" step="0.01" min="0.01" value="0.10">
+          <label for="priceIn">Price</label><input id="priceIn" type="number" step="0.00001" placeholder="at market" disabled>
+          <label for="slIn">Stop loss</label><input id="slIn" type="number" step="0.00001" placeholder="optional">
+          <label for="tpIn">Take profit</label><input id="tpIn" type="number" step="0.00001" placeholder="optional">
+        </div>
+        <button class="place buy" id="placeBtn">Buy 0.10 at market</button>
+        <p class="hint" id="ticketHint">Fills on the next tick, never the one on screen.</p>
+      </section>
+
+      <section class="panel replay-only">
+        <h3>Account</h3>
+        <dl class="kv" id="account"></dl>
+      </section>
+
+      <section class="panel replay-only">
+        <h3>Positions <span class="faint" id="posCount"></span></h3>
+        <div class="list" id="positions"><div class="empty">No open positions.</div></div>
+      </section>
+
+      <section class="panel replay-only">
+        <h3>Pending orders <span class="faint" id="ordCount"></span></h3>
+        <div class="list" id="pending"><div class="empty">No pending orders.</div></div>
+      </section>
+
+      <section class="panel hidden replay-only" id="lastTradePanel">
+        <h3>Last closed trade</h3>
+        <div id="lastTrade"></div>
+        <div class="tag-chips" id="tagChips"></div>
+        <input id="tagsIn" placeholder="tags, comma separated" style="width:100%">
+        <textarea id="noteIn" placeholder="What did you see? Was it the plan?" style="margin-top:6px"></textarea>
+        <button id="saveNote" style="margin-top:6px">Save to journal</button>
+      </section>
+
+      <section class="panel replay-only">
+        <h3>Session</h3>
+        <div class="tiny muted" id="sessionInfo"></div>
+        <textarea id="sessionNote" placeholder="Session note, stamped with the replay time" style="margin-top:6px"></textarea>
+        <div style="display:flex; gap:6px; margin-top:6px">
+          <button id="addNote">Add note</button>
+          <span class="spacer"></span>
+          <button id="endSession" title="Close everything at the last price and end">End session</button>
+        </div>
+      </section>
+
+      <section class="panel review-only">
+        <h3>Trade</h3>
+        <dl class="kv" id="reviewTrade"></dl>
+        <p class="tiny muted" id="reviewNote" style="margin-top:10px"></p>
+      </section>
+    </aside>
+  </div>
+</div>
+
+<dialog id="sessionDlg">
+  <form method="dialog" class="dlg" id="sessionForm">
+    <h2>Replay session</h2>
+    <p class="lead">Pick a start, and the market plays forward from there. Nothing after the clock is ever sent to this page.</p>
+    <div id="dataNotice"></div>
+    <div id="resumeBox" class="hidden">
+      <label>Resume</label>
+      <div class="resume-list" id="resumeList"></div>
+    </div>
+    <div class="form">
+      <label class="full">Start (UTC)
+        <input type="datetime-local" id="newStart" step="60">
+      </label>
+      <label class="check full"><input type="checkbox" id="newRandom"> Random weekday, 06:00 UTC (helps against remembering the day)</label>
+      <label class="check full"><input type="checkbox" id="newHide"> Hide dates on the chart and clock</label>
+      <label>Balance (USD)<input type="number" id="newBalance" value="10000" min="100" step="100"></label>
+      <label>Leverage<input type="number" id="newLeverage" value="30" min="1" step="1"></label>
+      <label>Commission (USD per lot, round turn)<input type="number" id="newCommission" value="0" min="0" step="0.5"></label>
+      <label>Slippage (pips, market and stop fills)<input type="number" id="newSlippage" value="0" min="0" step="0.1"></label>
+      <label>Timeframe<select id="newTf"></select></label>
+      <label>Name (optional)<input id="newName" maxlength="120" placeholder="e.g. London breakouts"></label>
+    </div>
+    <div class="actions">
+      <button value="cancel" id="sessionCancel" formnovalidate>Cancel</button>
+      <button class="primary" id="sessionStart" value="start">Start replay</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<script src="/static/chart.js"></script>
+<script src="/static/drawings.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

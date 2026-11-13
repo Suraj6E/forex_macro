@@ -1,0 +1,6 @@
+# Replay simulator only, on top of the project's requirements.txt (numpy,
+# pyarrow). Kept apart so the research dependencies stay unchanged.
+#   .\.venv\Scripts\python.exe -m pip install -r simulator\requirements.txt
+fastapi==0.162.5
+uvicorn==0.54.0
+websockets==17.4
