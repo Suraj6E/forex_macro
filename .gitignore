@@ -14,9 +14,9 @@ data/exports/
 .idea/
 .vscode/
 
-# Replay simulator: the cache is rebuilt from the tick file; the journal is
-# your trading history and stays on this machine.
-simulator/cache/
+# Replay simulator: market data (imported, downloaded and recorded ticks) and
+# the journal are large or personal, and stay on this machine.
+simulator/store/
 simulator/journal.sqlite3
 simulator/journal.sqlite3-wal
 simulator/journal.sqlite3-shm

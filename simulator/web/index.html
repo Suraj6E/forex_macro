@@ -19,14 +19,14 @@
     <div class="group tf" id="tfGroup" role="group" aria-label="Timeframe"></div>
     <div class="sep"></div>
 
-    <div class="group replay-only">
+    <div class="group replay-only live-hide">
       <button id="stepTick" title="Next tick (Shift + Right)">+1 tick</button>
       <button id="stepCandle" title="Next candle (Right)">+1 candle</button>
       <button id="playBtn" class="primary" title="Play / pause (Space)">Play</button>
       <select id="speedSel" title="Market seconds per real second"></select>
     </div>
     <div class="clock replay-only" id="clock" title="Simulation time, UTC">--</div>
-    <div class="group replay-only">
+    <div class="group replay-only live-hide">
       <input type="datetime-local" id="jumpInput" step="60" title="Jump to (UTC)">
       <button id="jumpBtn">Jump</button>
     </div>
@@ -38,6 +38,9 @@
 
     <div class="spacer"></div>
     <div class="group">
+      <button id="dataBtn" class="replay-only datachip" title="Market data: history updates and live recording">
+        <span class="dot" id="liveDot" aria-hidden="true"></span><span id="dataChip">Data</span>
+      </button>
       <button id="sessionBtn" class="replay-only" title="New or resume a session">Sessions</button>
       <a href="/journal"><button type="button">Journal</button></a>
       <button id="themeBtn" class="ghost" title="Light / dark">◐</button>
@@ -144,11 +147,17 @@
       <div class="resume-list" id="resumeList"></div>
     </div>
     <div class="form">
-      <label class="full">Start (UTC)
+      <div class="seg full" id="modeSeg" role="group" aria-label="Mode">
+        <button type="button" data-mode="replay" class="on">Replay history</button>
+        <button type="button" data-mode="live">Live market</button>
+      </div>
+      <label class="full">Data<select id="newFeed"></select></label>
+      <div class="full live-only-field tiny muted" id="liveNote"></div>
+      <label class="full replay-field">Start (UTC)
         <input type="datetime-local" id="newStart" step="60">
       </label>
-      <label class="check full"><input type="checkbox" id="newRandom"> Random weekday, 06:00 UTC (helps against remembering the day)</label>
-      <label class="check full"><input type="checkbox" id="newHide"> Hide dates on the chart and clock</label>
+      <label class="check full replay-field"><input type="checkbox" id="newRandom"> Random weekday, 06:00 UTC (helps against remembering the day)</label>
+      <label class="check full replay-field"><input type="checkbox" id="newHide"> Hide dates on the chart and clock</label>
       <label>Balance (USD)<input type="number" id="newBalance" value="10000" min="100" step="100"></label>
       <label>Leverage<input type="number" id="newLeverage" value="30" min="1" step="1"></label>
       <label>Commission (USD per lot, round turn)<input type="number" id="newCommission" value="0" min="0" step="0.5"></label>
@@ -157,10 +166,44 @@
       <label>Name (optional)<input id="newName" maxlength="120" placeholder="e.g. London breakouts"></label>
     </div>
     <div class="actions">
+      <button type="button" id="sessionData" class="ghost" style="margin-right:auto">Market data…</button>
       <button value="cancel" id="sessionCancel" formnovalidate>Cancel</button>
       <button class="primary" id="sessionStart" value="start">Start replay</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="dataDlg">
+  <div class="dlg">
+    <h2>Market data</h2>
+    <p class="lead">Everything here runs on its own; this is where you watch it and choose the live source.</p>
+
+    <section class="dsec">
+      <h3>Replay history <span class="faint">Dukascopy · EUR/USD ticks, Bid and Ask</span></h3>
+      <dl class="kv" id="histInfo"></dl>
+      <div class="progress" aria-hidden="true"><div id="jobBar"></div></div>
+      <p class="tiny" id="jobMsg"></p>
+      <div class="row">
+        <button type="button" id="updateNow">Update now</button>
+        <button type="button" id="stopJob" class="hidden">Stop</button>
+        <span class="tiny muted">New hours are fetched every time the simulator starts, and the gaps in the 2023–24 file are filled. Stopping is safe: it resumes next time.</span>
+      </div>
+    </section>
+
+    <section class="dsec">
+      <h3>Live market <span class="faint">MetaTrader 5</span></h3>
+      <p class="tiny muted">The recorder reads prices from a terminal you have open and saves every tick. It never opens a terminal and never trades: opening one can switch on an Expert Advisor, so you open it yourself. A demo account is the safe choice.</p>
+      <div class="termlist" id="termList"><div class="empty">Looking for MT5 terminals…</div></div>
+      <div class="row">
+        <button type="button" class="primary" id="recStart">Record from this terminal</button>
+        <button type="button" id="recStop" class="hidden">Stop recording</button>
+      </div>
+      <div id="recStatus" class="recstatus"></div>
+      <div id="feedList"></div>
+    </section>
+
+    <div class="actions"><button type="button" id="dataClose">Close</button></div>
+  </div>
 </dialog>
 
 <div class="toasts" id="toasts"></div>

@@ -211,6 +211,45 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .notice.err { background: var(--err-bg); }
 .notice code { font-family: var(--mono); }
 
+/* ---------- data panel ---------- */
+
+.datachip { display: inline-flex; align-items: center; gap: 7px; max-width: 360px; }
+.datachip span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+.dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+.dot.wait { background: var(--warn); }
+.dot.err { background: var(--err); }
+#dataDlg { width: min(720px, calc(100vw - 32px)); }
+.dsec { border-top: 1px solid var(--border); padding: 14px 0 6px; }
+.dsec h3 { margin: 0 0 8px; font-size: 13px; }
+.dsec h3 .faint { font-weight: 400; margin-left: 6px; }
+.dsec .kv { grid-template-columns: auto 1fr; max-width: 460px; margin-bottom: 10px; }
+.dsec .kv dd { text-align: left; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+.progress { height: 6px; background: var(--surface-3); border-radius: 999px; overflow: hidden; margin: 6px 0; }
+.progress > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+.termlist { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.term {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; cursor: pointer;
+  background: var(--surface-2);
+}
+.term:has(input:checked) { border-color: var(--accent); }
+.term .tname { font-weight: 600; }
+.term .tmeta { grid-column: 2 / -1; color: var(--muted); font-size: 11px; }
+.badge {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border-2); color: var(--muted);
+  white-space: nowrap;
+}
+.badge.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
+.badge.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+.recstatus { font-size: 12px; margin: 6px 0; }
+.recstatus .kv { max-width: 520px; }
+body.live-session .live-hide { display: none !important; }
+.clock .livetag { color: var(--ok); font-weight: 700; margin-right: 6px; }
+.form .seg { margin-bottom: 0; }
+.form .live-only-field:empty { display: none; }
+
 /* ---------- review mode ---------- */
 body.review .replay-only { display: none !important; }
 body.review .main { grid-template-columns: 1fr 320px; }

@@ -59,6 +59,71 @@ def same_path(a: str, b: str) -> bool:
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
+def _read_text(path: Path) -> str:
+    raw = path.read_bytes()
+    for enc in ("utf-16", "utf-8"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1")
+
+
+def _last_server(data_dir: Path) -> str | None:
+    """The trade server a terminal last logged in to, from its common.ini."""
+    ini = data_dir / "config" / "common.ini"
+    if not ini.exists():
+        return None
+    for line in _read_text(ini).splitlines():
+        if line.strip().lower().startswith("server="):
+            return line.split("=", 1)[1].strip() or None
+    return None
+
+
+def installed_terminals() -> list[dict]:
+    """MT5 terminals on this machine: installed ones and any running ones.
+
+    Each comes with the server it last logged in to (from its own config,
+    never from the account itself), whether it is running, and whether that
+    server looks like a demo server, which is the safe choice for recording.
+    """
+    paths: dict[str, Path] = {}
+    roots = [os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")]
+    for root in roots:
+        if root and Path(root).exists():
+            for exe in Path(root).glob(f"*/{TERMINAL_EXE}"):
+                paths[os.path.normcase(str(exe))] = exe
+    running = running_terminals()
+    for p in running:
+        paths.setdefault(os.path.normcase(p), Path(p))
+
+    data_dirs: dict[str, Path] = {}
+    appdata = os.environ.get("APPDATA")
+    if appdata and (Path(appdata) / "MetaQuotes" / "Terminal").exists():
+        for d in (Path(appdata) / "MetaQuotes" / "Terminal").iterdir():
+            origin = d / "origin.txt"
+            if origin.exists():
+                try:
+                    data_dirs[os.path.normcase(_read_text(origin).strip().lstrip("\ufeff"))] = d
+                except OSError:
+                    pass
+
+    out = []
+    for key, exe in sorted(paths.items()):
+        install = os.path.normcase(str(exe.parent))
+        data_dir = data_dirs.get(install, exe.parent)  # portable terminals keep data beside the exe
+        server = _last_server(data_dir)
+        out.append({
+            "path": str(exe),
+            "name": exe.parent.name,
+            "server": server,
+            "running": any(same_path(str(exe), r) for r in running),
+            "demo": bool(server and "demo" in server.lower()),
+        })
+    out.sort(key=lambda t: (not t["running"], not t["demo"], t["name"].lower()))
+    return out
+
+
 class FileLock:
     """An OS-level lock on a file, released when the process dies."""
 

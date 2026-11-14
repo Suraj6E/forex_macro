@@ -113,9 +113,12 @@
 
   function onMessage(m) {
     switch (m.type) {
-      case "fatal":
+      case "preparing":
+        // The server is still building the market data (first start), or
+        // cannot. Show its progress and reconnect once it is ready.
         S.reconnect = false;
-        openSessionDialog({ problem: m.message });
+        openSessionDialog({ preparing: true });
+        waitUntilReady();
         break;
       case "no_session":
         localStorage.removeItem(LS_SESSION);
@@ -128,10 +131,11 @@
         localStorage.setItem(LS_SESSION, m.session.id);
         if (new URLSearchParams(location.search).get("session")) history.replaceState(null, "", "/");
         C.setHideDates(m.session.hide_dates);
+        document.body.classList.toggle("live-session", m.session.mode === "live");
         buildTimeframes(m.session.timeframes, function (tf) { send({ type: "timeframe", timeframe: tf }); });
         buildSpeeds(m.session.speeds);
-        $("sessionInfo").textContent = (m.session.name ? m.session.name + " · " : "") + "started " +
-          fmtTime(m.session.start_ms) + " · id " + m.session.id;
+        $("sessionInfo").textContent = (m.session.mode === "live" ? "Live · " : "Replay · ") + m.session.feed_label + " · " +
+          (m.session.name ? m.session.name + " · " : "") + "started " + fmtTime(m.session.start_ms) + " · id " + m.session.id;
         if ($("sessionDlg").open) $("sessionDlg").close();
         loadTrades();
         break;
@@ -198,7 +202,8 @@
 
   function onStatus(st) {
     S.status = st;
-    $("clock").textContent = fmtClock(st.sim_ms) + (st.finished ? "  (end of data)" : "");
+    if (st.live) $("clock").innerHTML = "<span class='livetag'>LIVE</span>" + esc(fmtClock(st.sim_ms));
+    else $("clock").textContent = fmtClock(st.sim_ms) + (st.finished ? "  (end of data)" : "");
     $("clock").classList.toggle("playing", st.playing);
     $("playBtn").textContent = st.playing ? "Pause" : "Play";
     $("playBtn").disabled = st.finished;
@@ -423,7 +428,8 @@
 
   document.addEventListener("keydown", function (e) {
     var tag = (e.target && e.target.tagName) || "";
-    if (S.review || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || $("sessionDlg").open) return;
+    if (S.review || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || $("sessionDlg").open || $("dataDlg").open) return;
+    if (document.body.classList.contains("live-session")) return; // the market has its own clock
     if (e.code === "Space") { e.preventDefault(); $("playBtn").click(); }
     else if (e.key === "ArrowRight" && e.shiftKey) { e.preventDefault(); send({ type: "step", kind: "tick" }); }
     else if (e.key === "ArrowRight") { e.preventDefault(); send({ type: "step", kind: "candle" }); }
@@ -536,42 +542,88 @@
 
   // ---------------------------------------------------------------- session dialog
 
+  var DLG = { mode: "replay", meta: null };
+
   function openSessionDialog(opts) {
     opts = opts || {};
     var dlg = $("sessionDlg");
     $("dataNotice").innerHTML = "";
-    $("sessionStart").disabled = false;
-    if (opts.problem) {
-      $("dataNotice").innerHTML = "<div class='notice err'>" + esc(opts.problem).replace(/`([^`]+)`/g, "<code>$1</code>") + "</div>";
-      $("sessionStart").disabled = true;
-    }
+    $("sessionStart").disabled = !!opts.preparing;
+    if (opts.preparing) $("dataNotice").innerHTML = "<div class='notice' id='prepNotice'>Preparing the market data…</div>";
     var metaP = opts.meta ? Promise.resolve(opts.meta) : fetch("/api/meta").then(function (r) { return r.json(); });
     metaP.then(function (meta) {
       if (!meta.ready) return;
+      DLG.meta = meta;
       $("newTf").innerHTML = meta.timeframes.map(function (t) { return "<option value='" + t.key + "'>" + t.label + "</option>"; }).join("");
       $("newTf").value = meta.defaults.timeframe;
-      $("newStart").min = meta.first_day + "T00:00";
-      $("newStart").max = meta.last_day + "T23:59";
       if (opts.start) $("newStart").value = opts.start;
-      else if (!$("newStart").value) {
-        var d = new Date(meta.first_day + "T07:00:00Z");
-        d.setUTCDate(d.getUTCDate() + 365);
-        $("newStart").value = d.toISOString().slice(0, 16);
-      }
-      $("dataNotice").innerHTML += "<p class='tiny muted' style='margin:0 0 12px'>EUR/USD ticks " + meta.first_day + " to " + meta.last_day +
-        " (" + meta.trading_days + " trading days), Bid candles, UTC.</p>";
+      setMode(opts.mode || DLG.mode);
     });
     fetch("/api/sessions").then(function (r) { return r.json(); }).then(function (rows) {
       var active = rows.filter(function (r) { return r.status === "active" && (!S.session || r.id !== S.session.id || !S.attached); });
       $("resumeBox").classList.toggle("hidden", !active.length);
       $("resumeList").innerHTML = active.slice(0, 12).map(function (r) {
-        return "<button type='button' data-resume='" + r.id + "'><span>" + esc(r.name || "Session " + r.id) + " · at " +
-          esc(fmtTime(r.sim_ms)) + "</span><span class='mono " + cls(r.net_usd) + "'>" + r.trades + " trades · " + usd(r.net_usd) + "</span></button>";
+        return "<button type='button' data-resume='" + r.id + "'><span>" + (r.mode === "live" ? "<b>Live</b> · " : "") +
+          esc(r.name || "Session " + r.id) + " · at " + esc(fmtTime(r.sim_ms)) + "</span><span class='mono " + cls(r.net_usd) + "'>" +
+          r.trades + " trades · " + usd(r.net_usd) + "</span></button>";
       }).join("");
     });
     $("sessionCancel").classList.toggle("hidden", !S.attached);
     if (!dlg.open) dlg.showModal();
   }
+
+  function setMode(mode) {
+    DLG.mode = mode;
+    var meta = DLG.meta;
+    document.querySelectorAll("#modeSeg [data-mode]").forEach(function (b) { b.classList.toggle("on", b.dataset.mode === mode); });
+    document.querySelectorAll("#sessionForm .replay-field").forEach(function (el) { el.classList.toggle("hidden", mode === "live"); });
+    if (!meta) return;
+    var feeds = meta.feeds.filter(function (f) { return mode === "replay" || f.live; });
+    $("newFeed").innerHTML = feeds.map(function (f) {
+      var range = f.live && f.last_tick_ms ? "recorded " + f.first_day + " → now" : f.first_day + " → " + f.last_day;
+      return "<option value='" + f.key + "'>" + esc(f.label) + " (" + range + ", " + f.days + " days)</option>";
+    }).join("");
+    $("newFeed").closest("label").classList.toggle("hidden", !feeds.length);
+    $("liveNote").innerHTML = "";
+    $("sessionStart").disabled = false;
+    if (mode === "live") {
+      if (!feeds.length) {
+        $("liveNote").innerHTML = "No live data yet. Start the recorder in <a href='#' id='openDataFromDlg'>Market data</a>: " +
+          "open your MT5 terminal, pick it there, and come back.";
+        $("sessionStart").disabled = true;
+        $("openDataFromDlg").onclick = function (e) { e.preventDefault(); openDataDialog(); };
+      } else {
+        $("liveNote").textContent = "The clock is the real clock: candles form as ticks arrive, orders fill on the next live tick, " +
+          "and the chart's history is what the recorder has saved from this broker.";
+      }
+      $("sessionStart").textContent = "Start live session";
+    } else {
+      $("sessionStart").textContent = "Start replay";
+      updateStartRange();
+    }
+  }
+
+  function updateStartRange() {
+    var meta = DLG.meta;
+    var f = meta && meta.feeds.filter(function (x) { return x.key === $("newFeed").value; })[0];
+    if (!f) return;
+    $("newStart").min = f.first_day + "T00:00";
+    $("newStart").max = f.last_day + "T23:59";
+    var v = $("newStart").value;
+    if (!v || v < $("newStart").min || v > $("newStart").max) {
+      var d = new Date(f.first_day + "T07:00:00Z");
+      d.setUTCDate(d.getUTCDate() + Math.min(365, Math.max(0, f.days - 5)));
+      $("newStart").value = d.toISOString().slice(0, 16);
+    }
+    $("dataNotice").innerHTML = "<p class='tiny muted' style='margin:0 0 12px'>" + esc(f.label) + ": EUR/USD ticks " + f.first_day +
+      " to " + f.last_day + " (" + f.days + " trading days), Bid candles, UTC.</p>";
+  }
+
+  $("modeSeg").onclick = function (e) {
+    var b = e.target.closest("[data-mode]");
+    if (b) setMode(b.dataset.mode);
+  };
+  $("newFeed").onchange = function () { if (DLG.mode === "replay") updateStartRange(); };
 
   $("resumeList").onclick = function (e) {
     var b = e.target.closest("[data-resume]");
@@ -584,11 +636,14 @@
     var which = e.submitter ? e.submitter.value : "start";
     if (which !== "start") return;
     e.preventDefault();
+    var live = DLG.mode === "live";
     send({
       type: "new",
-      start: $("newRandom").checked ? null : $("newStart").value,
-      random: $("newRandom").checked,
-      hide_dates: $("newHide").checked,
+      mode: DLG.mode,
+      feed: $("newFeed").value || null,
+      start: live || $("newRandom").checked ? null : $("newStart").value,
+      random: !live && $("newRandom").checked,
+      hide_dates: !live && $("newHide").checked,
       balance: $("newBalance").value,
       leverage: $("newLeverage").value,
       commission: $("newCommission").value,
@@ -598,6 +653,163 @@
     });
   });
   $("newRandom").onchange = function () { $("newStart").disabled = this.checked; };
+
+  // ---------------------------------------------------------------- market data panel
+
+  function ago(ms) {
+    if (!ms) return "never";
+    var s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return s + " s ago";
+    if (s < 3600) return Math.round(s / 60) + " min ago";
+    if (s < 172800) return Math.round(s / 3600) + " h ago";
+    return Math.round(s / 86400) + " days ago";
+  }
+  function utc(ms) { return ms ? new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "-"; }
+
+  var REC_STATE = {
+    recording: ["on", "Recording"], backfilling: ["wait", "Filling the gap"], connecting: ["wait", "Attaching"],
+    waiting: ["wait", "Waiting"], error: ["err", "Problem"], stopped: ["", "Off"]
+  };
+
+  function renderChip(d) {
+    var job = d.job || {};
+    var text;
+    if (!d.ready && job.kind === "prepare" && job.running) text = "Preparing data " + pct(job) + "%";
+    else if (!d.ready && d.problem) text = "Data missing";
+    else if (job.kind === "update" && job.running) text = "Updating " + (job.day || "") + " · " + pct(job) + "%";
+    else text = d.history && d.history.last_tick_ms ? "Data to " + utc(d.history.last_tick_ms).slice(0, 16) : "Data";
+    var rec = d.live && d.live.recorder;
+    var st = rec ? (REC_STATE[rec.state] || ["", rec.state]) : ["", "Off"];
+    $("liveDot").className = "dot " + st[0];
+    $("dataChip").textContent = text + " · Live: " + st[1];
+  }
+
+  function pct(job) { return job.total ? Math.floor(100 * job.done / job.total) : 0; }
+
+  function pollData() {
+    var open = $("dataDlg").open;
+    fetch("/api/data" + (open ? "?terminals=1" : "")).then(function (r) { return r.json(); }).then(function (d) {
+      renderChip(d);
+      if (open) renderDataDialog(d);
+      var prep = $("prepNotice");
+      if (prep) {
+        var job = d.job || {};
+        prep.innerHTML = d.problem ? esc(d.problem) :
+          esc(job.message || "Preparing the market data") + (job.total ? " · " + pct(job) + "%" : "") +
+          "<br><span class='tiny muted'>First start only: the 2023–24 file is imported and candles are built. About a minute.</span>";
+        prep.classList.toggle("err", !!d.problem);
+      }
+    }).catch(function () { /* server restarting */ });
+  }
+
+  function waitUntilReady() {
+    var timer = setInterval(function () {
+      fetch("/api/data").then(function (r) { return r.json(); }).then(function (d) {
+        if (d.ready) {
+          clearInterval(timer);
+          S.reconnect = true;
+          if ($("sessionDlg").open) $("sessionDlg").close();
+          connect();
+        }
+      }).catch(function () {});
+    }, 1000);
+  }
+
+  var selectedTerminal = null;
+
+  function renderDataDialog(d) {
+    var h = d.history || {};
+    var job = d.job || {};
+    $("histInfo").innerHTML = h.first_day ? [
+      ["Range", h.first_day + " → " + utc(h.last_tick_ms)],
+      ["Trading days", h.trading_days + " (" + h.downloaded_days + " fetched from Dukascopy)"],
+      ["Updates", d.auto_update ? "automatic at every start" : "off (SIM_AUTO_UPDATE=0)"]
+    ].map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") :
+      "<dt>Status</dt><dd>" + esc(d.problem || "Preparing…") + "</dd>";
+    var running = !!job.running;
+    $("jobBar").style.width = (running ? pct(job) : (job.kind ? 100 : 0)) + "%";
+    $("jobMsg").textContent = job.kind ? (job.message || "") + (running && job.total ? " · " + job.done + "/" + job.total + " days" : "") +
+      (!running && job.finished_ms ? " · " + ago(job.finished_ms) : "") : "";
+    $("jobMsg").classList.toggle("down", !!job.error);
+    $("updateNow").disabled = running || !d.ready;
+    $("stopJob").classList.toggle("hidden", !(running && job.kind === "update"));
+
+    var live = d.live || {};
+    var terms = live.terminals || [];
+    var rec = live.recorder;
+    var current = rec ? rec.terminal : (live.settings || {}).terminal;
+    if (selectedTerminal === null) selectedTerminal = current || (terms[0] && terms[0].path) || null;
+    $("termList").innerHTML = terms.length ? terms.map(function (t) {
+      var badges = (t.running ? "<span class='badge ok'>open</span> " : "<span class='badge'>closed</span> ") +
+        (t.demo ? "<span class='badge ok'>demo</span>" : (t.server ? "<span class='badge warn'>not demo</span>" : ""));
+      return "<label class='term'><input type='radio' name='term' value='" + esc(t.path) + "'" + (t.path === selectedTerminal ? " checked" : "") + ">" +
+        "<span class='tname'>" + esc(t.name) + "</span><span>" + badges + "</span>" +
+        "<span class='tmeta'>Last server: " + esc(t.server || "unknown") + " · " + esc(t.path) + "</span></label>";
+    }).join("") : "<div class='empty'>No MT5 terminal found on this computer.</div>";
+
+    $("recStart").classList.toggle("hidden", !!rec);
+    $("recStop").classList.toggle("hidden", !rec);
+    $("recStart").disabled = !selectedTerminal;
+    if (rec) {
+      var st = REC_STATE[rec.state] || ["", rec.state];
+      var rows = [
+        ["State", "<span class='dot " + st[0] + "' style='display:inline-block;margin-right:6px'></span>" + esc(st[1]) + " · " + esc(rec.message || "")],
+        ["Terminal", esc(rec.terminal || "")]
+      ];
+      if (rec.server) rows.push(["Server", esc(rec.server) + " (" + esc(rec.account_type || "?") + ") · " + esc(rec.broker_symbol || "")]);
+      if (rec.offset_hours !== null && rec.offset_hours !== undefined) rows.push(["Server clock", "UTC" + (rec.offset_hours >= 0 ? "+" : "") + rec.offset_hours + " h, converted to UTC"]);
+      if (rec.last_tick_ms) rows.push(["Last tick", utc(rec.last_tick_ms) + " · " + ago(rec.last_tick_ms)]);
+      if (rec.ticks_today !== undefined) rows.push(["Ticks today", String(rec.ticks_today)]);
+      $("recStatus").innerHTML = "<dl class='kv'>" + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") + "</dl>";
+      if (rec.account_type === "real") $("recStatus").innerHTML += "<p class='warnline'>This is a real-money account. Recording only reads prices, but a demo account is the safer source.</p>";
+    } else {
+      $("recStatus").innerHTML = "<p class='tiny muted'>Not recording.</p>";
+    }
+    var feeds = live.feeds || [];
+    $("feedList").innerHTML = feeds.length ? "<p class='tiny muted'>Saved live data: " + feeds.map(function (f) {
+      return esc(f.label) + ", " + f.days + " days from " + f.first_day + (f.last_tick_ms ? ", last tick " + ago(f.last_tick_ms) : "");
+    }).join("; ") + ". Start a <b>Live market</b> session from Sessions, or replay it like history.</p>" : "";
+  }
+
+  function openDataDialog() {
+    selectedTerminal = null;
+    if (!$("dataDlg").open) $("dataDlg").showModal();
+    pollData();
+  }
+
+  $("termList").addEventListener("change", function (e) {
+    if (e.target.name === "term") { selectedTerminal = e.target.value; $("recStart").disabled = false; }
+  });
+  $("dataBtn").onclick = openDataDialog;
+  $("sessionData").onclick = openDataDialog;
+  // Closing the panel refreshes the session form, so a feed the recorder
+  // just started appears in Live mode without reopening anything.
+  $("dataDlg").addEventListener("close", function () {
+    if ($("sessionDlg").open && DLG.meta) {
+      fetch("/api/meta").then(function (r) { return r.json(); }).then(function (meta) {
+        if (meta.ready) { DLG.meta = meta; setMode(DLG.mode); }
+      });
+    }
+  });
+  $("dataClose").onclick = function () { $("dataDlg").close(); };
+  $("updateNow").onclick = function () {
+    fetch("/api/data/update", { method: "POST" }).then(function (r) { return r.json(); }).then(function (r) {
+      if (!r.started) toast("An update is already running.");
+      pollData();
+    });
+  };
+  $("stopJob").onclick = function () { fetch("/api/data/stop", { method: "POST" }).then(pollData); };
+  $("recStart").onclick = function () {
+    if (!selectedTerminal) return;
+    var t = selectedTerminal;
+    fetch("/api/live/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ terminal: t }) })
+      .then(function (r) { if (!r.ok) return r.json().then(function (j) { throw new Error(j.detail || r.statusText); }); })
+      .then(function () { toast("Recorder on. It starts recording as soon as that terminal is open."); pollData(); })
+      .catch(function (e) { toast(String(e.message || e), "err"); });
+  };
+  $("recStop").onclick = function () { fetch("/api/live/stop", { method: "POST" }).then(function () { pollData(); }); };
+
+  setInterval(function () { if (!S.review) pollData(); }, 2000);
 
   // ---------------------------------------------------------------- theme
 

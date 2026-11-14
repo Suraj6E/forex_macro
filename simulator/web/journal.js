@@ -36,7 +36,7 @@
     return json("/api/sessions").then(function (rows) {
       sessions = rows;
       var opts = ["<option value='all'>All sessions (" + rows.length + ")</option>"].concat(rows.map(function (s) {
-        return "<option value='" + s.id + "'>" + esc(s.name || "Session " + s.id) + " · " + when(s.start_ms) + " · " +
+        return "<option value='" + s.id + "'>" + (s.mode === "live" ? "Live · " : "") + esc(s.name || "Session " + s.id) + " · " + when(s.start_ms) + " · " +
           s.trades + " trades" + (s.status === "ended" ? " · ended" : "") + "</option>";
       }));
       $("sessionSel").innerHTML = opts.join("");

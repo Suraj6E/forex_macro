@@ -23,8 +23,10 @@ import json
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pyarrow.parquet as pq
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
@@ -34,7 +36,7 @@ from pydantic import BaseModel
 from simulator import config
 from simulator.data import dukascopy
 from simulator.data.bars import TIMEFRAMES, BarStore, tf_seconds
-from simulator.data.ticks import NS_PER_SECOND, ParquetTickSource, now_ns
+from simulator.data.ticks import NS_PER_SECOND, FeedStore, ParquetTickSource, import_layer0, now_ns
 from simulator.engine.broker import UNSET, Broker, OrderError
 from simulator.engine.clock import FRAME_SECONDS, SPEEDS
 from simulator.engine.session import ReplaySession, SessionError, random_start_ns
@@ -42,11 +44,13 @@ from simulator.journal import stats
 from simulator.journal.store import Journal
 from simulator.live import mt5rec
 from simulator.live.feed import FeedBars, LiveFeedSource
-from simulator.live.winproc import running_terminals, same_path
+from simulator.live.winproc import installed_terminals
 
 SAVE_EVERY_SECONDS = 5.0
 MAX_SNAPSHOT_BYTES = 6_000_000
 REPLAY_FEED = "dukascopy"
+#: Days fetched between candle rebuilds during a long catch-up.
+UPDATE_CHUNK_DAYS = 20
 
 
 class Feed:
@@ -55,7 +59,15 @@ class Feed:
 
 
 class Hub:
-    """Market data, the background updater and recorder, and live sessions."""
+    """Market data, the background jobs that keep it current, the recorder,
+    and the sessions in memory.
+
+    Nothing here needs a command. On start the server prepares the replay
+    data if it is missing (imports the Layer 0 file, builds candles), then
+    fetches new Dukascopy hours in the background, rebuilding candles after
+    every chunk so new days become playable as they arrive. The recorder
+    starts again if it was on last time. The page shows all of it.
+    """
 
     def __init__(self) -> None:
         self.journal = Journal()
@@ -64,67 +76,139 @@ class Hub:
         self.problem: str | None = None
         self.live: dict[str, Live] = {}
         self._mt5_feeds: dict[str, Feed] = {}
-        self.update_state: dict = {"running": False}
-        self._update_thread: threading.Thread | None = None
-        self._update_stop = threading.Event()
+        self.job: dict = {"kind": None, "running": False}
+        self._job_thread: threading.Thread | None = None
+        self._job_stop = threading.Event()
         self.recorder: mt5rec.MT5Recorder | None = None
 
     # -- the replay feed -------------------------------------------------------
 
-    def load(self) -> None:
+    def load(self) -> bool:
         source = ParquetTickSource()
         if not source.ready or not BarStore.exists(config.DUKA_DIR / "bars", config.KEEP_FLAGS):
-            self.problem = (
-                "The market data is not built yet. Stop the server and start it with "
-                "`python -m simulator`, which builds it first (about 30 seconds, once)."
-            )
-            if not config.TICK_FILE.exists() and not source.ready:
-                self.problem = f"Tick file not found: {config.TICK_FILE}. Set SIM_TICK_FILE to its path."
-            return
+            return False
         self.source = source
         self.bars = BarStore.load(config.DUKA_DIR / "bars")
         self.problem = None
+        return True
 
     @property
     def ready(self) -> bool:
         return self.source is not None and self.bars is not None
 
-    def start_update(self) -> bool:
-        """Fetch new Dukascopy hours in a background thread."""
-        if not self.ready or (self._update_thread and self._update_thread.is_alive()):
+    def _start_job(self, kind: str, target) -> bool:
+        if self._job_thread and self._job_thread.is_alive():
             return False
-        self._update_stop.clear()
-        self.update_state = {"running": True, "started_ms": int(time.time() * 1000), "done": 0, "total": 0,
-                             "day": None, "message": "Checking for new hours"}
-        self._update_thread = threading.Thread(target=self._run_update, name="dukascopy-update", daemon=True)
-        self._update_thread.start()
+        self._job_stop.clear()
+        self.job = {"kind": kind, "running": True, "started_ms": int(time.time() * 1000),
+                    "done": 0, "total": 0, "message": "Starting"}
+        self._job_thread = threading.Thread(target=self._guard(target), name=kind, daemon=True)
+        self._job_thread.start()
         return True
 
-    def stop_update(self) -> None:
-        self._update_stop.set()
+    def _guard(self, target):
+        def run():
+            try:
+                target()
+            except Exception as exc:
+                self.job.update(running=False, error=f"{type(exc).__name__}: {exc}",
+                                message=f"Failed: {exc}", finished_ms=int(time.time() * 1000))
+        return run
 
-    def _run_update(self) -> None:
-        state = self.update_state
+    def start(self) -> None:
+        """On server start: prepare if needed, then update (if enabled)."""
+        if self.load():
+            if config.AUTO_UPDATE:
+                self.start_update()
+            return
+        if not ParquetTickSource().ready and not config.TICK_FILE.exists():
+            self.problem = (f"No market data yet, and the Layer 0 tick file was not found at {config.TICK_FILE}. "
+                            "Set SIM_TICK_FILE to its path and start again.")
+            return
+        self._start_job("prepare", self._prepare)
 
-        def progress(day, done, total):
-            state.update(day=day.isoformat(), done=done, total=total,
-                         message=f"Fetching {day.isoformat()} ({done}/{total} days)")
+    def _prepare(self) -> None:
+        job = self.job
+        if not FeedStore(config.DUKA_DIR).manifest().get("layer0") and config.TICK_FILE.exists():
+            groups = pq.ParquetFile(config.TICK_FILE).metadata.num_row_groups
+            job.update(total=groups, message="Importing the 2023-2024 tick file")
 
-        try:
-            summary = dukascopy.update(progress=progress, stop=self._update_stop)
+            def on_group(msg: str) -> None:
+                job["done"] = min(job["done"] + 1, groups)
+                job["message"] = f"Importing the 2023-2024 tick file ({job['done']}/{groups})"
+            import_layer0(progress=on_group)
+        source = ParquetTickSource()
+        days = len(source.days())
+        job.update(done=0, total=days, message="Building candles")
+
+        def on_days(msg: str) -> None:
+            n = int(msg.split(":")[1].split("/")[0])
+            job.update(done=n, message=f"Building candles ({n}/{days} days)")
+        bars = BarStore.build(source, progress=on_days)
+        bars.save(config.DUKA_DIR / "bars", config.KEEP_FLAGS)
+        self.load()
+        job.update(running=False, finished_ms=int(time.time() * 1000), message="Market data ready")
+        if config.AUTO_UPDATE:
+            self._job_thread = None
+            self.start_update()
+
+    def start_update(self) -> bool:
+        if not self.ready:
+            return False
+        return self._start_job("update", self._update)
+
+    def stop_job(self) -> None:
+        self._job_stop.set()
+
+    def _update(self) -> None:
+        job = self.job
+        job["message"] = "Checking Dukascopy for new hours"
+        total = len(dukascopy.pending_days())
+        job.update(total=total, done=0, days=0, ticks=0, failed_hours=0)
+        fetcher = dukascopy.Fetcher(
+            stop=self._job_stop,
+            on_wait=lambda s: job.update(message=f"Dukascopy is not answering; pausing {s:.0f} s, then trying again"),
+        )
+        start_day = None
+        while not self._job_stop.is_set():
+            base = job["done"]
+
+            def progress(day, done, total, base=base, overall=total):
+                job.update(done=min(base + done, total), day=day.isoformat(),
+                           message=f"Fetching {day.isoformat()} from Dukascopy")
+            summary = dukascopy.update(start_day=start_day, max_days=UPDATE_CHUNK_DAYS,
+                                       progress=progress, stop=self._job_stop, fetch=fetcher)
+            job["days"] += summary["days"]
+            job["ticks"] += summary["ticks"]
+            job["failed_hours"] += summary["failed_hours"]
             if summary["first_changed"] is not None:
-                state["message"] = "Building candles for the new days"
+                job["message"] = "Building candles for the new days"
                 self.source.refresh()
                 self.bars.rebuild_from(self.source, summary["first_changed"])
                 self.bars.save(config.DUKA_DIR / "bars", config.KEEP_FLAGS)
-            gaps = f"; {summary['failed_hours']} hours failed and will be retried" if summary["failed_hours"] else ""
-            state.update(running=False, finished_ms=int(time.time() * 1000), summary={
-                k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in summary.items()},
-                message=("Stopped" if summary["stopped"] else
-                         f"Up to date: {summary['days']} days, {summary['ticks']:,} new ticks{gaps}"))
-        except Exception as exc:
-            state.update(running=False, finished_ms=int(time.time() * 1000), error=f"{type(exc).__name__}: {exc}",
-                         message=f"Update failed: {exc}")
+            if summary["stopped"] or not summary["remaining"] or summary["through"] is None:
+                break
+            # Carry on after this chunk; a day with a failed hour is retried on
+            # the next run, not again and again in this one.
+            start_day = summary["through"] + timedelta(days=1)
+        gaps = f"; {job['failed_hours']} hours did not answer and are retried next time" if job["failed_hours"] else ""
+        job.update(running=False, done=job["total"], finished_ms=int(time.time() * 1000),
+                   message=("Stopped; it resumes next time" if self._job_stop.is_set() else
+                            f"Up to date: {job['days']} days fetched, {job['ticks']:,} new ticks{gaps}"))
+
+    def history_info(self) -> dict:
+        if not self.ready:
+            return {}
+        days = self.source.days()
+        last = self.source.load_day(days[-1])
+        manifest = self.source.store.manifest()["days"]
+        return {
+            "first_day": days[0].isoformat(),
+            "last_day": days[-1].isoformat(),
+            "trading_days": len(days),
+            "last_tick_ms": int(last.ts[-1]) // 1_000_000 if len(last) else None,
+            "downloaded_days": sum(1 for e in manifest.values() if e.get("source") == "dukascopy"),
+        }
 
     # -- live feeds --------------------------------------------------------------
 
@@ -184,9 +268,7 @@ hub = Hub()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    hub.load()
-    if hub.ready and config.AUTO_UPDATE:
-        hub.start_update()
+    hub.start()
     settings = hub.live_settings()
     if settings.get("autostart") and settings.get("terminal"):
         # Waits harmlessly until the trader opens that terminal.
@@ -195,7 +277,7 @@ async def lifespan(app: FastAPI):
     yield
     for live in list(hub.live.values()):
         live.save()
-    hub.stop_update()
+    hub.stop_job()
     if hub.recorder is not None:
         hub.recorder.stop(wait=3)
 
@@ -447,7 +529,9 @@ async def websocket(ws: WebSocket) -> None:
     live: Live | None = None
     try:
         if not hub.ready:
-            await ws.send_json({"type": "fatal", "message": hub.problem})
+            # Data is still being prepared (or cannot be): the page shows the
+            # progress from /api/data and reconnects when it is ready.
+            await ws.send_json({"type": "preparing", "problem": hub.problem, "job": hub.job})
             return
         while True:
             msg = await ws.receive_json()
@@ -652,7 +736,74 @@ def _meta() -> dict:
             "timeframe": config.DEFAULT_TIMEFRAME,
         },
         "keep_flags": list(hub.source.keep_flags),
+        "feeds": _feed_list(),
     }
+
+
+def _feed_list() -> list[dict]:
+    out = []
+    for key, f in hub.feeds().items():
+        days = f.source.days()
+        if not days:
+            continue
+        last = f.source.latest_ns() if f.live else None
+        out.append({
+            "key": key, "label": f.label, "live": f.live,
+            "first_day": days[0].isoformat(), "last_day": days[-1].isoformat(), "days": len(days),
+            "last_tick_ms": last // 1_000_000 if last else None,
+        })
+    return out
+
+
+@app.get("/api/data")
+def data_status(terminals: int = 0) -> dict:
+    """Everything the Data panel shows: preparation and update progress,
+    the replay history's range, and the live recorder."""
+    live = {
+        "settings": hub.live_settings(),
+        "recorder": dict(hub.recorder.status) if hub.recorder else None,
+        "feeds": [f for f in _feed_list() if f["live"]] if hub.ready else [],
+    }
+    if terminals:
+        live["terminals"] = installed_terminals()
+    return {
+        "ready": hub.ready,
+        "problem": hub.problem,
+        "job": dict(hub.job),
+        "auto_update": config.AUTO_UPDATE,
+        "history": hub.history_info(),
+        "live": live,
+    }
+
+
+@app.post("/api/data/update")
+def data_update() -> dict:
+    return {"started": hub.start_update(), "job": dict(hub.job)}
+
+
+@app.post("/api/data/stop")
+def data_stop() -> dict:
+    hub.stop_job()
+    return {"ok": True}
+
+
+class RecorderStart(BaseModel):
+    terminal: str
+
+
+@app.post("/api/live/start")
+def live_start(body: RecorderStart) -> dict:
+    path = Path(body.terminal)
+    if path.name.lower() != "terminal64.exe" or not path.exists():
+        raise HTTPException(400, "Pick an installed MT5 terminal (terminal64.exe)")
+    hub.start_recorder(str(path))
+    return {"ok": True}
+
+
+@app.post("/api/live/stop")
+def live_stop() -> dict:
+    hub.stop_recorder()
+    return {"ok": True}
 
 
 @app.get("/api/meta")
@@ -756,7 +907,11 @@ def review(sid: str, trade_id: int, tf: str = "m15") -> dict:
         raise HTTPException(404, "No such trade")
     row = hub.journal.get_session(sid)
     seconds = tf_seconds(tf)
-    store = hub.bars[tf]
+    feeds = hub.feeds()
+    feed_key = (row or {}).get("feed") or REPLAY_FEED
+    if feed_key not in feeds:
+        raise HTTPException(404, "The data this trade was made on is not available")
+    store = feeds[feed_key].bars[tf]
     a = store.index_of_time(trade["entry_ns"] // NS_PER_SECOND) - 200
     b = store.index_of_time(trade["exit_ns"] // NS_PER_SECOND) + 80
     if row is not None and row["status"] == "active":
