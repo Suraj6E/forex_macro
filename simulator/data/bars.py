@@ -52,7 +52,6 @@ def tf_seconds(tf: str) -> int:
 def _empty() -> dict[str, np.ndarray]:
     return {f: np.empty(0, np.int64 if f in ("time", "ticks") else np.float64) for f in FIELDS}
 
-
 def bars_from_ticks(ts: np.ndarray, bid: np.ndarray, ask: np.ndarray, seconds: int) -> dict[str, np.ndarray]:
     """Aggregate sorted ticks into Bid candles of `seconds` length.
 
@@ -84,7 +83,10 @@ def concat_bars(parts: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
 
 
 def bar_dict(bars: dict[str, np.ndarray], i: int) -> dict:
-    """One candle as the JSON the chart receives."""
+    """One candle as the JSON the chart receives. `volume` is tick volume:
+    the number of quotes in the candle. Spot FX has no exchange and so no
+    traded volume; tick volume is what MT5 and most FX charts show, and it
+    tracks activity closely."""
     return {
         "time": int(bars["time"][i]),
         "open": float(bars["open"][i]),
@@ -92,6 +94,7 @@ def bar_dict(bars: dict[str, np.ndarray], i: int) -> dict:
         "low": float(bars["low"][i]),
         "close": float(bars["close"][i]),
         "spread": float(bars["spread"][i]),
+        "volume": int(bars["ticks"][i]),
     }
 
 
@@ -150,6 +153,33 @@ class BarStore:
     def build(cls, source: TickSource, progress=None) -> "BarStore":
         parts = _day_bars(source, source.days(), progress)
         return cls({tf: TimeframeBars.from_arrays(TIMEFRAMES[tf][0], concat_bars(parts[tf])) for tf in TIMEFRAMES})
+
+    @classmethod
+    def empty(cls) -> "BarStore":
+        return cls({tf: TimeframeBars.from_arrays(seconds, _empty()) for tf, (seconds, _label) in TIMEFRAMES.items()})
+
+    def replace_days(self, source: TickSource, days: list[date]) -> None:
+        """Recompute the candles of `days` and splice them in.
+
+        A candle never spans two UTC days, so the candles of a day depend on
+        that day's ticks alone: dropping a day's old candles and inserting
+        new ones gives exactly what a full build would. Days can arrive in
+        any order (downloads run newest first).
+        """
+        days = sorted(set(days))
+        if not days:
+            return
+        parts = _day_bars(source, days)
+        day_idx = np.array([day_start_ns(d) // (86_400 * NS_PER_SECOND) for d in days], np.int64)
+        by_tf = {}
+        for tf, (seconds, _label) in TIMEFRAMES.items():
+            old = self.by_tf[tf].arrays
+            replaced = np.isin(old["time"] // 86_400, day_idx)
+            kept = {f: old[f][~replaced] for f in FIELDS}
+            joined = concat_bars([kept, *parts[tf]])
+            order = np.argsort(joined["time"], kind="stable")
+            by_tf[tf] = TimeframeBars.from_arrays(seconds, {f: joined[f][order] for f in FIELDS})
+        self.by_tf = by_tf
 
     def rebuild_from(self, source: TickSource, first_day: date) -> None:
         """Recompute every day from `first_day` on and splice it in."""

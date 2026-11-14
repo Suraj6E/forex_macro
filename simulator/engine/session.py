@@ -239,6 +239,7 @@ class ReplaySession:
             "low": float(seg.min()),
             "close": float(seg[-1]),
             "spread": float(t.ask[hi - 1] - t.bid[hi - 1]),
+            "volume": hi - lo,  # ticks so far, never the candle's full count
         }
 
     def history(self, tf: str | None = None, limit: int = HISTORY_LIMIT, before: int | None = None) -> list[dict]:
@@ -320,8 +321,9 @@ class ReplaySession:
 
     @classmethod
     def from_state(cls, source: TickSource, bars: BarStore, state: dict, session_id: str,
-                   live: bool = False, now: int | None = None) -> "ReplaySession":
+                   live: bool = False, now: int | None = None, rate_fn=None) -> "ReplaySession":
         broker = Broker.from_state(state["broker"])
+        broker.rate_fn = rate_fn
         session = cls(source, bars, broker, state["sim_ns"], state["timeframe"], session_id, live=live)
         if live:
             # Everything that arrived while the session was closed is given

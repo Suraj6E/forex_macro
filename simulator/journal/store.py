@@ -157,7 +157,7 @@ class Journal:
     # -- sessions ----------------------------------------------------------
 
     def create_session(self, *, start_ns: int, timeframe: str, broker_state: dict, hide_dates: bool, name: str = "",
-                       mode: str = "replay", feed: str = "dukascopy") -> str:
+                       mode: str = "replay", feed: str = "dukascopy", symbol: str = config.SYMBOL) -> str:
         sid = uuid.uuid4().hex[:12]
         now = _now()
         state = {"sim_ns": start_ns, "timeframe": timeframe, "speed": 60.0, "broker": broker_state}
@@ -168,7 +168,7 @@ class Journal:
                    hide_dates, status, mode, feed, state)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
                 (
-                    sid, name, config.SYMBOL, now, now, start_ns, start_ns, timeframe,
+                    sid, name, symbol, now, now, start_ns, start_ns, timeframe,
                     broker_state["starting_balance"], broker_state["leverage"],
                     broker_state["commission_per_lot"], broker_state["slippage_pips"],
                     int(hide_dates), mode, feed, json.dumps(state),
@@ -245,7 +245,7 @@ class Journal:
                 db.execute("UPDATE trades SET note = ? WHERE session_id = ? AND id = ?", (note[:5000], sid, trade_id))
 
     def trades(self, sid: str | None = None) -> list[dict]:
-        query = """SELECT t.*, s.name AS session_name,
+        query = """SELECT t.*, s.name AS session_name, s.symbol AS symbol,
                           (SELECT COUNT(*) FROM snapshots p WHERE p.session_id = t.session_id
                              AND p.position_id = t.position_id AND p.kind = 'entry') AS has_entry_png,
                           (SELECT COUNT(*) FROM snapshots p WHERE p.session_id = t.session_id

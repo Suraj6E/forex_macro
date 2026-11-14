@@ -147,6 +147,7 @@
       $("byWeekday").innerHTML = splitTable(st.by_weekday);
       $("byTag").innerHTML = splitTable(st.by_tag);
       $("byExit").innerHTML = splitTable(st.by_exit);
+      $("byInstrument").innerHTML = splitTable(st.by_instrument || []);
       renderTrades(trades);
       var notes = st.notes || [];
       $("notesBox").classList.toggle("hidden", !notes.length);
@@ -166,9 +167,10 @@
       };
       return "<tr>" +
         "<td class='mono'>" + (current === "all" ? "<span class='faint'>" + esc(t.session_name || t.session_id) + "</span><br>" : "") + "#" + t.id + "</td>" +
+        "<td>" + esc(t.label || t.symbol || "") + "</td>" +
         "<td>" + t.side.toUpperCase() + "</td><td class='n'>" + t.lots.toFixed(2) + "</td>" +
-        "<td class='mono'>" + when(t.entry_ms) + "<br>" + t.entry_price.toFixed(5) + "</td>" +
-        "<td class='mono'>" + when(t.exit_ms) + "<br>" + t.exit_price.toFixed(5) + "</td>" +
+        "<td class='mono'>" + when(t.entry_ms) + "<br>" + t.entry_price.toFixed(t.digits || 5) + "</td>" +
+        "<td class='mono'>" + when(t.exit_ms) + "<br>" + t.exit_price.toFixed(t.digits || 5) + "</td>" +
         "<td>" + t.exit_reason.toUpperCase() + "</td>" +
         "<td class='n'>" + signed(t.pips, 1) + "</td>" +
         "<td class='n " + cls(t.net_usd) + "'>" + usd(t.net_usd) + "</td>" +
@@ -178,7 +180,7 @@
         "<td>" + snap("entry", t.has_entry_png) + " " + snap("exit", t.has_exit_png) + "</td>" +
         "<td><a href='/?review=" + t.session_id + ":" + t.id + "'>Review</a></td></tr>";
     });
-    $("trades").innerHTML = "<table class='t'><thead><tr><th>Trade</th><th>Side</th><th class='n'>Lots</th><th>Entry (UTC)</th><th>Exit (UTC)</th>" +
+    $("trades").innerHTML = "<table class='t'><thead><tr><th>Trade</th><th>Instrument</th><th>Side</th><th class='n'>Lots</th><th>Entry (UTC)</th><th>Exit (UTC)</th>" +
       "<th>Exit</th><th class='n'>Pips</th><th class='n'>Net USD</th><th class='n'>R</th><th>Tags</th><th>Note</th><th>Chart</th><th></th></tr></thead><tbody>" +
       rows.join("") + "</tbody></table>";
   }

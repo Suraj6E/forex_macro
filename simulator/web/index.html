@@ -59,7 +59,10 @@
 
     <div class="chartwrap">
       <div id="chart"></div>
-      <div class="chart-overlay"><span class="sym">EUR/USD</span> · <span id="tfLabel">15M</span> · Bid · <span id="ohlc"></span></div>
+      <div class="chart-overlay"><span class="sym" id="symLabel">EUR/USD</span> · <span id="tfLabel">15M</span> · Bid · <span id="ohlc"></span></div>
+      <div class="newsfilter" id="newsFilter" aria-label="Economic calendar impact filter"></div>
+      <div class="newstip hidden" id="newsTip" role="tooltip"></div>
+      <div class="newspop hidden" id="newsPop" role="dialog" aria-label="Economic calendar event"></div>
       <div class="drawbar hidden" id="drawbar">
         <button id="drawToOrder" class="primary hidden">Send as order</button>
         <button id="drawDelete">Delete</button>
@@ -73,7 +76,7 @@
           <button class="sell" id="sideSell"><b>SELL</b><span id="bidPx">-</span></button>
           <button class="buy on" id="sideBuy"><b>BUY</b><span id="askPx">-</span></button>
         </div>
-        <div class="spreadline">spread <span id="spreadPx" class="mono">-</span> pips</div>
+        <div class="spreadline">spread <span id="spreadPx" class="mono">-</span> pips · <span id="lotInfo"></span></div>
         <div class="seg" id="typeSeg">
           <button data-type="market" class="on">Market</button>
           <button data-type="limit">Limit</button>
@@ -151,6 +154,7 @@
         <button type="button" data-mode="replay" class="on">Replay history</button>
         <button type="button" data-mode="live">Live market</button>
       </div>
+      <label class="full">Instrument<select id="newSymbol"></select></label>
       <label class="full">Data<select id="newFeed"></select></label>
       <div class="full live-only-field tiny muted" id="liveNote"></div>
       <label class="full replay-field">Start (UTC)
@@ -179,15 +183,21 @@
     <p class="lead">Everything here runs on its own; this is where you watch it and choose the live source.</p>
 
     <section class="dsec">
-      <h3>Replay history <span class="faint">Dukascopy · EUR/USD ticks, Bid and Ask</span></h3>
-      <dl class="kv" id="histInfo"></dl>
+      <h3>Replay history <span class="faint">Dukascopy · ticks, Bid and Ask</span></h3>
       <div class="progress" aria-hidden="true"><div id="jobBar"></div></div>
       <p class="tiny" id="jobMsg"></p>
       <div class="row">
         <button type="button" id="updateNow">Update now</button>
         <button type="button" id="stopJob" class="hidden">Stop</button>
-        <span class="tiny muted">New hours are fetched every time the simulator starts, and the gaps in the 2023–24 file are filled. Stopping is safe: it resumes next time.</span>
+        <span class="tiny muted">Downloads run whenever the simulator is open: newest days first, a few weeks of each instrument in turn, so every one becomes playable early. Stopping is safe; it resumes next time.</span>
       </div>
+      <div class="tablewrap"><table class="t insttable" id="instTable"></table></div>
+      <p class="tiny muted" id="diskInfo"></p>
+    </section>
+
+    <section class="dsec">
+      <h3>Economic calendar <span class="faint">USD, EUR, GBP, JPY</span></h3>
+      <p class="tiny" id="calInfo"></p>
     </section>
 
     <section class="dsec">
@@ -211,6 +221,7 @@
 <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
 <script src="/static/chart.js"></script>
 <script src="/static/drawings.js"></script>
+<script src="/static/news.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

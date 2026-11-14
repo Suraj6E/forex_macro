@@ -5,7 +5,7 @@
   "use strict";
 
   var $ = function (id) { return document.getElementById(id); };
-  var PIP = 0.0001;
+  var PIP = 0.0001, DIGITS = 5, INST = null;  // set from the session's instrument
   var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   var TAGS = ["breakout", "pullback", "reversal", "range", "news", "plan", "fomo", "revenge"];
   var LS_SESSION = "sim-session";
@@ -31,7 +31,8 @@
     if (S.session && S.session.hide_dates) return DAYS[d.getUTCDay()] + " " + hm;
     return d.toISOString().slice(0, 10) + " " + hm;
   }
-  function px(p) { return p === null || p === undefined ? "-" : Number(p).toFixed(5); }
+  function px(p) { return p === null || p === undefined ? "-" : Number(p).toFixed(DIGITS); }
+  function num(v) { return Number(v).toLocaleString("en-US"); }
   function usd(v) { return (v < 0 ? "-" : "") + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
   function signed(v, digits) { return (v > 0 ? "+" : v < 0 ? "-" : "") + Math.abs(v).toFixed(digits); }
   function cls(v) { return v > 0 ? "up" : v < 0 ? "down" : ""; }
@@ -64,16 +65,38 @@
     }
   });
 
+  var N = window.SimNews.create(C, {
+    getSession: function () { return S.session; },
+    getClockMs: function () { return S.status ? S.status.sim_ms : (S.review && C.lastTime() ? (C.lastTime() + S.tfSeconds) * 1000 : null); },
+    getTfSeconds: function () { return S.tfSeconds; },
+    fmtTime: function (ms) { return fmtTime(ms); },
+    hideDates: function () { return !!(S.session && S.session.hide_dates); }
+  });
+
   C.chart.subscribeCrosshairMove(function (param) {
     var bar = param && param.seriesData ? param.seriesData.get(C.series) : null;
-    showOhlc(bar);
+    var vol = param && param.seriesData ? param.seriesData.get(C.volume) : null;
+    showOhlc(bar, vol ? vol.value : null);
   });
   var lastBar = null;
-  function showOhlc(bar) {
-    bar = bar || lastBar;
+  function showOhlc(bar, vol) {
+    if (!bar) { bar = lastBar; vol = lastBar ? lastBar.volume : null; }
     if (!bar) { $("ohlc").textContent = ""; return; }
     $("ohlc").innerHTML = "O <span class='mono'>" + px(bar.open) + "</span> H <span class='mono'>" + px(bar.high) +
-      "</span> L <span class='mono'>" + px(bar.low) + "</span> C <span class='mono'>" + px(bar.close) + "</span>";
+      "</span> L <span class='mono'>" + px(bar.low) + "</span> C <span class='mono'>" + px(bar.close) + "</span>" +
+      (vol !== null && vol !== undefined ? " V <span class='mono' title='Tick volume: quotes in the candle'>" + num(vol) + "</span>" : "");
+  }
+
+  function setInstrument(inst) {
+    INST = inst;
+    PIP = inst.pip; DIGITS = inst.digits;
+    C.setInstrument(inst);
+    D.setInstrument(inst);
+    $("symbolLabel").textContent = inst.label;
+    $("symLabel").textContent = inst.label;
+    document.title = inst.label + " · FX Replay";
+    var step = Math.pow(10, -DIGITS).toFixed(DIGITS);
+    ["priceIn", "slIn", "tpIn"].forEach(function (id) { $(id).step = step; });
   }
 
   C.onRangeChange(function (range) {
@@ -127,6 +150,8 @@
       case "session":
         S.session = m.session;
         S.attached = true;
+        setInstrument(m.session.instrument);
+        N.clear();
         S.timeframes = m.session.timeframes;
         localStorage.setItem(LS_SESSION, m.session.id);
         if (new URLSearchParams(location.search).get("session")) history.replaceState(null, "", "/");
@@ -152,6 +177,7 @@
         onBook(m.book);
         onStatus(m.status);
         refreshMarkers(true);
+        N.reload();
         break;
       case "frame":
         onStatus(m.status);
@@ -168,6 +194,7 @@
         if (m.timeframe !== S.chartTf) break;
         if (!C.prependBars(m.bars)) S.olderDone = true;
         refreshMarkers(true);
+        N.reload();
         break;
       case "events":
         onEvents(m.events);
@@ -190,6 +217,7 @@
         localStorage.removeItem(LS_SESSION);
         S.attached = false;
         toast("Session ended. Its trades are in the journal.");
+        N.clear();
         openSessionDialog({});
         break;
       case "drawing_saved": break;
@@ -208,6 +236,7 @@
     $("playBtn").textContent = st.playing ? "Pause" : "Play";
     $("playBtn").disabled = st.finished;
     if ($("speedSel").value !== st.speed) $("speedSel").value = st.speed;
+    N.onClock(st.sim_ms);
   }
 
   function onQuote(q) {
@@ -217,7 +246,18 @@
     $("bidPx").textContent = px(q.bid);
     $("askPx").textContent = px(q.ask);
     $("spreadPx").textContent = ((q.ask - q.bid) / PIP).toFixed(1);
+    lotInfo();
     updateTicket();
+  }
+
+  // What a lot is and what a pip is worth: they differ a lot between
+  // EUR/USD, a yen cross, silver and oil.
+  function lotInfo() {
+    if (!INST) return;
+    var a = S.book && S.book.account;
+    var pv = a && a.pip_value ? " · pip " + a.pip_value.toFixed(2) + " USD/lot" : "";
+    $("lotInfo").textContent = "1 lot = " + num(INST.contract) + " " + INST.unit + pv;
+    $("lotInfo").title = "One pip is " + INST.pip + " in price. Pip value in USD at the current price.";
   }
 
   function onBook(book) {
@@ -235,6 +275,7 @@
       ["Costs", a.commission_per_lot + " USD/lot · " + a.slippage_pips + " pip slip"]
     ];
     $("account").innerHTML = rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("");
+    lotInfo();
 
     $("posCount").textContent = book.positions.length || "";
     $("positions").innerHTML = book.positions.length ? book.positions.map(function (p) {
@@ -486,7 +527,7 @@
     document.querySelectorAll("#typeSeg button").forEach(function (x) { x.classList.toggle("on", x === b); });
     $("priceIn").disabled = S.otype === "market";
     $("priceIn").placeholder = S.otype === "market" ? "at market" : "trigger price";
-    if (S.otype !== "market" && !$("priceIn").value && S.quote) $("priceIn").value = (S.side === "buy" ? S.quote.ask : S.quote.bid).toFixed(5);
+    if (S.otype !== "market" && !$("priceIn").value && S.quote) $("priceIn").value = (S.side === "buy" ? S.quote.ask : S.quote.bid).toFixed(DIGITS);
     updateTicket();
   };
   $("sizeSeg").onclick = function (e) {
@@ -511,16 +552,17 @@
     var btn = $("placeBtn");
     btn.className = "place " + S.side;
     var typeText = S.otype === "market" ? "" : " " + S.otype;
-    var where = S.otype === "market" ? "at market" : "at " + (v.price ? v.price.toFixed(5) : "?");
+    var where = S.otype === "market" ? "at market" : "at " + (v.price ? v.price.toFixed(DIGITS) : "?");
     var hint = S.otype === "market" ? "Fills on the next tick, never the one on screen." :
       (S.side === "buy" ? (S.otype === "limit" ? "Fills when the Ask falls to the price." : "Fills when the Ask rises to the price, possibly worse.") :
         (S.otype === "limit" ? "Fills when the Bid rises to the price." : "Fills when the Bid falls to the price, possibly worse."));
     if (S.sizeMode === "risk") {
       var ref = v.price || (S.quote ? (S.side === "buy" ? S.quote.ask : S.quote.bid) : null);
       var bal = S.book ? S.book.account.balance : null;
-      if (v.size && v.sl && ref && bal) {
+      var pipValue = S.book && S.book.account.pip_value;
+      if (v.size && v.sl && ref && bal && pipValue) {
         var pips = Math.round(Math.abs(ref - v.sl) / PIP * 10) / 10;
-        var lots = pips ? Math.floor(bal * v.size / 100 / (pips * 10) * 100 + 1e-9) / 100 : 0;
+        var lots = pips ? Math.floor(bal * v.size / 100 / (pips * pipValue) * 100 + 1e-9) / 100 : 0;
         btn.textContent = (S.side === "buy" ? "Buy" : "Sell") + typeText + " " + lots.toFixed(2) + " " + where;
         hint = "Risk " + usd(bal * v.size / 100) + " USD over " + pips.toFixed(1) + " pips. " + hint;
       } else {
@@ -557,6 +599,15 @@
       $("newTf").innerHTML = meta.timeframes.map(function (t) { return "<option value='" + t.key + "'>" + t.label + "</option>"; }).join("");
       $("newTf").value = meta.defaults.timeframe;
       if (opts.start) $("newStart").value = opts.start;
+      var keep = opts.symbol || $("newSymbol").value || (S.session && S.session.instrument && S.session.instrument.symbol) || meta.defaults.symbol;
+      $("newSymbol").innerHTML = meta.instruments.map(function (i) {
+        var hist = i.feeds.filter(function (f) { return !f.live; })[0];
+        var live = i.feeds.some(function (f) { return f.live; });
+        var note = hist ? hist.first_day + " → " + hist.last_day : (live ? "live only" : "downloading…");
+        return "<option value='" + i.symbol + "'" + (i.feeds.length ? "" : " disabled") + ">" + esc(i.label) + " · " + note + "</option>";
+      }).join("");
+      var usable = meta.instruments.filter(function (i) { return i.feeds.length; }).map(function (i) { return i.symbol; });
+      $("newSymbol").value = usable.indexOf(keep) >= 0 ? keep : (usable[0] || keep);
       setMode(opts.mode || DLG.mode);
     });
     fetch("/api/sessions").then(function (r) { return r.json(); }).then(function (rows) {
@@ -564,7 +615,7 @@
       $("resumeBox").classList.toggle("hidden", !active.length);
       $("resumeList").innerHTML = active.slice(0, 12).map(function (r) {
         return "<button type='button' data-resume='" + r.id + "'><span>" + (r.mode === "live" ? "<b>Live</b> · " : "") +
-          esc(r.name || "Session " + r.id) + " · at " + esc(fmtTime(r.sim_ms)) + "</span><span class='mono " + cls(r.net_usd) + "'>" +
+          "<b>" + esc(r.symbol || "") + "</b> · " + esc(r.name || "Session " + r.id) + " · at " + esc(fmtTime(r.sim_ms)) + "</span><span class='mono " + cls(r.net_usd) + "'>" +
           r.trades + " trades · " + usd(r.net_usd) + "</span></button>";
       }).join("");
     });
@@ -578,7 +629,8 @@
     document.querySelectorAll("#modeSeg [data-mode]").forEach(function (b) { b.classList.toggle("on", b.dataset.mode === mode); });
     document.querySelectorAll("#sessionForm .replay-field").forEach(function (el) { el.classList.toggle("hidden", mode === "live"); });
     if (!meta) return;
-    var feeds = meta.feeds.filter(function (f) { return mode === "replay" || f.live; });
+    var inst = currentInstrument();
+    var feeds = (inst ? inst.feeds : []).filter(function (f) { return mode === "replay" || f.live; });
     $("newFeed").innerHTML = feeds.map(function (f) {
       var range = f.live && f.last_tick_ms ? "recorded " + f.first_day + " → now" : f.first_day + " → " + f.last_day;
       return "<option value='" + f.key + "'>" + esc(f.label) + " (" + range + ", " + f.days + " days)</option>";
@@ -588,7 +640,7 @@
     $("sessionStart").disabled = false;
     if (mode === "live") {
       if (!feeds.length) {
-        $("liveNote").innerHTML = "No live data yet. Start the recorder in <a href='#' id='openDataFromDlg'>Market data</a>: " +
+        $("liveNote").innerHTML = "No live " + esc(inst ? inst.label : "") + " data yet. Start the recorder in <a href='#' id='openDataFromDlg'>Market data</a>: " +
           "open your MT5 terminal, pick it there, and come back.";
         $("sessionStart").disabled = true;
         $("openDataFromDlg").onclick = function (e) { e.preventDefault(); openDataDialog(); };
@@ -603,10 +655,15 @@
     }
   }
 
-  function updateStartRange() {
+  function currentInstrument() {
     var meta = DLG.meta;
-    var f = meta && meta.feeds.filter(function (x) { return x.key === $("newFeed").value; })[0];
-    if (!f) return;
+    return meta ? meta.instruments.filter(function (i) { return i.symbol === $("newSymbol").value; })[0] : null;
+  }
+
+  function updateStartRange() {
+    var inst = currentInstrument();
+    var f = inst && inst.feeds.filter(function (x) { return x.key === $("newFeed").value; })[0];
+    if (!f) { $("dataNotice").innerHTML = ""; return; }
     $("newStart").min = f.first_day + "T00:00";
     $("newStart").max = f.last_day + "T23:59";
     var v = $("newStart").value;
@@ -615,8 +672,9 @@
       d.setUTCDate(d.getUTCDate() + Math.min(365, Math.max(0, f.days - 5)));
       $("newStart").value = d.toISOString().slice(0, 16);
     }
-    $("dataNotice").innerHTML = "<p class='tiny muted' style='margin:0 0 12px'>" + esc(f.label) + ": EUR/USD ticks " + f.first_day +
-      " to " + f.last_day + " (" + f.days + " trading days), Bid candles, UTC.</p>";
+    $("dataNotice").innerHTML = "<p class='tiny muted' style='margin:0 0 12px'>" + esc(f.label) + ": " + esc(inst.label) + " ticks " + f.first_day +
+      " to " + f.last_day + " (" + f.days + " days), Bid candles, UTC. 1 lot = " + num(inst.contract) + " " + esc(inst.unit) +
+      ". News: " + inst.currencies.join(", ") + " calendar.</p>";
   }
 
   $("modeSeg").onclick = function (e) {
@@ -624,6 +682,7 @@
     if (b) setMode(b.dataset.mode);
   };
   $("newFeed").onchange = function () { if (DLG.mode === "replay") updateStartRange(); };
+  $("newSymbol").onchange = function () { setMode(DLG.mode); };
 
   $("resumeList").onclick = function (e) {
     var b = e.target.closest("[data-resume]");
@@ -640,6 +699,7 @@
     send({
       type: "new",
       mode: DLG.mode,
+      symbol: $("newSymbol").value,
       feed: $("newFeed").value || null,
       start: live || $("newRandom").checked ? null : $("newStart").value,
       random: !live && $("newRandom").checked,
@@ -676,8 +736,11 @@
     var text;
     if (!d.ready && job.kind === "prepare" && job.running) text = "Preparing data " + pct(job) + "%";
     else if (!d.ready && d.problem) text = "Data missing";
-    else if (job.kind === "update" && job.running) text = "Updating " + (job.day || "") + " · " + pct(job) + "%";
-    else text = d.history && d.history.last_tick_ms ? "Data to " + utc(d.history.last_tick_ms).slice(0, 16) : "Data";
+    else if (job.kind === "update" && job.running) text = "Downloading " + (job.symbol || "") + " " + (job.day || "") + " · " + pct(job) + "%";
+    else {
+      var last = (d.instruments || []).reduce(function (a, i) { return Math.max(a, i.last_tick_ms || 0); }, 0);
+      text = last ? "Data to " + utc(last).slice(0, 16) : "Data";
+    }
     var rec = d.live && d.live.recorder;
     var st = rec ? (REC_STATE[rec.state] || ["", rec.state]) : ["", "Off"];
     $("liveDot").className = "dot " + st[0];
@@ -696,7 +759,7 @@
         var job = d.job || {};
         prep.innerHTML = d.problem ? esc(d.problem) :
           esc(job.message || "Preparing the market data") + (job.total ? " · " + pct(job) + "%" : "") +
-          "<br><span class='tiny muted'>First start only: the 2023–24 file is imported and candles are built. About a minute.</span>";
+          "<br><span class='tiny muted'>Once only: the 2023–24 file is imported, older tick files are compacted, and candles are built. About a minute.</span>";
         prep.classList.toggle("err", !!d.problem);
       }
     }).catch(function () { /* server restarting */ });
@@ -718,20 +781,14 @@
   var selectedTerminal = null;
 
   function renderDataDialog(d) {
-    var h = d.history || {};
     var job = d.job || {};
-    $("histInfo").innerHTML = h.first_day ? [
-      ["Range", h.first_day + " → " + utc(h.last_tick_ms)],
-      ["Trading days", h.trading_days + " (" + h.downloaded_days + " fetched from Dukascopy)"],
-      ["Updates", d.auto_update ? "automatic at every start" : "off (SIM_AUTO_UPDATE=0)"]
-    ].map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") :
-      "<dt>Status</dt><dd>" + esc(d.problem || "Preparing…") + "</dd>";
+    renderInstruments(d);
     var running = !!job.running;
     $("jobBar").style.width = (running ? pct(job) : (job.kind ? 100 : 0)) + "%";
     $("jobMsg").textContent = job.kind ? (job.message || "") + (running && job.total ? " · " + job.done + "/" + job.total + " days" : "") +
       (!running && job.finished_ms ? " · " + ago(job.finished_ms) : "") : "";
     $("jobMsg").classList.toggle("down", !!job.error);
-    $("updateNow").disabled = running || !d.ready;
+    $("updateNow").disabled = running || !d.prepared;
     $("stopJob").classList.toggle("hidden", !(running && job.kind === "update"));
 
     var live = d.live || {};
@@ -770,6 +827,59 @@
       return esc(f.label) + ", " + f.days + " days from " + f.first_day + (f.last_tick_ms ? ", last tick " + ago(f.last_tick_ms) : "");
     }).join("; ") + ". Start a <b>Live market</b> session from Sessions, or replay it like history.</p>" : "";
   }
+
+  function gb(bytes) { return bytes >= 1e9 ? (bytes / 1e9).toFixed(1) + " GB" : Math.round(bytes / 1e6) + " MB"; }
+  function hours(sec) { return sec < 3600 ? Math.max(1, Math.round(sec / 60)) + " min" : (sec / 3600).toFixed(1) + " h"; }
+
+  // One row per instrument: what is stored, from which day downloads start
+  // (editable), what is still missing and roughly what it costs.
+  var editingFrom = null;
+  function renderInstruments(d) {
+    var list = d.instruments || [];
+    if (!list.length) { $("instTable").innerHTML = "<tbody><tr><td class='faint'>" + esc(d.problem || "Preparing the market data…") + "</td></tr></tbody>"; return; }
+    if (editingFrom && document.activeElement && document.activeElement.dataset && document.activeElement.dataset.from) return;
+    var job = d.job || {}, per = job.instruments || {};
+    var totalPend = 0, totalBytes = 0, totalSec = 0;
+    var rows = list.map(function (i) {
+      if (i.enabled) { totalPend += i.pending_days; totalBytes += i.pending_bytes; totalSec += i.pending_seconds; }
+      var have = i.days ? i.first_day + " → " + (i.last_tick_ms ? utc(i.last_tick_ms).slice(0, 16) : i.last_day) + "<br><span class='pend'>" + i.days + " days · " + gb(i.size_bytes) + "</span>" :
+        "<span class='faint'>nothing yet</span>";
+      var busy = job.running && job.symbol === i.symbol;
+      var miss = !i.enabled ? "<span class='faint'>off</span>" : i.pending_days ?
+        i.pending_days + " days<br><span class='pend'>≈ " + hours(i.pending_seconds) + " · " + gb(i.pending_bytes) + "</span>" + (busy ? " <span class='badge ok'>now</span>" : "") :
+        "<span class='badge ok'>complete</span>";
+      return "<tr class='" + (i.enabled ? "" : "off") + "'><td><b>" + esc(i.label) + "</b><br><span class='pend mono'>" + esc(i.symbol) + " · " + esc(i.currencies.join(" ")) + " news</span></td>" +
+        "<td class='mono tiny'>" + have + "</td>" +
+        "<td><input type='date' data-from='" + i.symbol + "' value='" + i.from + "' min='2003-01-01' max='" + new Date().toISOString().slice(0, 10) + "' title='Download ticks from this day on'></td>" +
+        "<td class='tiny'>" + miss + "</td>" +
+        "<td><label class='check' title='Download this instrument'><input type='checkbox' data-enabled='" + i.symbol + "'" + (i.enabled ? " checked" : "") + "></label></td></tr>";
+    });
+    $("instTable").innerHTML = "<thead><tr><th>Instrument</th><th>Stored</th><th>From</th><th>Missing</th><th>On</th></tr></thead><tbody>" + rows.join("") + "</tbody>";
+    var disk = d.disk || {};
+    $("diskInfo").innerHTML = "Still to download: " + totalPend + " days, ≈ " + hours(totalSec) + " and " + gb(totalBytes) + " at the datafeed's pace. " +
+      "Disk: " + gb(disk.free_bytes || 0) + " free; downloads stop before it drops under " + gb(disk.min_free_bytes || 0) + ". " +
+      "Dukascopy's tick history goes back to 2003 for the currency pairs; an earlier <b>From</b> fetches more, oldest last.";
+    var cal = d.calendar || {};
+    $("calInfo").innerHTML = cal.ok ? num(cal.events) + " events with a time, " + utc(cal.first_ms).slice(0, 10) + " → " + utc(cal.last_ms).slice(0, 10) +
+      ", rated high, medium or low, read from the fxmacro database (<span class='mono'>" + esc(cal.path) + "</span>). " +
+      "It grows when fxmacro collects the calendar; the simulator only reads it. Each instrument shows its own currencies' events." :
+      "<span class='down'>" + esc(cal.error || "The calendar is not available.") + "</span>";
+  }
+
+  $("instTable").addEventListener("focusin", function (e) { if (e.target.dataset.from) editingFrom = e.target.dataset.from; });
+  $("instTable").addEventListener("change", function (e) {
+    var t = e.target, body = null;
+    if (t.dataset.from) { body = { symbol: t.dataset.from, start: t.value }; editingFrom = null; t.blur(); }
+    if (t.dataset.enabled) body = { symbol: t.dataset.enabled, enabled: t.checked };
+    if (!body) return;
+    fetch("/api/data/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || r.statusText); return j; }); })
+      .then(function () {
+        toast("Saved. " + (body.start ? "Downloads now start from " + body.start + "." : body.enabled ? "Downloading " + body.symbol + "." : body.symbol + " is not downloaded any more; what is stored stays."));
+        fetch("/api/data").then(function (r) { return r.json(); }).then(function (d) { if (!d.job.running && d.prepared) $("updateNow").click(); else pollData(); });
+      })
+      .catch(function (err) { toast(String(err.message || err), "err"); pollData(); });
+  });
 
   function openDataDialog() {
     selectedTerminal = null;
@@ -820,6 +930,7 @@
     C.retheme();
     if (S.book) renderLines(S.book);
     refreshMarkers(true);
+    N.redraw();
   };
 
   // ---------------------------------------------------------------- review mode
@@ -841,8 +952,12 @@
     }).then(function (data) {
       var t = data.trade;
       S.reviewTrade = t;
+      if (data.instrument) setInstrument(data.instrument);
+      S.session = { id: r.sid, hide_dates: !!data.hide_dates };
+      C.setHideDates(!!data.hide_dates);
       setTimeframe(tf);
       C.setHistory(data.bars, data.seconds);
+      N.reload();
       lastBar = data.bars.length ? data.bars[data.bars.length - 1] : null;
       showOhlc(null);
       S.trades = [t];
@@ -860,6 +975,7 @@
       $("reviewTitle").textContent = "Review · trade #" + t.id;
       var hold = Math.round((t.exit_ms - t.entry_ms) / 60000);
       var rows = [
+        ["Instrument", esc(data.instrument ? data.instrument.label : "")],
         ["Side", t.side.toUpperCase() + " " + t.lots.toFixed(2)],
         ["Entry", px(t.entry_price) + " · " + fmtTime(t.entry_ms)],
         ["Exit", px(t.exit_price) + " · " + fmtTime(t.exit_ms)],

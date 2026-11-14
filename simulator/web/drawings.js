@@ -17,7 +17,8 @@
   var HIT = 6;
 
   function uid() { return "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-  function round5(p) { return Math.round(p * 1e5) / 1e5; }
+  var DIGITS = 5;
+  function round5(p) { var f = Math.pow(10, DIGITS); return Math.round(p * f) / f; }
   function clone(d) { return JSON.parse(JSON.stringify(d)); }
 
   function distToSegment(px, py, ax, ay, bx, by) {
@@ -142,7 +143,7 @@
           var y = C.priceToY(d.points[0].price);
           if (y === null) return;
           ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(size.width, y); ctx.stroke();
-          label(ctx, d.points[0].price.toFixed(5), 6, y - 10, color);
+          label(ctx, d.points[0].price.toFixed(DIGITS), 6, y - 10, color);
         } else if (d.kind === "trend") {
           if (d.points.length < 2) return;
           var a = xy(d.points[0]), b = xy(d.points[1]);
@@ -169,8 +170,8 @@
           var e = d.points[0].price, s = d.points[1].price, t = d.points[2].price;
           var riskPips = Math.abs(e - s) / pip, rewardPips = Math.abs(t - e) / pip;
           var rr = riskPips ? rewardPips / riskPips : 0;
-          label(ctx, "Target " + t.toFixed(5) + "  +" + rewardPips.toFixed(1) + " pips", g.x0 + 2, g.yt + (g.long ? -10 : 10), T.up);
-          label(ctx, "Stop " + s.toFixed(5) + "  -" + riskPips.toFixed(1) + " pips", g.x0 + 2, g.ys + (g.long ? 10 : -10), T.down);
+          label(ctx, "Target " + t.toFixed(DIGITS) + "  +" + rewardPips.toFixed(1) + " pips", g.x0 + 2, g.yt + (g.long ? -10 : 10), T.up);
+          label(ctx, "Stop " + s.toFixed(DIGITS) + "  -" + riskPips.toFixed(1) + " pips", g.x0 + 2, g.ys + (g.long ? 10 : -10), T.down);
           label(ctx, (g.long ? "Long" : "Short") + "  R:R " + rr.toFixed(2), g.x0 + 2, g.ye + (g.long ? 10 : -10), T.text);
         }
         if (isSel) {
@@ -315,7 +316,11 @@
       if ((e.key === "Delete" || e.key === "Backspace") && selectedId) { e.preventDefault(); deleteSelected(); }
     });
 
+    // Prices round to the instrument's digits; position boxes count its pips.
+    function setInstrument(inst) { DIGITS = inst.digits; pip = inst.pip; redraw(); }
+
     return {
+      setInstrument: setInstrument,
       setTool: setTool,
       tool: function () { return tool; },
       setAll: setAll,

@@ -1,10 +1,11 @@
-"""New ticks from the Dukascopy datafeed, after the Layer 0 file ends.
+"""Ticks from the Dukascopy datafeed, for every instrument.
 
-The same source as the 2023-2024 file (trading-research downloaded it from
-here), so new days match old ones: Bid and Ask, millisecond timestamps, UTC.
-One LZMA file per instrument-hour, published a few minutes after the hour
-closes. Measured on 13 Nov 2026: at 08:16 UTC the 07:00-08:00 file was
-there, ticks to 07:59:59.
+The same source as the 2023-2024 EUR/USD file (trading-research downloaded
+it from here), so new days match old ones: Bid and Ask, millisecond
+timestamps, UTC. One LZMA file per instrument-hour, published a few minutes
+after the hour closes. Measured on 13 Nov 2026: at 08:16 UTC the 07:00-08:00
+file was there, ticks to 07:59:59. Prices are integers scaled by 10**digits
+of the instrument (1e5 for EUR/USD, 1e3 for the yen pairs, silver and oil).
 
 `update()` fetches every missing hour up to the last published one, cleans
 each day with Layer 0's rules (`quality.flag_day`), and writes it into the
@@ -203,6 +204,8 @@ def update(
     symbol: str = config.SYMBOL,
     *,
     start_day: date | None = None,
+    days: list[date] | None = None,
+    scale: int | None = None,
     now: int | None = None,
     max_days: int | None = None,
     fetch=None,
@@ -211,26 +214,32 @@ def update(
 ) -> dict:
     """Fetch every missing hour up to the last published one.
 
-    With `max_days`, only the first that many pending days, so a caller can
-    rebuild candles between chunks of a long catch-up. Returns a summary;
-    `first_changed` is the earliest day written, from which candles must be
-    rebuilt, and `remaining` how many pending days are left.
+    `symbol` is the datafeed's code (LIGHTCMDUSD for WTI) and `scale` its
+    points per unit. With `days`, exactly those days; otherwise every
+    pending day from `start_day`, or with `max_days` only the first that
+    many, so a caller can rebuild candles between chunks of a long
+    catch-up. Returns a summary; `changed` lists the days written, whose
+    candles must be rebuilt, and `remaining` how many pending days are left.
     """
-    store = FeedStore(feed_dir)
+    scale = int(scale or point_scale(symbol))
+    store = FeedStore(feed_dir, scale=scale)
     fetch = fetch or Fetcher()
     now = now if now is not None else now_ns()
-    scale = point_scale(symbol)
     progress = progress or (lambda **kw: None)
     last_hour = last_published_hour(now)
 
     with store.lock:
         manifest = store.manifest()
     entries = manifest["days"]
-    all_days = pending_days(feed_dir, start_day=start_day, now=now)
-    days = all_days[:max_days] if max_days else all_days
+    if days is None:
+        all_days = pending_days(feed_dir, start_day=start_day, now=now)
+        days = all_days[:max_days] if max_days else all_days
+        remaining = len(all_days) - len(days)
+    else:
+        remaining = 0
 
-    summary = {"days": 0, "ticks": 0, "first_changed": None, "failed_hours": 0, "last_ns": None,
-               "up_to_ns": last_hour + HOUR_NS, "stopped": False, "remaining": len(all_days) - len(days),
+    summary = {"days": 0, "ticks": 0, "first_changed": None, "changed": [], "failed_hours": 0, "last_ns": None,
+               "up_to_ns": last_hour + HOUR_NS, "stopped": False, "remaining": remaining,
                "through": None}
     if not days:
         return summary
@@ -286,13 +295,16 @@ def update(
                 )
                 manifest["days"] = dict(sorted(manifest["days"].items()))
                 manifest.setdefault("symbol", symbol)
+                manifest["scale"] = scale
+                manifest["layout"] = 2
                 store.save_manifest(manifest)
                 entries = manifest["days"]
             summary["days"] += 1
             summary["ticks"] += added
+            summary["changed"].append(day)
             if len(ts):
-                summary["last_ns"] = int(ts[-1])
-            if summary["first_changed"] is None:
+                summary["last_ns"] = max(summary["last_ns"] or 0, int(ts[-1]))
+            if summary["first_changed"] is None or day < summary["first_changed"]:
                 summary["first_changed"] = day
     progress(day=days[-1], done=len(days), total=len(days))
     return summary

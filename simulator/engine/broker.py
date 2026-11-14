@@ -23,16 +23,25 @@ What tick data cannot show: the trader's own effect on price, a limit order's
 place in the queue, and broker-specific slippage. A limit that price only
 touches is filled here; a real one may not be. Results lean optimistic.
 
-Money is EUR/USD in a USD account: profit = price change x lots x 100,000, so
-one pip (0.0001) is 10 USD per lot. Amounts are rounded to the cent when
-realised, so a trade's profit matches a hand calculation exactly.
+Money is a USD account. Profit = price change x lots x contract size, in the
+instrument's quote currency, converted to USD:
+
+    quote USD (EUR/USD, silver, oil)   as is: one EUR/USD pip is 10 USD a lot
+    base USD (USD/JPY)                 divided by the price at that moment
+    other (EUR/JPY, GBP/JPY, EUR/GBP)  times the USD rate of the quote
+                                       currency, from USD/JPY or GBP/USD at
+                                       that moment (`rate_fn`)
+
+Margin is the position's value in USD over the leverage. Amounts are
+rounded to the cent when realised, so a trade's profit matches a hand
+calculation exactly.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -123,6 +132,10 @@ class Broker:
     slippage_pips: float = 0.0  # adverse, on market and stop fills only
     pip: float = config.PIP
     contract_size: float = config.CONTRACT_SIZE
+    symbol: str = config.SYMBOL
+    digits: int = 5
+    base_ccy: str = "EUR"
+    quote_ccy: str = "USD"
 
     starting_balance: float = field(default=0.0)
     pending: list[Order] = field(default_factory=list)
@@ -134,6 +147,16 @@ class Broker:
     next_position_id: int = 1
     next_trade_id: int = 1
     events: list[dict] = field(default_factory=list)
+    #: USD per unit of the quote currency at a time (ns), from another
+    #: instrument's prices up to that time. Needed only when neither side of
+    #: the instrument is USD; set by whoever builds the broker.
+    rate_fn: Callable[[int], float | None] | None = field(default=None, repr=False, compare=False)
+    last_rate: float | None = None
+
+    @classmethod
+    def for_instrument(cls, inst, **kw) -> "Broker":
+        return cls(pip=inst.pip, contract_size=inst.contract, symbol=inst.symbol, digits=inst.digits,
+                   base_ccy=inst.base, quote_ccy=inst.quote, **kw)
 
     def __post_init__(self) -> None:
         if not self.starting_balance:
@@ -147,18 +170,43 @@ class Broker:
 
     # -- derived numbers ---------------------------------------------------
 
+    def usd_per_quote(self, price: float | None = None, ns: int | None = None) -> float:
+        """USD value of one unit of the quote (profit) currency."""
+        if self.quote_ccy == "USD":
+            return 1.0
+        if self.base_ccy == "USD":
+            if price is None:
+                price = (self.bid + self.ask) / 2 if self.bid is not None and self.ask is not None else None
+            if price:
+                return 1.0 / price
+        rate = None
+        if self.rate_fn is not None:
+            rate = self.rate_fn(ns if ns is not None else (self.quote_ns or 0))
+        if rate is None:
+            rate = self.last_rate
+        if rate is None:
+            raise OrderError(f"No {self.quote_ccy} to USD rate yet: the instrument that converts it is still downloading")
+        self.last_rate = rate
+        return rate
+
     @property
     def pip_value(self) -> float:
-        """USD per pip per lot: 10 for EUR/USD."""
-        return self.pip * self.contract_size
+        """USD per pip per lot at the current price: 10 for EUR/USD."""
+        return self.pip * self.contract_size * self.usd_per_quote()
 
     @property
     def _slip(self) -> float:
         return self.slippage_pips * self.pip
 
-    def _gross(self, side: str, entry: float, exit_: float, lots: float) -> float:
+    def _gross(self, side: str, entry: float, exit_: float, lots: float, ns: int | None = None) -> float:
         move = exit_ - entry if side == BUY else entry - exit_
-        return move * lots * self.contract_size
+        return move * lots * self.contract_size * self.usd_per_quote(exit_, ns)
+
+    def _margin(self, lots: float, price: float) -> float:
+        """USD set aside for `lots` at `price`."""
+        if self.base_ccy == "USD":
+            return lots * self.contract_size / self.leverage
+        return lots * self.contract_size * price * self.usd_per_quote(price) / self.leverage
 
     def unrealized(self) -> float:
         if self.bid is None:
@@ -173,12 +221,21 @@ class Broker:
         return self.balance + self.unrealized()
 
     def used_margin(self) -> float:
-        return sum(p.lots * self.contract_size * p.entry_price / self.leverage for p in self.positions)
+        return sum(self._margin(p.lots, p.entry_price) for p in self.positions)
 
     def account(self) -> dict:
         equity = self.equity()
         used = self.used_margin()
+        try:
+            pip_value = round(self.pip_value, 4) if self.bid is not None else None
+        except OrderError:
+            pip_value = None
         return {
+            "symbol": self.symbol,
+            "pip": self.pip,
+            "contract_size": self.contract_size,
+            "quote_ccy": self.quote_ccy,
+            "pip_value": pip_value,
             "balance": round(self.balance, 2),
             "equity": round(equity, 2),
             "unrealized": round(equity - self.balance, 2),
@@ -254,7 +311,7 @@ class Broker:
         if lots > MAX_LOTS:
             raise OrderError(f"Size {lots} is above the maximum of {MAX_LOTS:g} lots")
         # Early refusal; the binding check is at fill, when margin may differ.
-        required = lots * self.contract_size * ref / self.leverage
+        required = self._margin(lots, ref)
         free = self.equity() - self.used_margin()
         if required > free:
             raise OrderError(
@@ -455,7 +512,7 @@ class Broker:
 
     def _open(self, order: Order, fill: float, ts: int) -> Position | None:
         fill = round(fill, PRICE_DIGITS)
-        required = order.lots * self.contract_size * fill / self.leverage
+        required = self._margin(order.lots, fill)
         free = self.equity() - self.used_margin()
         if required > free:
             order.status = "rejected"
@@ -485,11 +542,12 @@ class Broker:
 
     def _close(self, pos: Position, exit_price: float, ts: int, reason: str) -> Trade:
         exit_price = round(exit_price, PRICE_DIGITS)
-        gross = round(self._gross(pos.side, pos.entry_price, exit_price, pos.lots), 2)
+        gross = round(self._gross(pos.side, pos.entry_price, exit_price, pos.lots, ts), 2)
         net = round(gross - pos.commission, 2)
         risk = None
         if pos.initial_sl is not None:
-            risk = round(abs(pos.entry_price - pos.initial_sl) * pos.lots * self.contract_size, 2)
+            risk = round(abs(pos.entry_price - pos.initial_sl) * pos.lots * self.contract_size
+                         * self.usd_per_quote(exit_price, ts), 2)
         sign = 1 if pos.side == BUY else -1
         trade = Trade(
             id=self.next_trade_id,
@@ -520,13 +578,13 @@ class Broker:
 
     def _check_entry_side(self, side: str, type: str, price: float) -> None:
         if side == BUY and type == LIMIT and not price < self.ask:
-            raise OrderError(f"A buy limit must be below the Ask ({self.ask:.5f})")
+            raise OrderError(f"A buy limit must be below the Ask ({self.ask:.{self.digits}f})")
         if side == BUY and type == STOP and not price > self.ask:
-            raise OrderError(f"A buy stop must be above the Ask ({self.ask:.5f})")
+            raise OrderError(f"A buy stop must be above the Ask ({self.ask:.{self.digits}f})")
         if side == SELL and type == LIMIT and not price > self.bid:
-            raise OrderError(f"A sell limit must be above the Bid ({self.bid:.5f})")
+            raise OrderError(f"A sell limit must be above the Bid ({self.bid:.{self.digits}f})")
         if side == SELL and type == STOP and not price < self.bid:
-            raise OrderError(f"A sell stop must be below the Bid ({self.bid:.5f})")
+            raise OrderError(f"A sell stop must be below the Bid ({self.bid:.{self.digits}f})")
 
     def _check_brackets(self, side: str, type: str, ref: float, sl, tp) -> None:
         """Stop loss and take profit must sit on the losing and winning side."""
@@ -582,16 +640,31 @@ class Broker:
             "next_order_id": self.next_order_id,
             "next_position_id": self.next_position_id,
             "next_trade_id": self.next_trade_id,
+            "symbol": self.symbol,
+            "pip": self.pip,
+            "contract_size": self.contract_size,
+            "digits": self.digits,
+            "base_ccy": self.base_ccy,
+            "quote_ccy": self.quote_ccy,
+            "last_rate": self.last_rate,
         }
 
     @classmethod
     def from_state(cls, state: dict) -> "Broker":
+        # Sessions saved before there was more than one instrument are EUR/USD.
         broker = cls(
             balance=state["balance"],
             leverage=state["leverage"],
             commission_per_lot=state["commission_per_lot"],
             slippage_pips=state["slippage_pips"],
             starting_balance=state["starting_balance"],
+            pip=state.get("pip", config.PIP),
+            contract_size=state.get("contract_size", config.CONTRACT_SIZE),
+            symbol=state.get("symbol", config.SYMBOL),
+            digits=state.get("digits", 5),
+            base_ccy=state.get("base_ccy", "EUR"),
+            quote_ccy=state.get("quote_ccy", "USD"),
+            last_rate=state.get("last_rate"),
         )
         broker.pending = [Order(**o) for o in state["pending"]]
         broker.positions = [Position(**p) for p in state["positions"]]

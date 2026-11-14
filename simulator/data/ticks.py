@@ -1,10 +1,22 @@
 """Tick storage, one UTC day per file (guide step 1).
 
 A feed directory holds `ticks/YYYY-MM-DD.parquet` with every tick of the day
-(`ts`, `bid`, `ask`, `flag`) and a `manifest.json` describing each day: where
-it came from, how many ticks, whether it is complete. Quality flags are
-stored, not applied; `KEEP_FLAGS` filters when a day is read, so changing it
-never means fetching anything again.
+and a `manifest.json` describing each day: where it came from, how many
+ticks, whether it is complete. Quality flags are stored, not applied;
+`KEEP_FLAGS` filters when a day is read, so changing it never means fetching
+anything again.
+
+The file layout is compact, because nine instruments over years add up:
+`ms` (int64 milliseconds), `bid` (int32 points), `spr` (int32 points, Ask -
+Bid) and `flag` (int8), the integers delta-encoded and zstd-compressed, with
+the points-per-unit scale in the file's metadata. That is about 2.1 bytes a
+tick against 10 for float columns. Every source quotes whole points and
+whole milliseconds, so nothing is lost, and a price read back is the double
+nearest its decimal, which is the same double a typed-in stop of that price
+becomes. (Some 2023 days of the Layer 0 file hold prices one unit in the
+last place off, from float arithmetic; stored as points they compare equal
+to the level they stand for.) Files in the first layout (`ts`, `bid`, `ask`
+as floats) are still read, and `migrate_feed` rewrites them.
 
 The Dukascopy feed is filled from two places: the Layer 0 file of
 trading-research (2023-2024, imported once by `import_layer0`) and the
@@ -90,10 +102,24 @@ def ts_to_ns(column: pa.ChunkedArray | pa.Array) -> np.ndarray:
     return raw.to_numpy(zero_copy_only=False).astype(np.int64) * _UNIT_NS[column.type.unit]
 
 
-def _atomic_write_table(table: pa.Table, path: Path) -> None:
+def _atomic_write_table(table: pa.Table, path: Path, **options) -> None:
     tmp = path.with_suffix(".tmp")
-    pq.write_table(table, tmp, compression="zstd")
+    pq.write_table(table, tmp, compression="zstd", **options)
     os.replace(tmp, path)
+
+
+#: Delta encoding suits ticks: times, prices and spreads move in small steps.
+_ENCODING = {"ms": "DELTA_BINARY_PACKED", "bid": "DELTA_BINARY_PACKED", "spr": "DELTA_BINARY_PACKED", "flag": "PLAIN"}
+
+
+def infer_scale(*prices: np.ndarray, max_digits: int = 6) -> int:
+    """Smallest 10**d at which every price is a whole number of points."""
+    joined = np.concatenate([np.asarray(p, np.float64).ravel() for p in prices]) if prices else np.empty(0)
+    for d in range(max_digits + 1):
+        scaled = joined * 10**d
+        if np.all(np.abs(scaled - np.round(scaled)) < 1e-6):
+            return 10**d
+    return 10**max_digits
 
 
 def _atomic_write_json(data: dict, path: Path) -> None:
@@ -103,13 +129,18 @@ def _atomic_write_json(data: dict, path: Path) -> None:
 
 
 class FeedStore:
-    """Read and write one feed directory: day files plus the manifest."""
+    """Read and write one feed directory: day files plus the manifest.
 
-    def __init__(self, feed_dir: Path) -> None:
+    `scale` is points per price unit (10**digits). Without one, the
+    manifest's is used, and failing that it is read off the prices.
+    """
+
+    def __init__(self, feed_dir: Path, scale: int | None = None) -> None:
         self.dir = Path(feed_dir)
         self.ticks_dir = self.dir / "ticks"
         self.manifest_path = self.dir / "manifest.json"
         self.lock = threading.Lock()
+        self.scale = int(scale) if scale else None
 
     def exists(self) -> bool:
         return self.manifest_path.exists()
@@ -127,17 +158,29 @@ class FeedStore:
     def day_path(self, day: date) -> Path:
         return self.ticks_dir / f"{day.isoformat()}.parquet"
 
+    def _scale_for(self, bid: np.ndarray, ask: np.ndarray) -> int:
+        if self.scale is None:
+            self.scale = int(self.manifest().get("scale") or 0) or None
+        return self.scale or infer_scale(bid, ask)
+
     def write_day(self, day: date, ts: np.ndarray, bid: np.ndarray, ask: np.ndarray, flag: np.ndarray) -> None:
         self.ticks_dir.mkdir(parents=True, exist_ok=True)
+        ts = np.asarray(ts, np.int64)
+        bid = np.asarray(bid, np.float64)
+        ask = np.asarray(ask, np.float64)
+        scale = self._scale_for(bid, ask)
+        bid_pts = np.round(bid * scale).astype(np.int64)
+        spr_pts = np.round(ask * scale).astype(np.int64) - bid_pts
         table = pa.table(
             {
-                "ts": pa.array(np.asarray(ts, np.int64).view("datetime64[ns]"), pa.timestamp("ns", tz="UTC")),
-                "bid": np.asarray(bid, np.float64),
-                "ask": np.asarray(ask, np.float64),
+                "ms": ts // 1_000_000,
+                "bid": bid_pts.astype(np.int32),
+                "spr": spr_pts.astype(np.int32),
                 "flag": np.asarray(flag, np.int8),
-            }
+            },
+            metadata={"scale": str(scale), "layout": "2"},
         )
-        _atomic_write_table(table, self.day_path(day))
+        _atomic_write_table(table, self.day_path(day), use_dictionary=False, column_encoding=_ENCODING)
 
     def read_day(self, day: date) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Every stored tick of the day, flags included."""
@@ -146,12 +189,24 @@ class FeedStore:
             e = np.empty(0)
             return e.astype(np.int64), e, e, e.astype(np.int8)
         t = pq.read_table(path)
-        return (
-            ts_to_ns(t.column("ts")),
-            t.column("bid").to_numpy().astype(np.float64),
-            t.column("ask").to_numpy().astype(np.float64),
-            t.column("flag").to_numpy().astype(np.int8),
-        )
+        flag = t.column("flag").to_numpy().astype(np.int8)
+        if "ms" not in t.column_names:  # first layout: float columns
+            return (
+                ts_to_ns(t.column("ts")),
+                t.column("bid").to_numpy().astype(np.float64),
+                t.column("ask").to_numpy().astype(np.float64),
+                flag,
+            )
+        scale = float(t.schema.metadata[b"scale"])
+        bid_pts = t.column("bid").to_numpy().astype(np.int64)
+        ask_pts = bid_pts + t.column("spr").to_numpy().astype(np.int64)
+        return t.column("ms").to_numpy().astype(np.int64) * 1_000_000, bid_pts / scale, ask_pts / scale, flag
+
+    def day_files(self) -> list[Path]:
+        return sorted(self.ticks_dir.glob("*.parquet")) if self.ticks_dir.exists() else []
+
+    def size_bytes(self) -> int:
+        return sum(p.stat().st_size for p in self.day_files())
 
 
 def day_entry(source: str, ts: np.ndarray, flag: np.ndarray, **extra) -> dict:
@@ -181,6 +236,7 @@ class ParquetTickSource:
         keep_flags: Iterable[int] = config.KEEP_FLAGS,
         memory_days: int = 8,
     ) -> None:
+        self.dir = Path(feed_dir)
         self.store = FeedStore(feed_dir)
         self.keep_flags = tuple(sorted(set(keep_flags)))
         self._keep = np.zeros(256, bool)
@@ -251,7 +307,7 @@ def import_layer0(
     alone; days from a previous import are replaced.
     """
     tick_file = Path(tick_file)
-    store = FeedStore(feed_dir)
+    store = FeedStore(feed_dir, scale=10**5)
     manifest = store.manifest()
     source = pq.ParquetFile(tick_file)
     flag_counts: dict[int, int] = {}
@@ -300,6 +356,8 @@ def import_layer0(
     stat = tick_file.stat()
     manifest = store.manifest()  # re-read: an update may have run meanwhile
     manifest["symbol"] = config.SYMBOL
+    manifest["scale"] = 10**5
+    manifest["layout"] = 2
     manifest["layer0"] = {
         "source": str(tick_file),
         "size": stat.st_size,
@@ -312,6 +370,39 @@ def import_layer0(
     manifest["days"] = dict(sorted(manifest["days"].items()))
     store.save_manifest(manifest)
     return manifest
+
+
+def migrate_feed(feed_dir: Path, scale: int | None = None, progress=None, stop=None) -> int:
+    """Rewrite day files still in the first layout into the compact one.
+
+    One file at a time, each replaced atomically, so stopping half way
+    leaves a feed that reads correctly and finishes next time. Without a
+    scale (a recorded broker feed), each day's is read off its prices.
+    Returns how many files were rewritten.
+    """
+    store = FeedStore(feed_dir, scale=scale)
+    old = [p for p in store.day_files() if "ms" not in pq.read_schema(p).names]
+    for n, path in enumerate(old, 1):
+        if stop is not None and stop.is_set():
+            return n - 1
+        day = date.fromisoformat(path.stem)
+        with store.lock:
+            store.write_day(day, *store.read_day(day))
+        if progress:
+            progress(n, len(old))
+    if store.exists():
+        with store.lock:
+            manifest = store.manifest()
+            if scale:
+                manifest["scale"] = scale
+            manifest["layout"] = 2
+            store.save_manifest(manifest)
+    return len(old)
+
+
+def needs_migration(feed_dir: Path) -> bool:
+    store = FeedStore(feed_dir)
+    return store.exists() and store.manifest().get("layout") != 2 and bool(store.day_files())
 
 
 class MemoryTickSource:

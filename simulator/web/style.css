@@ -290,3 +290,58 @@ svg.curve { width: 100%; height: 220px; display: block; }
   .grid2 { grid-template-columns: 1fr; }
   .side { grid-column: 1 / -1; border-left: none; border-top: 1px solid var(--border); }
 }
+
+/* ---------- economic calendar on the chart ---------- */
+
+.imp { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; flex: none; border: 1px solid transparent; }
+.imp3 { background: #e5484d; }
+.imp2 { background: #f2b705; }
+.imp1 { background: #ececec; border-color: #ffffff; }
+:root[data-theme="light"] .imp1 { background: #ffffff; border-color: #8a8a8a; }
+.newsfilter {
+  position: absolute; left: 12px; top: 32px; z-index: 5; display: flex; gap: 4px; align-items: center;
+  font-size: 11px;
+}
+.newsfilter > span { margin-right: 2px; }
+.newsfilter button { padding: 1px 7px; font-size: 11px; border-radius: 999px; display: inline-flex; align-items: center; opacity: .55; }
+.newsfilter button.on { opacity: 1; background: var(--surface-2); border-color: var(--border-2); }
+.newstip, .newspop {
+  position: absolute; z-index: 7; background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow); font-size: 12px;
+}
+.newstip { padding: 6px 9px; pointer-events: none; max-width: 340px; display: flex; flex-direction: column; gap: 2px; }
+.newspop { width: min(440px, calc(100% - 24px)); max-height: calc(100% - 20px); overflow: auto; padding: 12px 14px 10px; }
+.newspop .nclose { position: absolute; right: 6px; top: 4px; font-size: 18px; line-height: 1; padding: 2px 8px; }
+.ntabs { display: flex; flex-direction: column; gap: 3px; margin: 0 26px 10px 0; }
+.ntabs button { text-align: left; font-size: 11px; padding: 3px 8px; display: flex; align-items: center; white-space: normal; }
+.nhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-right: 24px; }
+.nhead h4 { margin: 0; font-size: 14px; }
+.nccy { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--surface-3); }
+.nbadge { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-2); }
+.imp-b3 { color: #e5484d; border-color: #e5484d; }
+.imp-b2 { color: #c99400; border-color: #f2b705; }
+.imp-b1 { color: var(--muted); }
+.nwhen { margin: 4px 0 10px; color: var(--muted); }
+.ngrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.ncell { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; }
+.nk { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+.nv { font-size: 15px; }
+.nsurp { display: inline-block; margin-top: 6px; font-size: 11px; color: var(--muted); }
+.nsec { margin-top: 12px; }
+.nlist { margin: 4px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.nlist li { display: flex; align-items: center; gap: 4px; }
+.ntable { margin-top: 4px; }
+.ntable td, .ntable th { padding: 3px 6px; }
+.nmeta { margin-top: 12px; grid-template-columns: auto 1fr; }
+.nmeta dd { text-align: left; font-family: var(--sans); }
+.nfoot { margin: 10px 0 0; }
+
+/* ---------- instruments in the data panel ---------- */
+
+#dataDlg { width: min(860px, calc(100vw - 32px)); }
+.insttable td { vertical-align: middle; }
+.insttable input[type="date"] { padding: 2px 6px; font-size: 12px; }
+.insttable .pend { color: var(--muted); font-size: 11px; }
+.insttable tr.off td:not(:first-child):not(:last-child) { opacity: .5; }
+.insttable .bar { height: 4px; background: var(--surface-3); border-radius: 999px; overflow: hidden; margin-top: 3px; width: 90px; }
+.insttable .bar > div { height: 100%; background: var(--accent); }

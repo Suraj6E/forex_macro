@@ -10,7 +10,8 @@
  *   setQuote(quote)               the Ask line (the series shows the Bid)
  *   setLines(lines)               order / position lines, some draggable
  *   setMarkers(markers)           arrows for entries and exits
- *   attachOverlay(drawFn)         canvas callback used by drawings.js
+ *   setInstrument(inst)           price precision of the instrument
+ *   attachOverlay(drawFn)         canvas callback (drawings.js, news.js)
  *   screenshot()                  PNG data URL of the chart
  *
  * plus the coordinate helpers drawings need: time <-> x and price <-> y,
@@ -65,17 +66,43 @@
         tickMarkFormatter: tickLabel
       },
       crosshair: { mode: LWC.CrosshairMode.Normal },
-      localization: { timeFormatter: timeLabel, priceFormatter: function (p) { return p.toFixed(5); } }
+      localization: { timeFormatter: timeLabel, priceFormatter: function (p) { return p.toFixed(digits); } }
     });
+    var digits = 5;
 
     var series = chart.addCandlestickSeries({
       upColor: t.up, downColor: t.down, borderUpColor: t.up, borderDownColor: t.down,
       wickUpColor: t.up, wickDownColor: t.down,
       priceFormat: { type: "price", precision: 5, minMove: 0.00001 }
     });
+    // Candles keep the top 78% of the pane; tick volume sits in the bottom
+    // 18% on its own hidden scale, so the two never overlap.
+    series.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.22 } });
+    var volume = chart.addHistogramSeries({
+      priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false
+    });
+    chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 }, visible: false });
+
+    function hexA(hex, a) {
+      var h = (hex || "#888").replace("#", "");
+      if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+      return "rgba(" + parseInt(h.slice(0, 2), 16) + "," + parseInt(h.slice(2, 4), 16) + "," + parseInt(h.slice(4, 6), 16) + "," + a + ")";
+    }
+    var volColors = { up: hexA(t.up, 0.35), down: hexA(t.down, 0.35) };
+    function volBar(b) {
+      return { time: b.time, value: b.volume || 0, color: b.close >= b.open ? volColors.up : volColors.down };
+    }
+
+    function setInstrument(inst) {
+      digits = inst.digits;
+      var step = Math.pow(10, -digits);
+      series.applyOptions({ priceFormat: { type: "price", precision: digits, minMove: step } });
+      chart.applyOptions({ localization: { timeFormatter: timeLabel, priceFormatter: function (p) { return p.toFixed(digits); } } });
+    }
 
     var times = [];      // candle start times on the chart, ascending
     var data = [];       // the candles themselves, same order
+    var vols = [];       // tick volume per candle, same order
     var tfSeconds = 900;
     var askLine = null;
     var lines = {};      // id -> {spec, line}
@@ -88,9 +115,11 @@
     function setHistory(bars, seconds) {
       tfSeconds = seconds || tfSeconds;
       data = bars.map(strip);
+      vols = bars.map(volBar);
       times = data.map(function (b) { return b.time; });
       series.setData(data);
-      if (overlay) overlay.request();
+      volume.setData(vols);
+      requestOverlays();
     }
 
     function updateBars(bars) {
@@ -98,9 +127,11 @@
         var b = bars[i];
         var last = times.length ? times[times.length - 1] : -Infinity;
         if (b.time < last) continue; // never rewrite the past
-        var c = strip(b);
+        var c = strip(b), v = volBar(b);
         series.update(c);
-        if (b.time > last) { times.push(b.time); data.push(c); } else data[data.length - 1] = c;
+        volume.update(v);
+        if (b.time > last) { times.push(b.time); data.push(c); vols.push(v); }
+        else { data[data.length - 1] = c; vols[vols.length - 1] = v; }
       }
     }
 
@@ -111,8 +142,10 @@
       if (!older.length) return 0;
       var range = chart.timeScale().getVisibleLogicalRange();
       data = older.map(strip).concat(data);
+      vols = older.map(volBar).concat(vols);
       times = data.map(function (b) { return b.time; });
       series.setData(data);
+      volume.setData(vols);
       if (range) chart.timeScale().setVisibleLogicalRange({ from: range.from + older.length, to: range.to + older.length });
       return older.length;
     }
@@ -280,11 +313,14 @@
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
 
-    function addPointerHandler(h) { dragHandlers.push(h); }
+    // `first`: asked before the others (the news dots, which are small
+    // targets that should win over a drawing underneath them).
+    function addPointerHandler(h, first) { if (first) dragHandlers.unshift(h); else dragHandlers.push(h); }
 
-    // ---- overlay primitive (drawings) ----
+    // ---- overlay primitives (drawings, news) ----
 
-    var overlay = null;
+    var overlays = [];
+    function requestOverlays() { overlays.forEach(function (o) { o.request(); }); }
     function attachOverlay(drawFn) {
       var requestUpdate = function () {};
       var renderer = {
@@ -299,7 +335,8 @@
         updateAllViews: function () {},
         paneViews: function () { return [view]; }
       });
-      overlay = { request: function () { requestUpdate(); } };
+      var overlay = { request: function () { requestUpdate(); } };
+      overlays.push(overlay);
       return overlay;
     }
 
@@ -315,8 +352,11 @@
       });
       series.applyOptions({ upColor: n.up, downColor: n.down, borderUpColor: n.up, borderDownColor: n.down,
         wickUpColor: n.up, wickDownColor: n.down });
+      volColors = { up: hexA(n.up, 0.35), down: hexA(n.down, 0.35) };
+      vols = data.map(function (c, i) { return { time: c.time, value: vols[i] ? vols[i].value : 0, color: c.close >= c.open ? volColors.up : volColors.down }; });
+      volume.setData(vols);
       if (askLine) askLine.applyOptions({ color: n.faint });
-      if (overlay) overlay.request();
+      requestOverlays();
     }
 
     function setHideDates(on) {
@@ -327,6 +367,10 @@
     return {
       chart: chart,
       series: series,
+      volume: volume,
+      setInstrument: setInstrument,
+      requestOverlays: requestOverlays,
+      timeToLogical: timeToLogical,
       setHistory: setHistory,
       updateBars: updateBars,
       prependBars: prependBars,

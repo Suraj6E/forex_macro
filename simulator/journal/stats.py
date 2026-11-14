@@ -125,4 +125,9 @@ def compute(trades: list[dict], starting_balance: float | None = None) -> dict:
     for t in trades:
         reasons.setdefault(t["exit_reason"], []).append(t)
     out["by_exit"] = [{"label": k, **_summary(g)} for k, g in sorted(reasons.items())]
+
+    symbols: dict[str, list[dict]] = {}
+    for t in trades:
+        symbols.setdefault(t.get("symbol") or "EURUSD", []).append(t)
+    out["by_instrument"] = [{"label": k, **_summary(g)} for k, g in sorted(symbols.items())]
     return out
