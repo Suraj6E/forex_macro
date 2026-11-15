@@ -15,11 +15,14 @@ never left with a silent hole.
 
 The feed rate-limits: under load it answers HTTP 429, resets connections or
 stops accepting connections altogether for hours. Requests are paced at
-about one a second across all workers, and when the feed stops answering
-every worker pauses together, 2 s doubling to 15 minutes, until it answers
-again. (At three a second, two days of catch-up on 14-15 Nov 2026 ended with
-the datafeed refusing connections from this machine while its website still
-answered.)
+about one a second across all workers. When the feed stops answering, every
+worker pauses together, 2 s doubling to 15 minutes, and the pace slows,
+halving on each refusal down to one request in 8 s and recovering a little
+with each answer. After 20 minutes without any answer the update stops and
+says so; the app tries again later. (At three a second, two days of
+catch-up on 14-15 Nov 2026 ended with the datafeed refusing connections from
+this machine for hours while its website still answered; on 15 Nov it
+answered now and then, a day every 20 minutes or so.)
 """
 
 from __future__ import annotations
@@ -57,6 +60,11 @@ MAX_PAUSE_SECONDS = 900.0
 #: Steady pace across all workers: about one request a second. A year of
 #: one instrument is ~6,000 hour files, so about two hours.
 MIN_INTERVAL_SECONDS = 1.0
+#: The slowest pace after refusals, and how fast it recovers per answer.
+MAX_INTERVAL_SECONDS = 8.0
+RECOVER_FACTOR = 0.9
+#: With no answer at all for this long, the update gives up for now.
+GIVE_UP_SECONDS = 20 * 60.0
 
 
 def point_scale(symbol: str) -> float:
@@ -87,6 +95,10 @@ def decode(payload: bytes, hour_ns: int, scale: float = 100_000.0) -> tuple[np.n
     return ts, bid, ask
 
 
+class Unreachable(Exception):
+    """The feed has not answered for `GIVE_UP_SECONDS`."""
+
+
 class Stopped(Exception):
     """The update was asked to stop while waiting."""
 
@@ -96,17 +108,23 @@ class Fetcher:
     for a 404.
 
     When the feed stops answering (timeouts, resets, 429, 5xx), all workers
-    pause together, 2 s doubling to 2 minutes, instead of each retrying on
-    its own and keeping the pressure on. One answer resets the pause.
-    `on_wait(seconds)` is told whenever a pause starts.
+    pause together, 2 s doubling to 15 minutes, instead of each retrying on
+    its own and keeping the pressure on, and the steady pace slows. One
+    answer resets the pause; the pace recovers gradually. `on_wait(seconds)`
+    is told whenever a pause starts. Raises Unreachable once nothing has
+    answered for `give_up` seconds.
     """
 
-    def __init__(self, stop: threading.Event | None = None, on_wait=None) -> None:
+    def __init__(self, stop: threading.Event | None = None, on_wait=None, give_up: float = GIVE_UP_SECONDS) -> None:
         self._local = threading.local()
         self._lock = threading.Lock()
         self.cool_until = 0.0
         self._penalty = 0.0
         self._next_slot = 0.0
+        self.interval = MIN_INTERVAL_SECONDS
+        self.last_answer = time.time()
+        self.give_up = give_up
+        self.unreachable = False
         self.stop = stop
         self.on_wait = on_wait
 
@@ -122,7 +140,7 @@ class Fetcher:
         with self._lock:
             now = time.time()
             slot = max(now, self._next_slot)
-            self._next_slot = slot + MIN_INTERVAL_SECONDS
+            self._next_slot = slot + self.interval
         if slot > now:
             time.sleep(slot - now)
 
@@ -140,6 +158,10 @@ class Fetcher:
 
     def _penalise(self) -> None:
         with self._lock:
+            if time.time() - self.last_answer > self.give_up:
+                self.unreachable = True
+                raise Unreachable()
+            self.interval = min(self.interval * 2, MAX_INTERVAL_SECONDS)
             self._penalty = min(max(self._penalty * 2, 2.0), MAX_PAUSE_SECONDS)
             start = time.time() + self._penalty
             if start > self.cool_until:
@@ -150,9 +172,13 @@ class Fetcher:
     def _answered(self) -> None:
         with self._lock:
             self._penalty = 0.0
+            self.last_answer = time.time()
+            self.interval = max(MIN_INTERVAL_SECONDS, self.interval * RECOVER_FACTOR)
 
     def __call__(self, url: str) -> bytes | None:
         for _attempt in range(RETRIES):
+            if self.unreachable:
+                raise Unreachable()
             self._wait()
             self._pace()
             try:
@@ -212,6 +238,7 @@ def update(
     fetch=None,
     progress=None,
     stop: threading.Event | None = None,
+    on_day=None,
 ) -> dict:
     """Fetch every missing hour up to the last published one.
 
@@ -221,6 +248,8 @@ def update(
     many, so a caller can rebuild candles between chunks of a long
     catch-up. Returns a summary; `changed` lists the days written, whose
     candles must be rebuilt, and `remaining` how many pending days are left.
+    `on_day(day)` is called as each day is written. When the feed stops
+    answering altogether, returns early with `unreachable` set.
     """
     scale = int(scale or point_scale(symbol))
     store = FeedStore(feed_dir, scale=scale)
@@ -241,7 +270,7 @@ def update(
 
     summary = {"days": 0, "ticks": 0, "first_changed": None, "changed": [], "failed_hours": 0, "last_ns": None,
                "up_to_ns": last_hour + HOUR_NS, "stopped": False, "remaining": remaining,
-               "through": None}
+               "through": None, "unreachable": False}
     if not days:
         return summary
 
@@ -264,6 +293,8 @@ def update(
                 hour_ns = day0 + h * HOUR_NS
                 try:
                     payload = fetch(hour_url(symbol, hour_ns))
+                except (Unreachable, Stopped):
+                    return h, "cut", None
                 except Exception:
                     return h, "failed", None
                 if payload is None:
@@ -275,7 +306,16 @@ def update(
             new_parts = [r[2] for r in results if r[1] == "ok"]
             fetched = {h for h, status, _ in results if status in ("ok", "empty")}
             summary["failed_hours"] += sum(1 for _, status, _ in results if status == "failed")
+            cut_short = any(status == "cut" for _, status, _ in results)
+            if cut_short:
+                if stop is not None and stop.is_set():
+                    summary["stopped"] = True
+                else:
+                    summary["unreachable"] = True
+                summary["remaining"] += len(days) - i + 1  # this day is not whole either
             if not fetched:
+                if cut_short:
+                    break
                 continue
 
             with store.lock:
@@ -307,5 +347,9 @@ def update(
                 summary["last_ns"] = max(summary["last_ns"] or 0, int(ts[-1]))
             if summary["first_changed"] is None or day < summary["first_changed"]:
                 summary["first_changed"] = day
+            if on_day is not None:
+                on_day(day)
+            if cut_short:
+                break
     progress(day=days[-1], done=len(days), total=len(days))
     return summary

@@ -156,6 +156,16 @@ class SyntheticNoLookahead(unittest.TestCase):
 class RealDataNoLookahead(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        from simulator import instruments, server
+
+        market = server.Market(instruments.get(config.SYMBOL))
+        market.load()
+        stale = market.stale_days()
+        if stale:
+            # A download wrote days after the candles were built (the app
+            # stopped mid-way); the app's next start rebuilds them.
+            raise unittest.SkipTest(f"stored candles out of date for {len(stale)} day(s), "
+                                    f"e.g. {stale[0]}: start the app once to update them")
         cls.source = ParquetTickSource()
         cls.bars = BarStore.load(config.DUKA_DIR / "bars")
 

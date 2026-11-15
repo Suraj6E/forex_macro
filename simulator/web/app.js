@@ -822,7 +822,8 @@
       var syms = (rec.symbols || []).map(function (x) {
         var h = x.history || {};
         var hist = h.state === "fetching" ? "history: fetching, " + h.pending + " days to go" :
-          h.state === "done" ? "history: complete" + (h.floor ? " (broker has nothing before " + h.floor + ")" : "") : "history: off";
+          h.state === "done" ? "history: complete" + (h.floor ? " (broker has nothing before " + h.floor + ")" : "") :
+          h.state === "clock" ? "history: waiting for the server clock" : "history: off";
         return "<tr><td class='mono'>" + esc(x.broker_symbol) + "</td><td>" + esc(x.label) + "</td><td class='mono'>" +
           (x.last_tick_ms ? ago(x.last_tick_ms) : "-") + "</td><td class='n'>" + num(x.ticks_today || 0) + "</td><td class='tiny'>" + hist + "</td></tr>";
       }).join("");

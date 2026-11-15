@@ -66,6 +66,11 @@ REPLAY_FEED = "dukascopy"
 #: round the instruments, newest days first, so after one round every
 #: instrument has its latest weeks, and older history fills in behind.
 UPDATE_CHUNK_DAYS = 15
+#: Candles for downloaded days are built at least this often, so a slow
+#: download shows its days without waiting for the whole chunk.
+CANDLES_EVERY_SECONDS = 60.0
+#: When Dukascopy stops answering altogether, the update tries again after this long.
+RETRY_UPDATE_SECONDS = 30 * 60.0
 #: Seconds per hour file at the datafeed's pace, for the time estimate.
 SECONDS_PER_HOUR_FILE = 1.05
 #: Bytes per stored tick in the compact layout, for estimates before an
@@ -226,6 +231,7 @@ class Hub:
         self.job: dict = {"kind": None, "running": False}
         self._job_thread: threading.Thread | None = None
         self._job_stop = threading.Event()
+        self._retry_token = None  # a pending retry after Dukascopy stopped answering
         self.recorder: mt5rec.MT5Recorder | None = None
         self.prepared = False
 
@@ -323,7 +329,19 @@ class Hub:
             return False
         return self._start_job("update", self._update)
 
+    def _retry_later(self, seconds: float) -> None:
+        """Start the update again after a while, unless something else runs."""
+        token = self._retry_token = object()
+
+        def retry():
+            if self._retry_token is token:  # not stopped from the page since
+                self.start_update()
+        timer = threading.Timer(seconds, retry)
+        timer.daemon = True
+        timer.start()
+
     def stop_job(self) -> None:
+        self._retry_token = None
         self._job_stop.set()
 
     # -- downloads ---------------------------------------------------------------
@@ -401,8 +419,21 @@ class Hub:
                 def progress(day, done, total, m=m, base=done_days):
                     job.update(done=min(base + done, job["total"]), day=day.isoformat(), symbol=m.inst.symbol,
                                message=f"Fetching {m.inst.label} {day.isoformat()} from Dukascopy")
+
+                built: set[date] = set()
+                waiting: list[date] = []
+                last_build = [time.monotonic()]
+
+                def on_day(day, m=m, built=built, waiting=waiting, last_build=last_build):
+                    waiting.append(day)
+                    if time.monotonic() - last_build[0] >= CANDLES_EVERY_SECONDS:
+                        m.add_days(list(waiting))
+                        built.update(waiting)
+                        waiting.clear()
+                        last_build[0] = time.monotonic()
                 summary = dukascopy.update(m.dir, m.inst.duka, days=chunk, scale=m.inst.scale, now=now,
-                                           progress=progress, stop=self._job_stop, fetch=fetcher)
+                                           progress=progress, stop=self._job_stop, fetch=fetcher, on_day=on_day)
+                summary["changed"] = [d for d in summary["changed"] if d not in built]
                 done_days += len(chunk)
                 job["done"] = min(done_days, job["total"])
                 job["days"] += summary["days"]
@@ -413,6 +444,13 @@ class Hub:
                     job["message"] = f"Building {m.inst.label} candles for the new days"
                     m.add_days(summary["changed"])
                     self.trim_memory()
+                if summary["unreachable"]:
+                    at = datetime.now().astimezone() + timedelta(seconds=RETRY_UPDATE_SECONDS)
+                    stopped_for = (f"Dukascopy has not answered for {dukascopy.GIVE_UP_SECONDS / 60:.0f} minutes: "
+                                   f"it is down, or refusing this connection for a while after a lot of "
+                                   f"downloading. Trying again at {at:%H:%M}.")
+                    self._retry_later(RETRY_UPDATE_SECONDS)
+                    break
                 if summary["stopped"]:
                     break
         gaps = f"; {job['failed_hours']} hours did not answer and are retried next time" if job["failed_hours"] else ""

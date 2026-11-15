@@ -162,6 +162,49 @@ class Updater(unittest.TestCase):
         self.assertEqual(len(bars["h1"]), before + 24 + 10)
         self.assertEqual(len(bars["h1"]), len(BarStore.build(source)["h1"]))
 
+    def test_stops_when_the_feed_stops_answering_and_keeps_what_it_got(self):
+        class Gone(FakeFeed):
+            def __call__(self, url):
+                if "/2025/02/06/" in url:  # 6 March: the feed has gone quiet
+                    raise dk.Unreachable()
+                return super().__call__(url)
+        written = []
+        summary = dk.update(self.feed, now=self.now, fetch=Gone(), on_day=written.append)
+        self.assertTrue(summary["unreachable"])
+        self.assertEqual(written, [date(2025, 3, 4)])            # each day reported as it is written
+        self.assertEqual(summary["changed"], [date(2025, 3, 4)])
+        self.assertEqual(summary["remaining"], 2)
+        days = FeedStore(self.feed).manifest()["days"]
+        self.assertTrue(days["2025-03-04"]["complete"])
+        self.assertNotIn("2025-03-06", days)
+
+
+class Pacing(unittest.TestCase):
+    def test_slows_on_refusals_and_recovers_with_answers(self):
+        f = dk.Fetcher()
+        f._penalise()
+        f._penalise()
+        self.assertEqual(f.interval, 4 * dk.MIN_INTERVAL_SECONDS)
+        for _ in range(10):
+            f._penalise()
+        self.assertEqual(f.interval, dk.MAX_INTERVAL_SECONDS)
+        for _ in range(100):
+            f._answered()
+        self.assertEqual(f.interval, dk.MIN_INTERVAL_SECONDS)
+
+    def test_gives_up_when_nothing_answers_for_long(self):
+        import requests
+
+        class Refusing:
+            def get(self, url, timeout):
+                raise requests.ConnectionError("connect timeout")
+        f = dk.Fetcher(give_up=0.0)
+        f._session = lambda: Refusing()
+        with self.assertRaises(dk.Unreachable):
+            f("https://example.invalid/x")
+        with self.assertRaises(dk.Unreachable):  # and stays given up
+            f("https://example.invalid/y")
+
 
 if __name__ == "__main__":
     unittest.main()

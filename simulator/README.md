@@ -94,14 +94,22 @@ terminal**, then open that terminal yourself.
   ones come from the broker's server when asked for. Between live polls the
   recorder asks, day by day, newest first, back to each instrument's
   **From** day, until the broker has nothing older (ten empty weekdays in a
-  row), and remembers where that is. The result is a second **Data** choice
-  next to Dukascopy, with the broker's own prices and spreads.
+  row), and remembers where that is. It works with the market shut, too. A
+  day is kept once its ticks cover every hour the broker has a candle for;
+  an empty or partial day is read again first (the terminal may still be
+  downloading it). The result is a second **Data** choice next to
+  Dukascopy, with the broker's own prices and spreads.
 - **Times are converted to UTC.** MT5 stamps ticks in the broker's server
-  time. Today's offset is read from a tick seen arriving and read again
-  after any pause of 30 minutes. Past days need their own offset: most MT5
-  brokers keep New York + 7 h (UTC+2 in winter, UTC+3 in US summer time),
-  and when the offset measured now matches that rule, history uses it for
-  each day; otherwise the measured offset, all year.
+  time, and the offset changes with daylight saving. The FX week opens at
+  17:00 New York on Sunday and closes at 17:00 on Friday whatever the
+  broker's clock, so the recorder reads each week's offset from where the
+  broker's EUR/USD hourly candles start after a weekend and end before one
+  (a week that opened late or closed early for a holiday is left out). When
+  every week fits New York + 7 h (UTC+2 in winter, UTC+3 in US summer time,
+  most MT5 brokers), European summer time or one fixed offset, that rule is
+  used; otherwise each week its own. This needs no live quote, so it works
+  at the weekend. While the market moves, each new quote is checked against
+  it.
 - **Gaps fill themselves.** On start it copies the terminal's ticks since
   the last recorded one, from the start of the UTC day three days back at
   most, and the history pass fills anything older.
@@ -180,10 +188,15 @@ only. Both default to zero and are printed with every session's results.
 - **Rate limit**: the datafeed answers HTTP 429, or refuses connections for
   hours, when pushed: after two days of downloading at three requests a
   second (15 Nov 2026) it refused connections from this machine while its
-  website still answered. Requests now go at about one a second, and when
-  the feed stops answering every worker pauses together, 2 s doubling to 15
-  minutes. A year of one instrument is about 6,000 hour files, so about two
-  hours; the panel estimates each instrument's time and size. Downloads stop
+  website still answered, and later answered only now and then. Requests
+  now go at about one a second. When the feed stops answering every worker
+  pauses together, 2 s doubling to 15 minutes, and the pace slows to as
+  little as one request in 8 s, recovering with each answer. After 20
+  minutes with no answer at all the update stops, says so, and tries again
+  half an hour later. Candles for downloaded days are built at least every
+  minute, so a slow download shows its days as they come. A year of one
+  instrument is about 6,000 hour files, so about two hours; the panel
+  estimates each instrument's time and size. Downloads stop
   before the disk drops under 3 GB free (`SIM_MIN_FREE_GB`). Stopping is
   safe: it resumes where it left off, and an hour that failed is fetched
   again next time. Getting round the limit (other addresses, disguised
@@ -228,13 +241,15 @@ only. Both default to zero and are printed with every session's results.
 .\.venv\Scripts\python.exe -m unittest discover -s simulator/tests -t .
 ```
 
-80 tests: no look-ahead, fill rules, profit in USD for each kind of
+88 tests: no look-ahead, fill rules, profit in USD for each kind of
 instrument, journal and statistics, the Dukascopy decoder, cleaning and
 resumable updater (against a fake datafeed), compact tick files and their
 migration, candles kept in step with their ticks, the calendar's clock rule
 (against a small copy of fxmacro's tables), and the MT5 recorder and its
 history (against a fake terminal on New York + 7 h, across summer and
-winter).
+winter, with the market open and shut), and reading a broker's clock from
+hourly candles (New York + 7 h, European, fixed, and a broker that changed
+its clock).
 
 `python -m simulator check` prints the tick file's layout and day load times
 (guide step 1).

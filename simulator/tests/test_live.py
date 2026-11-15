@@ -26,10 +26,13 @@ from simulator.live.mt5rec import MT5Recorder, measure_offset_ms
 OFFSET_MS = 2 * 3600 * 1000
 TICK_DTYPE = np.dtype([("time", "<i8"), ("bid", "<f8"), ("ask", "<f8"), ("last", "<f8"), ("volume", "<u8"),
                        ("time_msc", "<i8"), ("flags", "<u4"), ("volume_real", "<f8")])
+RATES_DTYPE = np.dtype([("time", "<i8"), ("open", "<f8"), ("high", "<f8"), ("low", "<f8"), ("close", "<f8"),
+                        ("tick_volume", "<u8"), ("spread", "<i4"), ("real_volume", "<u8")])
 
 
 class FakeMT5:
     COPY_TICKS_ALL = -1
+    TIMEFRAME_H1 = 16385
 
     def __init__(self, clock):
         self.clock = clock
@@ -96,6 +99,21 @@ class FakeMT5:
         with self.lock:
             rows = [t for t in self._visible() if from_s * 1000 <= t[0] < to_s * 1000]
         return self._array(rows)
+
+    def copy_rates_range(self, name, timeframe, from_s, to_s):
+        """Hourly candles built from the quotes, opening from `from_s` to
+        `to_s` inclusive, as the terminal returns them."""
+        assert timeframe == self.TIMEFRAME_H1
+        counts = {}
+        with self.lock:
+            for msc, _bid, _ask in self._visible():
+                h = msc // 3_600_000 * 3600
+                if from_s <= h <= to_s:
+                    counts[h] = counts.get(h, 0) + 1
+        a = np.zeros(len(counts), RATES_DTYPE)
+        for i, h in enumerate(sorted(counts)):
+            a[i]["time"], a[i]["tick_volume"] = h, counts[h]
+        return a
 
 
 def wait_until(pred, timeout=8.0):
@@ -271,7 +289,7 @@ class BrokerClock(unittest.TestCase):
 
     def test_history_uses_the_offset_of_its_own_day(self):
         winter = utc_ms(2026, 1, 14, 12)
-        clock = mt5rec.ServerClock(2 * 3600_000, winter)  # measured +2h in winter
+        clock = mt5rec.ServerClock.measured(2 * 3600_000, winter)  # measured +2h in winter
         self.assertEqual(clock.rule, "ny+7")
         summer = utc_ms(2025, 7, 16, 12)
         self.assertEqual(clock.offset(summer), 3 * 3600_000)
@@ -279,9 +297,76 @@ class BrokerClock(unittest.TestCase):
         self.assertEqual(clock.to_utc(np.array([winter + 2 * 3600_000])).tolist(), [winter])
 
     def test_a_broker_on_another_clock_keeps_its_measured_offset(self):
-        clock = mt5rec.ServerClock(0, utc_ms(2026, 1, 14, 12))
+        clock = mt5rec.ServerClock.measured(0, utc_ms(2026, 1, 14, 12))
         self.assertEqual(clock.rule, "fixed")
         self.assertEqual(clock.offset(utc_ms(2025, 7, 16, 12)), 0)
+
+    def test_the_fx_week_opens_at_five_in_new_york(self):
+        # 17:00 EST is 22:00 UTC; 17:00 EDT is 21:00 UTC. A weekend belongs
+        # to the week before it.
+        self.assertEqual(mt5rec.week_open_ms(utc_ms(2026, 11, 18, 9)), utc_ms(2026, 11, 15, 22))
+        self.assertEqual(mt5rec.week_open_ms(utc_ms(2026, 11, 15, 21, 59)), utc_ms(2026, 11, 8, 22))
+        self.assertEqual(mt5rec.week_open_ms(utc_ms(2026, 7, 15, 9)), utc_ms(2026, 7, 12, 21))
+        # US clocks went back on 1 November 2026, before that Sunday's open.
+        self.assertEqual(mt5rec.week_open_ms(utc_ms(2026, 11, 2)), utc_ms(2026, 11, 1, 22))
+        # A quote just before the Sunday open counts for the coming week.
+        self.assertEqual(mt5rec.quote_week(utc_ms(2026, 11, 15, 21, 58)), utc_ms(2026, 11, 15, 22))
+        self.assertTrue(mt5rec.eu_summer(utc_ms(2026, 3, 29, 1)))
+        self.assertFalse(mt5rec.eu_summer(utc_ms(2026, 3, 29, 0, 59)))
+        self.assertFalse(mt5rec.eu_summer(utc_ms(2026, 10, 25, 1)))
+
+    def test_reads_each_weeks_offset_from_hourly_candles(self):
+        def candles(offset_of, first=date(2024, 1, 7), last=date(2026, 11, 8), early_close=None, holiday=None):
+            out = []
+            d = first
+            while d <= last:
+                opened = mt5rec._sunday_open_ms(d)
+                off = offset_of(opened)
+                closes = opened + 5 * 86_400_000 - (3 * 3600_000 if d == early_close else 0)
+                h = opened
+                while h < closes:
+                    gone = holiday and holiday[0] <= h < holiday[1]
+                    if not gone:
+                        out.append(h + off)
+                    h += 3600_000
+                d += timedelta(days=7)
+            return np.array(out, np.int64)
+
+        ny7 = mt5rec.week_offsets(candles(mt5rec.ny7_offset_ms))
+        # Every week but the first (its open is not in) and the last (nor its close).
+        self.assertEqual(len(ny7), 147)
+        clock = mt5rec.ServerClock(ny7)
+        self.assertEqual(clock.rule, "ny+7")
+        self.assertIn("fits all 147 weeks", clock.describe())
+        self.assertEqual(mt5rec.ServerClock(mt5rec.week_offsets(candles(mt5rec.eet_offset_ms))).rule, "eu")
+        self.assertEqual(mt5rec.ServerClock(mt5rec.week_offsets(candles(lambda w: 3 * 3600_000))).rule, "fixed")
+
+        # A week that closed early for a holiday, and a weekday holiday long
+        # enough to look like a weekend, are not read; the rest still are.
+        christmas = (utc_ms(2024, 12, 24, 18), utc_ms(2024, 12, 26, 12))
+        weeks = mt5rec.week_offsets(candles(mt5rec.ny7_offset_ms, early_close=date(2025, 3, 2), holiday=christmas))
+        self.assertNotIn(mt5rec._sunday_open_ms(date(2025, 3, 2)), weeks)
+        self.assertEqual(len(weeks), 146)
+        self.assertEqual(mt5rec.ServerClock(weeks).rule, "ny+7")
+
+        # A broker that moved from a fixed UTC+2 to New York + 7 in 2025:
+        # no rule fits, so every week keeps its own offset.
+        moved = utc_ms(2025, 6, 1)
+        weeks = mt5rec.week_offsets(candles(lambda w: mt5rec.ny7_offset_ms(w) if w >= moved else 2 * 3600_000))
+        clock = mt5rec.ServerClock(weeks)
+        self.assertEqual(clock.rule, "weeks")
+        july24, july25 = utc_ms(2024, 7, 17, 12), utc_ms(2025, 7, 16, 12)
+        self.assertEqual(clock.offset(july24), 2 * 3600_000)
+        self.assertEqual(clock.offset(july25), 3 * 3600_000)
+        self.assertEqual(clock.to_utc([july24 + 2 * 3600_000, july25 + 3 * 3600_000]).tolist(), [july24, july25])
+
+    def test_converts_across_a_clock_change(self):
+        clock = mt5rec.ServerClock.measured(2 * 3600_000, utc_ms(2026, 11, 18, 12))
+        friday = utc_ms(2026, 10, 30, 20)   # last quotes on UTC+3
+        sunday = utc_ms(2026, 11, 1, 22, 5)  # first quotes on UTC+2
+        server = [friday + 3 * 3600_000, sunday + 2 * 3600_000]
+        self.assertEqual(clock.to_utc(server).tolist(), [friday, sunday])
+        self.assertEqual([clock.to_server(friday), clock.to_server(sunday)], server)
 
 
 class NY7FakeMT5(FakeMT5):
@@ -314,32 +399,68 @@ class History(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self._settle = mt5rec.HISTORY_SETTLE_WAIT
-        mt5rec.HISTORY_SETTLE_WAIT = 0.0
+        self._waits = mt5rec.HISTORY_SETTLE_WAIT, mt5rec.HISTORY_RECHECK_WAIT
+        mt5rec.HISTORY_SETTLE_WAIT = mt5rec.HISTORY_RECHECK_WAIT = 0.0
+        self._ticking = threading.Event()
         self.api = NY7FakeMT5(time.time)
-        now = int(time.time() * 1000)
-        self.today = day_of_ns(now * 1_000_000)
-        # The broker's history starts on a Monday ~10 weeks back: one quote
-        # every 30 minutes on every weekday since, summer and winter alike.
-        self.first = self.today - timedelta(days=70 + self.today.weekday())
-        self.added = []
-        d = self.first
-        while d < self.today:
-            if d.weekday() < 5:
-                for k in range(48):
-                    t = utc_ms(d.year, d.month, d.day) + k * 1_800_000
-                    self.api.add_utc(t, 1.1 + k * 1e-5, 1.10008 + k * 1e-5)
-                    self.added.append(t)
-            d += timedelta(days=1)
-        self.api.sort()
 
     def tearDown(self):
-        mt5rec.HISTORY_SETTLE_WAIT = self._settle
+        mt5rec.HISTORY_SETTLE_WAIT, mt5rec.HISTORY_RECHECK_WAIT = self._waits
         self._ticking.set()
         self.tmp.cleanup()
 
+    def add_weeks(self, until_ms):
+        """The broker's history starts with the week that opened ~10 weeks
+        back: a quote every 30 minutes from Sunday 17:00 to Friday 17:00 New
+        York, summer and winter alike, up to `until_ms`."""
+        now = int(time.time() * 1000)
+        self.today = day_of_ns(now * 1_000_000)
+        sunday = self.today - timedelta(days=70 + (self.today.weekday() + 1) % 7)
+        self.first = sunday
+        self.added = []
+        while True:
+            opened = mt5rec._sunday_open_ms(sunday)
+            if opened >= until_ms:
+                break
+            t = opened
+            while t < min(opened + 5 * 86_400_000, until_ms):
+                self.api.add_utc(t, 1.1 + (t // 1_800_000 % 50) * 1e-5, 1.10008 + (t // 1_800_000 % 50) * 1e-5)
+                self.added.append(t)
+                t += 1_800_000
+            sunday += timedelta(days=7)
+        self.api.sort()
+
+    def run_recorder(self):
+        start = self.first - timedelta(days=60)  # earlier than the broker has
+        rec = MT5Recorder("C:/fake/terminal64.exe", root=self.root, backfill_days=1, api=self.api,
+                          terminals=lambda: ["C:/fake/terminal64.exe"], offset_wait=1, symbols=["EURUSD"],
+                          history_from=lambda s: start)
+        rec.start()
+        self.assertTrue(wait_until(lambda: rec.track("EURUSD") and rec.track("EURUSD").history["state"] == "done", 60),
+                        rec.status)
+        rec.stop()
+        self.assertEqual(rec.server_clock.rule, "ny+7")
+        self.assertIn("weeks read from the broker's candles", rec.server_clock.describe())
+        feed = self.root / "test-demo" / "EURUSD"
+        src = LiveFeedSource(feed, keep_flags=(0, 1, 2, 3, 4))
+        got = set()
+        yesterday = self.today - timedelta(days=1)
+        for d in src.days():
+            if d < yesterday:
+                got |= set((src.load_day(d).ts // 1_000_000).tolist())
+        expected = {t for t in self.added if t < utc_ms(yesterday.year, yesterday.month, yesterday.day)}
+        # Every quote, at its true UTC time, whatever the season.
+        self.assertEqual(got, expected)
+        manifest = src.store.manifest()
+        # The day after the last empty weekday: the Saturday before the
+        # broker's first Sunday. Nothing earlier exists at this broker.
+        self.assertEqual(manifest["history_floor"], (self.first - timedelta(days=1)).isoformat())
+        # Nothing older than the floor is asked for again.
+        self.assertTrue(all(d >= start.isoformat() for d in manifest["days"]))
+        return rec
+
     def test_fetches_history_in_utc_back_to_where_the_broker_ends(self):
-        self._ticking = threading.Event()
+        self.add_weeks(int(time.time() * 1000))
 
         def tick():
             while not self._ticking.wait(0.1):
@@ -347,30 +468,35 @@ class History(unittest.TestCase):
                     now = int(time.time() * 1000)
                     self.api.ticks.append((now + mt5rec.ny7_offset_ms(now), 1.2, 1.20008))
         threading.Thread(target=tick, daemon=True).start()
-        start = self.first - timedelta(days=60)  # earlier than the broker has
-        rec = MT5Recorder("C:/fake/terminal64.exe", root=self.root, backfill_days=1, api=self.api,
-                          terminals=lambda: ["C:/fake/terminal64.exe"], offset_wait=3, symbols=["EURUSD"],
-                          history_from=lambda s: start)
-        rec.start()
-        self.assertTrue(wait_until(lambda: rec.track("EURUSD") and rec.track("EURUSD").history["state"] == "done", 30),
-                        rec.status)
-        rec.stop()
-        self.assertEqual(rec.server_clock.rule, "ny+7")
-        feed = self.root / "test-demo" / "EURUSD"
-        src = LiveFeedSource(feed, keep_flags=(0, 1, 2, 3, 4))
-        got = set()
-        for d in src.days():
-            if d < self.today - timedelta(days=1):
-                got |= set((src.load_day(d).ts // 1_000_000).tolist())
-        expected = {t for t in self.added if t < utc_ms(*(self.today - timedelta(days=1)).timetuple()[:3])}
-        # Every quote, at its true UTC time, whatever the season.
-        self.assertEqual(got, expected)
-        manifest = src.store.manifest()
-        # The day after the last empty weekday: the Saturday before the first
-        # Monday with data. Nothing earlier exists at this broker.
-        self.assertEqual(manifest["history_floor"], (self.first - timedelta(days=2)).isoformat())
-        # Nothing older than the floor is asked for again.
-        self.assertTrue(all(d >= (start.isoformat()) for d in manifest["days"]))
+        self.run_recorder()
+
+    def test_with_the_market_shut_the_clock_comes_from_the_candles(self):
+        # The weekend: the last quote was Friday's close, and none comes.
+        self.add_weeks(mt5rec.week_open_ms(int(time.time() * 1000)) - 2 * 86_400_000)
+        rec = self.run_recorder()
+        self.assertIsNone(rec._measure_offset())  # no live quote to read it from
+
+    def test_a_day_missing_hours_is_read_again_before_it_is_kept(self):
+        self.add_weeks(mt5rec.week_open_ms(int(time.time() * 1000)) - 2 * 86_400_000)
+        # The terminal is still downloading one day: its afternoon is missing
+        # on the first two reads.
+        day = date(1970, 1, 1) + timedelta(days=self.added[len(self.added) // 2] // 86_400_000)
+        if day.weekday() >= 5:
+            day -= timedelta(days=day.weekday() - 3)
+        afternoon = utc_ms(day.year, day.month, day.day, 12) + mt5rec.ny7_offset_ms(utc_ms(day.year, day.month, day.day))
+        hidden = {"left": 2}
+        real = self.api.copy_ticks_range
+
+        def copy_ticks_range(name, from_s, to_s, flags):
+            ticks = real(name, from_s, to_s, flags)
+            if from_s * 1000 <= afternoon < to_s * 1000 and hidden["left"]:
+                hidden["left"] -= 1
+                return ticks[ticks["time_msc"] < afternoon]
+            return ticks
+        self.api.copy_ticks_range = copy_ticks_range
+        rec = self.run_recorder()
+        self.assertEqual(hidden["left"], 0)
+        self.assertNotIn("missing_hours", rec.track("EURUSD").store.manifest()["days"][day.isoformat()])
 
     def test_finds_the_brokers_name_for_oil(self):
         rec = MT5Recorder("x", api=self.api, terminals=lambda: [])
@@ -379,7 +505,6 @@ class History(unittest.TestCase):
         self.assertEqual(rec._find_symbol(INSTRUMENTS["BRENT"]), "UKOIL.cash")
         self.assertEqual(rec._find_symbol(INSTRUMENTS["EURUSD"]), "EURUSD.r")
         self.assertIsNone(rec._find_symbol(INSTRUMENTS["XAGUSD"]))
-        self._ticking = threading.Event()
 
 
 class StoredFeedBars(unittest.TestCase):

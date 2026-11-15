@@ -8,10 +8,12 @@ What it does, in order:
   2. Attaches, reads the account's trade server and finds the broker's name
      for each instrument (EURUSD, XAGUSD, USOIL.cash, ...). It only reads:
      it never calls an order function.
-  3. Works out the server's clock offset. The MetaTrader5 package returns
-     tick times in the trade server's time zone (commonly UTC+2/+3), so
-     offset = round(latest tick time - now, to 30 min) while the market is
-     moving, and is re-checked every 10 minutes (daylight saving).
+  3. Works out the server's clock. The MetaTrader5 package returns tick
+     times in the trade server's time zone (commonly UTC+2/+3), and the
+     offset changes with daylight saving, so it is read for every week of
+     history from the broker's hourly candles (see `week_offsets`), which
+     works with the market shut too, and checked against each new quote
+     while the market moves.
   4. Fills the gap since the last recorded tick from the terminal (from the
      start of the UTC day `backfill_days` ago at most), then polls new ticks
      twice a second and appends them, converted to UTC, to
@@ -20,15 +22,18 @@ What it does, in order:
      newest first, back to each instrument's start day, until the broker
      has nothing older. A terminal keeps only a small buffer of recent ticks
      on disk; older ones are downloaded from the broker's server when asked
-     for, which is what this does.
+     for, which is what this does. A day is kept once its ticks cover every
+     hour the broker has a candle for.
   6. When a UTC day closes, cleans it with Layer 0's rules and stores it as
      Parquet, like the replay feed.
 
-History needs the server's offset on past days, not today's: a broker on
-UTC+2 in winter is on UTC+3 in summer. Most MT5 brokers keep their clock at
-New York + 7 hours, so the week opens at 00:00 server time all year; when
-the offset measured now matches that rule, history uses it, otherwise the
-measured offset as a fixed one.
+The FX week opens at 17:00 New York on Sunday and closes at 17:00 on Friday
+whatever the broker's clock, so where the hourly candles start after a
+weekend and end before one gives that week's offset. Most MT5 brokers keep
+New York + 7 hours (the week opens at 00:00 server time all year); some
+follow European summer time or keep one offset. When every week read fits
+one of those rules, the rule fills weeks the candles do not cover;
+otherwise each week uses its own reading.
 
 One feed per trade server and instrument: prices and spreads differ by
 broker, so feeds are never mixed. A file lock stops two recorders writing
@@ -40,6 +45,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from bisect import bisect_left
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -57,24 +63,32 @@ from simulator.live.winproc import FileLock, running_terminals, same_path
 MS_PER_DAY = 86_400_000
 MS_PER_HOUR = 3_600_000
 POLL_SECONDS = 0.5
-OFFSET_CHECK_SECONDS = 600
 STATUS_EVERY_SECONDS = 2.0
 BACKFILL_CHUNK_MS = 6 * 3600 * 1000
 #: The broker has no older history once this many weekdays in a row are empty.
 HISTORY_EMPTY_RUN = 10
-#: A day of history is accepted once two reads a moment apart agree; the
-#: terminal may still be downloading it from the broker on the first.
+#: A read is accepted once two reads a moment apart return as many rows; the
+#: terminal may still be downloading from the broker on the first.
 HISTORY_SETTLE_TRIES = 8
 HISTORY_SETTLE_WAIT = 0.3
+#: A day that comes back empty, or with hours missing that have a candle, is
+#: read once more after this long before anything is concluded.
+HISTORY_RECHECK_WAIT = 2.0
+#: A day still missing hours is left for a later pass this many times, then
+#: kept as it is (the broker lacks those ticks).
+HISTORY_DAY_TRIES = 3
+#: How often each instrument's list of missing days is worked out again.
+HISTORY_TODO_SECONDS = 60.0
 #: Seconds of history work between two polls of live ticks.
 HISTORY_BUDGET_SECONDS = 0.5
+#: How often the clock is read again from the hourly candles (new weeks).
+CLOCK_REFRESH_SECONDS = 3600.0
+#: How often, while recording, the recorder checks the terminal still runs.
+TERMINAL_CHECK_SECONDS = 5.0
+#: The market counts as moving when its last quote is this recent.
+ACTIVE_WITHIN_MS = 10 * 60 * 1000
 
 TRADE_MODES = {0: "demo", 1: "contest", 2: "real"}
-
-#: After a pause this long (weekend, holiday) the server clock is read again
-#: before the next tick is converted: brokers change their offset for
-#: daylight saving while the market is closed.
-REMEASURE_AFTER_MS = 30 * 60 * 1000
 
 
 class TerminalGone(RuntimeError):
@@ -139,36 +153,174 @@ def ny7_offset_ms(utc_ms: int) -> int:
     return (3 if us_dst(utc_ms) else 2) * MS_PER_HOUR
 
 
-class ServerClock:
-    """The broker's offset from UTC at any instant, past or present."""
+def eu_summer(utc_ms: int) -> bool:
+    """Whether Europe is on summer time (last Sunday of March to last Sunday
+    of October, at 01:00 UTC)."""
+    t = datetime.fromtimestamp(utc_ms / 1000, tz=timezone.utc)
+    start, end = _last_sunday(t.year, 3), _last_sunday(t.year, 10)
+    begin = datetime(start.year, start.month, start.day, 1, tzinfo=timezone.utc)
+    finish = datetime(end.year, end.month, end.day, 1, tzinfo=timezone.utc)
+    return begin <= t < finish
 
-    def __init__(self, measured_ms: int, now_ms: int) -> None:
-        self.rule = "ny+7" if measured_ms == ny7_offset_ms(now_ms) else "fixed"
-        self.fixed_ms = measured_ms
+
+def eet_offset_ms(utc_ms: int) -> int:
+    """Server offset of a broker on Eastern European time (UTC+2, +3 in
+    European summer time)."""
+    return (3 if eu_summer(utc_ms) else 2) * MS_PER_HOUR
+
+
+def _sunday_open_ms(sunday: date) -> int:
+    """17:00 New York on a Sunday, in UTC ms."""
+    t = int(datetime(sunday.year, sunday.month, sunday.day, 21, tzinfo=timezone.utc).timestamp() * 1000)
+    return t if us_dst(t) else t + MS_PER_HOUR
+
+
+def week_open_ms(utc_ms: int) -> int:
+    """When the FX week holding this instant opened: the last Sunday 17:00
+    New York at or before it, in UTC ms. A weekend belongs to the week
+    before it. The week closes 5 days after it opens (Friday 17:00)."""
+    d = datetime.fromtimestamp(utc_ms / 1000, tz=timezone.utc).date()
+    sunday = d - timedelta(days=(d.weekday() + 1) % 7)
+    opened = _sunday_open_ms(sunday)
+    return opened if opened <= utc_ms else _sunday_open_ms(sunday - timedelta(days=7))
+
+
+#: Offsets a trade server can have: UTC-12 to UTC+14.
+_MIN_OFFSET_MS, _MAX_OFFSET_MS = -12 * MS_PER_HOUR, 14 * MS_PER_HOUR
+#: A pause between two hourly candles at least this long is a weekend (they
+#: are 49 hours, open to open); holidays inside a week are shorter or are
+#: rejected below because they do not open on a Sunday.
+WEEKEND_GAP_MS = 40 * MS_PER_HOUR
+
+
+def _week_from_open(server_ms: int) -> tuple[int, int] | None:
+    """(week, offset) if a candle opening at this server time can be the
+    first of a week: 17:00 New York on a Sunday, in whole hours."""
+    week = week_open_ms(server_ms - _MIN_OFFSET_MS)
+    off = server_ms - week
+    return (week, off) if off <= _MAX_OFFSET_MS and off % MS_PER_HOUR == 0 else None
+
+
+def _week_from_close(server_ms: int) -> tuple[int, int] | None:
+    """(week, offset) if a candle ending at this server time can be the last
+    of a week: 17:00 New York on a Friday."""
+    week = week_open_ms(server_ms - _MIN_OFFSET_MS - 5 * MS_PER_DAY)
+    off = server_ms - (week + 5 * MS_PER_DAY)
+    return (week, off) if off <= _MAX_OFFSET_MS and off % MS_PER_HOUR == 0 else None
+
+
+def week_offsets(bar_times_ms) -> dict[int, int]:
+    """The server's offset in each trading week, from the opening times of a
+    run of hourly candles (server time, ms): {week open in UTC ms: offset}.
+
+    The first candle after a weekend starts at the week's open (Sunday 17:00
+    New York) in server time, and the last one before a weekend ends at its
+    close (Friday 17:00). A week counts only when its open and its close
+    give the same offset: one that opened late or closed early for a holiday
+    is left out rather than trusted."""
+    t = np.unique(np.asarray(bar_times_ms, np.int64))
+    opens: dict[int, int] = {}
+    closes: dict[int, int] = {}
+    for i in np.flatnonzero(np.diff(t) >= WEEKEND_GAP_MS):
+        closed = _week_from_close(int(t[i]) + MS_PER_HOUR)
+        if closed:
+            closes[closed[0]] = closed[1]
+        opened = _week_from_open(int(t[i + 1]))
+        if opened:
+            opens[opened[0]] = opened[1]
+    return {w: off for w, off in sorted(opens.items()) if closes.get(w) == off}
+
+
+#: Clock rules a broker may follow, tried in this order.
+CLOCK_RULES = (("ny+7", ny7_offset_ms), ("eu", eet_offset_ms))
+
+
+class ServerClock:
+    """The broker's offset from UTC at any instant, past or present.
+
+    Built from offsets read for some weeks ({week open in UTC ms: offset}).
+    When all of them fit New York + 7 h, or European summer time at UTC+2/+3,
+    or one offset, that rule gives every week; otherwise each week uses its
+    own reading, and a week not read uses the nearest one that was."""
+
+    def __init__(self, weeks: dict[int, int]) -> None:
+        if not weeks:
+            raise ValueError("a clock needs at least one week's offset")
+        self.weeks = dict(sorted(weeks.items()))
+        self._keys = list(self.weeks)
+        values = set(self.weeks.values())
+        self.fixed_ms = next(iter(values)) if len(values) == 1 else None
+        self.rule = "weeks"
+        self._fn = None
+        for name, fn in CLOCK_RULES:
+            if all(fn(w) == off for w, off in self.weeks.items()):
+                self.rule, self._fn = name, fn
+                break
+        else:
+            if self.fixed_ms is not None:
+                self.rule = "fixed"
+
+    @classmethod
+    def measured(cls, offset_ms: int, now_ms: int) -> ServerClock:
+        """A clock from one offset read off a live quote."""
+        return cls({quote_week(now_ms): offset_ms})
+
+    def week_offset(self, week: int) -> int:
+        if self.rule == "fixed":
+            return self.fixed_ms
+        if self._fn is not None:
+            return self._fn(week)
+        if week in self.weeks:
+            return self.weeks[week]
+        i = bisect_left(self._keys, week)
+        near = self._keys[max(i - 1, 0):i + 1]
+        return self.weeks[min(near, key=lambda k: abs(k - week))]
 
     def offset(self, utc_ms: int) -> int:
-        return ny7_offset_ms(utc_ms) if self.rule == "ny+7" else self.fixed_ms
+        return self.week_offset(week_open_ms(utc_ms))
 
     def to_server(self, utc_ms: int) -> int:
         return utc_ms + self.offset(utc_ms)
 
-    def to_utc(self, server_ms: np.ndarray) -> np.ndarray:
-        """Server stamps to UTC. Offsets change on Sunday mornings, when the
-        market is shut, so the offset two hours before a stamp is its own."""
+    def to_utc(self, server_ms) -> np.ndarray:
+        """Server stamps to UTC. Each stamp belongs to the last week that
+        opened before it in server time: offsets change over a weekend,
+        which is far longer than any change, so no tick is ambiguous."""
         server_ms = np.asarray(server_ms, np.int64)
         if self.rule == "fixed" or not len(server_ms):
-            return server_ms - self.fixed_ms
-        first = self.offset(int(server_ms[0]) - 2 * MS_PER_HOUR)
-        last = self.offset(int(server_ms[-1]) - 2 * MS_PER_HOUR)
-        if first == last:
-            return server_ms - first
-        offs = np.array([self.offset(int(s) - 2 * MS_PER_HOUR) for s in server_ms], np.int64)
-        return server_ms - offs
+            return server_ms - (self.fixed_ms or 0)
+        week = week_open_ms(int(server_ms.min()) - _MAX_OFFSET_MS)
+        last = int(server_ms.max()) - _MIN_OFFSET_MS
+        weeks = []
+        while week <= last:
+            weeks.append(week)
+            week = week_open_ms(week + 7 * MS_PER_DAY + 2 * MS_PER_HOUR)
+        offs = np.array([self.week_offset(w) for w in weeks], np.int64)
+        starts = np.array(weeks, np.int64) + offs
+        i = np.clip(np.searchsorted(starts, server_ms, side="right") - 1, 0, len(weeks) - 1)
+        return server_ms - offs[i]
 
     def describe(self) -> str:
         if self.rule == "ny+7":
-            return "UTC+2 in winter, UTC+3 in US summer time (New York + 7 h)"
-        return f"UTC{self.fixed_ms / MS_PER_HOUR:+g} h all year"
+            text = "UTC+2 in winter, UTC+3 in US summer time (New York + 7 h)"
+        elif self.rule == "eu":
+            text = "UTC+2 in winter, UTC+3 in European summer time"
+        elif self.rule == "fixed":
+            text = f"UTC{self.fixed_ms / MS_PER_HOUR:+g} h all year"
+        else:
+            lo, hi = min(self.weeks.values()), max(self.weeks.values())
+            text = f"read week by week, UTC{lo / MS_PER_HOUR:+g} to UTC{hi / MS_PER_HOUR:+g} h"
+        n = len(self.weeks)
+        return text + (f"; fits all {n} weeks read from the broker's candles" if n > 1 else "")
+
+
+def quote_week(now_ms: int) -> int:
+    """The week a live quote at this instant belongs to. Past Friday's close
+    it is the coming week's: some brokers quote minutes before the open."""
+    week = week_open_ms(now_ms)
+    if now_ms - week >= 5 * MS_PER_DAY:
+        week = week_open_ms(week + 7 * MS_PER_DAY + 2 * MS_PER_HOUR)
+    return week
 
 
 # -- one instrument ---------------------------------------------------------------
@@ -195,6 +347,7 @@ class Track:
         self.todo_at = 0.0
         self.empty_run = 0
         self.empty_from: date | None = None
+        self.tries: dict[date, int] = {}  # passes a day came back with hours missing
 
     def status(self) -> dict:
         return {"symbol": self.inst.symbol, "label": self.inst.label, "broker_symbol": self.broker_symbol,
@@ -229,11 +382,18 @@ class MT5Recorder:
         self.status = {"state": "stopped", "message": "", "terminal": terminal_path}
         self.server_dir: Path | None = None
         self.tracks: list[Track] = []
-        self.offset_ms: int | None = None
+        self.offset_ms: int | None = None  # the server's offset now
         self.server_clock: ServerClock | None = None
-        #: The instrument whose ticks set the clock: EUR/USD when the broker
-        #: has it, being the busiest.
+        #: Offsets read from the hourly candles, and from live quotes (which
+        #: win), by week.
+        self.weeks: dict[int, int] = {}
+        self.live_weeks: dict[int, int] = {}
+        #: The instrument whose candles and quotes set the clock: EUR/USD
+        #: when the broker has it, being the busiest; always a currency
+        #: pair, which keeps the FX week.
         self.broker_symbol: str | None = None
+        self._clock_track: Track | None = None
+        self._seen_quote: tuple[int, float] | None = None  # (time_msc, when seen)
         self._status_at = 0.0
         self._history_turn = 0
 
@@ -359,23 +519,39 @@ class MT5Recorder:
         if not self.tracks:
             raise RuntimeError("This account has none of the simulator's instruments")
         self.status["missing"] = missing
-        clock_track = self.track(config.SYMBOL) or self.tracks[0]
+        fx = [t for t in self.tracks if t.inst.kind == "fx"]
+        clock_track = self.track(config.SYMBOL) or (fx[0] if fx else self.tracks[0])
+        self._clock_track = clock_track
         self.broker_symbol = clock_track.broker_symbol
-
-        measured = self._measure_offset()
-        self.offset_ms = measured if measured is not None else clock_track.store.manifest().get("offset_ms")
         for t in self.tracks:
             self._load_last_recorded(t)
             self._compact_closed_days(t)
 
-        while self.offset_ms is None and not self.stop_event.is_set():
-            self._set("waiting", "Market quiet: waiting for a live tick to read the server clock")
-            self.stop_event.wait(30)
-            self.offset_ms = self._measure_offset()
+        self._set("connecting", f"Reading {account.server}'s clock from its {clock_track.broker_symbol} hourly candles")
+        self.weeks, self.live_weeks, self._seen_quote = self._read_weeks(), {}, None
+        self.server_clock = ServerClock(self.weeks) if self.weeks else None
+        if self._market_moving():
+            live = self._measure_offset()
+            if live is not None:
+                self._confirm_offset(live, int(self.clock() * 1000))
+        while self.server_clock is None and not self.stop_event.is_set():
+            # Only without candles to read: wait for the market to move.
+            for t in self.tracks:
+                t.history["state"] = "clock"
+            self._set("waiting", f"Waiting for a {clock_track.broker_symbol} quote to read the server clock: "
+                                 "the terminal returned no hourly candles to read it from")
+            self.stop_event.wait(10)
+            self._check_terminal()
+            self.weeks = self._read_weeks()
+            if self.weeks:
+                self.server_clock = ServerClock(self.weeks)
+                break
+            live = self._measure_offset()
+            if live is not None:
+                self._confirm_offset(live, int(self.clock() * 1000))
         if self.stop_event.is_set():
             return
-        self.server_clock = ServerClock(self.offset_ms, int(self.clock() * 1000))
-        self._save_offset()
+        self._use_clock()
 
         self._set("backfilling", "Filling the gap from the terminal's tick history")
         for t in self.tracks:
@@ -384,18 +560,19 @@ class MT5Recorder:
         names = ", ".join(t.broker_symbol for t in self.tracks)
         self._set("recording", f"Recording {names} from {account.server} ({mode})")
 
-        checked = self.clock()
+        clock_read = checked = self.clock()
         while not self.stop_event.is_set():
             now = self.clock()
-            last = clock_track.last_ms
-            quiet = last is None or now * 1000 - last > REMEASURE_AFTER_MS
-            if quiet or now - checked > OFFSET_CHECK_SECONDS:
+            if now - checked > TERMINAL_CHECK_SECONDS:
                 checked = now
-                fresh = self._measure_offset()
-                if fresh is not None and fresh != self.offset_ms:
-                    self.offset_ms = fresh
-                    self.server_clock = ServerClock(fresh, int(now * 1000))
-                    self._save_offset()
+                self._check_terminal()
+            if now - clock_read > CLOCK_REFRESH_SECONDS:
+                clock_read = now
+                weeks = self._read_weeks()
+                if weeks and weeks != self.weeks:
+                    self.weeks = weeks
+                    self._use_clock(rebuild=True)
+            self._watch_clock()
             for t in self.tracks:
                 ticks = api.copy_ticks_from(t.broker_symbol, self._server_seconds(t.last_ms), 100_000, api.COPY_TICKS_ALL)
                 if ticks is None:
@@ -405,6 +582,7 @@ class MT5Recorder:
                 self._append(t, ticks)
                 self._roll_day(t)
             busy = self._history_step()
+            self.offset_ms = self.server_clock.offset(int(self.clock() * 1000))
             self._write_status()
             self.stop_event.wait(0.05 if busy else POLL_SECONDS)
 
@@ -447,6 +625,92 @@ class MT5Recorder:
             first = first if first is not None else msc
         return None
 
+    def _check_terminal(self) -> None:
+        """Raise TerminalGone once the trader has closed the terminal."""
+        if not any(same_path(p, self.terminal_path) for p in self.terminals()) or self.api.terminal_info() is None:
+            raise TerminalGone()
+
+    def _settled(self, read):
+        """Read until two reads a moment apart return as many rows: the
+        terminal may still be downloading from the broker on the first.
+        None when the terminal did not answer."""
+        prev = out = None
+        for _ in range(HISTORY_SETTLE_TRIES):
+            out = read()
+            n = None if out is None else len(out)
+            if n is not None and n == prev:
+                return out
+            prev = n
+            if self.stop_event.wait(HISTORY_SETTLE_WAIT if n else 2 * HISTORY_SETTLE_WAIT):
+                return None
+        return out
+
+    def _rates(self, symbol: str, from_s: int, to_s: int):
+        """Hourly candles opening from `from_s` to `to_s` (server seconds)."""
+        api = self.api
+        return self._settled(lambda: api.copy_rates_range(symbol, api.TIMEFRAME_H1, from_s, to_s))
+
+    def _read_weeks(self) -> dict[int, int]:
+        """The server's offset in every week from the earliest start day to
+        now, from the clock instrument's hourly candles. Empty when the
+        terminal has none, or the clock instrument is not a currency pair."""
+        t = self._clock_track
+        if t is None or t.inst.kind != "fx":
+            return {}
+        starts = [self.history_from(x.inst.symbol) for x in self.tracks] if self.history_from else []
+        first = min([d for d in starts if d], default=self._today() - timedelta(days=int(self.backfill_days) + 21))
+        from_s = int(datetime(first.year, first.month, first.day, tzinfo=timezone.utc).timestamp()) - 8 * 86_400
+        rates = self._rates(t.broker_symbol, from_s, int(self.clock()) + 86_400)
+        if rates is None or not len(rates):
+            return {}
+        return week_offsets(np.asarray(rates["time"], np.int64) * 1000)
+
+    def _latest_quote_msc(self) -> int | None:
+        t = self.api.symbol_info_tick(self.broker_symbol)
+        return int(t.time_msc) if t is not None and getattr(t, "time_msc", 0) else None
+
+    def _market_moving(self) -> bool:
+        """Whether the clock instrument quoted in the last few minutes (by
+        the clock read from the candles); always True without one."""
+        if self.server_clock is None:
+            return True
+        msc = self._latest_quote_msc()
+        if msc is None:
+            return False
+        return int(self.clock() * 1000) - int(self.server_clock.to_utc([msc])[0]) < ACTIVE_WITHIN_MS
+
+    def _confirm_offset(self, offset_ms: int, now_ms: int) -> None:
+        """Take an offset read off a live quote as this week's."""
+        week = quote_week(now_ms)
+        if self.live_weeks.get(week) == offset_ms and self.server_clock is not None:
+            return
+        self.live_weeks[week] = offset_ms
+        if self.server_clock is None or self.server_clock.offset(now_ms) != offset_ms:
+            self._use_clock(rebuild=True)
+
+    def _use_clock(self, rebuild: bool = False) -> None:
+        if rebuild:
+            self.server_clock = ServerClock({**self.weeks, **self.live_weeks})
+        self.offset_ms = self.server_clock.offset(int(self.clock() * 1000))
+        self._save_offset()
+
+    def _watch_clock(self) -> None:
+        """Check the clock against the clock instrument's latest quote,
+        without waiting: a quote that changed since the last poll is
+        seconds old, so its stamp minus now is the offset. Runs before new
+        ticks are converted, so the first quotes of a week whose offset the
+        clock did not foresee are converted with the right one."""
+        msc = self._latest_quote_msc()
+        if msc is None:
+            return
+        now = self.clock()
+        seen = self._seen_quote
+        if seen is not None and msc > seen[0] and now - seen[1] < 60:
+            offset = measure_offset_ms(msc, int(now * 1000))
+            if offset is not None:
+                self._confirm_offset(offset, int(now * 1000))
+        self._seen_quote = (msc, now)
+
     def _save_offset(self) -> None:
         for t in self.tracks:
             manifest = t.store.manifest()
@@ -456,7 +720,7 @@ class MT5Recorder:
 
     def _server_seconds(self, utc_ms: int | None) -> int:
         utc_ms = utc_ms if utc_ms is not None else int(self.clock() * 1000)
-        return int((utc_ms + self.offset_ms) // 1000)
+        return int(self.server_clock.to_server(utc_ms) // 1000)
 
     def _load_last_recorded(self, t: Track) -> None:
         """Last tick already on disk: the newest open CSV, else the manifest."""
@@ -497,7 +761,7 @@ class MT5Recorder:
         """Write ticks after the last recorded one, in UTC, to their day's CSV."""
         if ticks is None or len(ticks) == 0:
             return
-        msc = np.asarray(ticks["time_msc"], np.int64) - self.offset_ms
+        msc = self.server_clock.to_utc(np.asarray(ticks["time_msc"], np.int64))
         bid = np.asarray(ticks["bid"], np.float64)
         ask = np.asarray(ticks["ask"], np.float64)
         keep = np.ones(len(msc), bool)
@@ -605,7 +869,7 @@ class MT5Recorder:
         now = self.clock()
         for k in range(len(self.tracks)):
             t = self.tracks[(self._history_turn + k) % len(self.tracks)]
-            if t.todo is None or now - t.todo_at > 60:
+            if t.todo is None or now - t.todo_at > HISTORY_TODO_SECONDS:
                 t.todo, t.todo_at = self._history_todo(t), now
             t.history["pending"] = len(t.todo)
             if not t.todo:
@@ -620,27 +884,40 @@ class MT5Recorder:
             return True
         return False
 
-    def _read_day(self, t: Track, day: date) -> np.ndarray | None:
-        """The broker's ticks for one UTC day, read until two reads agree."""
+    def _read_day(self, t: Track, day: date):
+        """The broker's ticks for one UTC day, and the server hours it has a
+        candle for that have no tick. None when the terminal did not answer."""
         a = int(datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp() * 1000)
-        b = a + MS_PER_DAY
         frm = self.server_clock.to_server(a) // 1000
-        to = self.server_clock.to_server(b) // 1000
-        prev = None
-        for _ in range(HISTORY_SETTLE_TRIES):
-            ticks = self.api.copy_ticks_range(t.broker_symbol, frm, to, self.api.COPY_TICKS_ALL)
-            n = 0 if ticks is None else len(ticks)
-            if prev is not None and n == prev:
-                return ticks
-            prev = n
-            if self.stop_event.wait(HISTORY_SETTLE_WAIT if n else 2 * HISTORY_SETTLE_WAIT):
-                return None
-        return ticks
+        to = self.server_clock.to_server(a + MS_PER_DAY) // 1000
+        rates = self._rates(t.broker_symbol, frm, to - 1)
+        ticks = self._settled(lambda: self.api.copy_ticks_range(t.broker_symbol, frm, to, self.api.COPY_TICKS_ALL))
+        if rates is None or ticks is None:
+            return None
+        hours = np.asarray(rates["time"], np.int64) * 1000
+        if "tick_volume" in (rates.dtype.names or ()):
+            hours = hours[np.asarray(rates["tick_volume"]) > 0]
+        ticked = np.unique(np.asarray(ticks["time_msc"], np.int64) // MS_PER_HOUR * MS_PER_HOUR)
+        return ticks, np.setdiff1d(hours, ticked)
 
     def _history_day(self, t: Track, day: date) -> None:
-        ticks = self._read_day(t, day)
-        if ticks is None:
-            return
+        """Fetch and store one day. An empty day, or one with hours missing,
+        is read again a moment later (the terminal may still be downloading
+        it); one still missing hours is left for a later pass, a few times,
+        then kept as it is."""
+        read = self._read_day(t, day)
+        if read is not None and (len(read[1]) or not len(read[0])):
+            if self.stop_event.wait(HISTORY_RECHECK_WAIT):
+                return
+            read = self._read_day(t, day)
+        if read is None:
+            return  # the terminal did not answer; the day comes round again
+        ticks, missing = read
+        if len(missing):
+            t.tries[day] = t.tries.get(day, 0) + 1
+            if t.tries[day] < HISTORY_DAY_TRIES:
+                return
+        t.tries.pop(day, None)
         entry = {"source": "mt5-history", "ticks": 0, "complete": True}
         if len(ticks):
             utc = self.server_clock.to_utc(np.asarray(ticks["time_msc"], np.int64))
@@ -654,6 +931,8 @@ class MT5Recorder:
             if len(ts):
                 t.store.write_day(day, ts, bid, ask, flag)
                 entry = day_entry("mt5-history", ts, flag, complete=True)
+        if len(missing):
+            entry["missing_hours"] = int(len(missing))
         manifest = t.store.manifest()
         manifest.setdefault("days", {})[day.isoformat()] = entry
         manifest["days"] = dict(sorted(manifest["days"].items()))
