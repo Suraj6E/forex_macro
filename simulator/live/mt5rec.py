@@ -1,4 +1,4 @@
-"""Record live ticks from a MetaTrader 5 terminal into a feed.
+"""Record ticks from a MetaTrader 5 terminal: live, and its history.
 
 What it does, in order:
   1. Waits until the chosen terminal is running. It never starts one:
@@ -6,21 +6,33 @@ What it does, in order:
      Advisor that trades the account. It only attaches to a terminal the
      trader opened.
   2. Attaches, reads the account's trade server and finds the broker's name
-     for EUR/USD. It only reads: it never calls an order function.
+     for each instrument (EURUSD, XAGUSD, USOIL.cash, ...). It only reads:
+     it never calls an order function.
   3. Works out the server's clock offset. The MetaTrader5 package returns
      tick times in the trade server's time zone (commonly UTC+2/+3), so
      offset = round(latest tick time - now, to 30 min) while the market is
      moving, and is re-checked every 10 minutes (daylight saving).
-  4. Fills the gap since the last recorded tick from the terminal's own tick
-     history (up to `backfill_days`), so stopping the recorder for a while
-     does not leave a hole.
-  5. Polls new ticks twice a second and appends them, converted to UTC, to
+  4. Fills the gap since the last recorded tick from the terminal (from the
+     start of the UTC day `backfill_days` ago at most), then polls new ticks
+     twice a second and appends them, converted to UTC, to
      `live/YYYY-MM-DD.csv`, flushing every poll.
+  5. Between polls, fetches older days from the broker's tick history,
+     newest first, back to each instrument's start day, until the broker
+     has nothing older. A terminal keeps only a small buffer of recent ticks
+     on disk; older ones are downloaded from the broker's server when asked
+     for, which is what this does.
   6. When a UTC day closes, cleans it with Layer 0's rules and stores it as
      Parquet, like the replay feed.
 
-One feed per trade server: prices and spreads differ by broker, so feeds
-are never mixed. A file lock stops two recorders writing the same feed.
+History needs the server's offset on past days, not today's: a broker on
+UTC+2 in winter is on UTC+3 in summer. Most MT5 brokers keep their clock at
+New York + 7 hours, so the week opens at 00:00 server time all year; when
+the offset measured now matches that rule, history uses it, otherwise the
+measured offset as a fixed one.
+
+One feed per trade server and instrument: prices and spreads differ by
+broker, so feeds are never mixed. A file lock stops two recorders writing
+the same feed.
 """
 
 from __future__ import annotations
@@ -31,20 +43,31 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
 from simulator import config
 from simulator.data.quality import flag_day
 from simulator.data.ticks import FeedStore, day_entry
+from simulator.instruments import INSTRUMENTS, Instrument
 from simulator.live.feed import read_csv_bytes
 from simulator.live.winproc import FileLock, running_terminals, same_path
 
 MS_PER_DAY = 86_400_000
+MS_PER_HOUR = 3_600_000
 POLL_SECONDS = 0.5
 OFFSET_CHECK_SECONDS = 600
 STATUS_EVERY_SECONDS = 2.0
 BACKFILL_CHUNK_MS = 6 * 3600 * 1000
+#: The broker has no older history once this many weekdays in a row are empty.
+HISTORY_EMPTY_RUN = 10
+#: A day of history is accepted once two reads a moment apart agree; the
+#: terminal may still be downloading it from the broker on the first.
+HISTORY_SETTLE_TRIES = 8
+HISTORY_SETTLE_WAIT = 0.3
+#: Seconds of history work between two polls of live ticks.
+HISTORY_BUDGET_SECONDS = 0.5
 
 TRADE_MODES = {0: "demo", 1: "contest", 2: "real"}
 
@@ -82,40 +105,137 @@ def measure_offset_ms(tick_time_msc: int, now_ms: int) -> int | None:
     return None
 
 
+# -- the broker's clock on past days ------------------------------------------
+
+
+def _nth_sunday(year: int, month: int, n: int) -> date:
+    d = date(year, month, 1)
+    d += timedelta(days=(6 - d.weekday()) % 7)
+    return d + timedelta(weeks=n - 1)
+
+
+def _last_sunday(year: int, month: int) -> date:
+    d = (date(year, month + 1, 1) if month < 12 else date(year + 1, 1, 1)) - timedelta(days=1)
+    return d - timedelta(days=(d.weekday() + 1) % 7)
+
+
+def us_dst(utc_ms: int) -> bool:
+    """Whether New York is on summer time at this instant (rules since 2007:
+    second Sunday of March to first Sunday of November; before, first
+    Sunday of April to last Sunday of October; both at 02:00 local)."""
+    t = datetime.fromtimestamp(utc_ms / 1000, tz=timezone.utc)
+    y = t.year
+    if y >= 2007:
+        start, end = _nth_sunday(y, 3, 2), _nth_sunday(y, 11, 1)
+    else:
+        start, end = _nth_sunday(y, 4, 1), _last_sunday(y, 10)
+    begin = datetime(start.year, start.month, start.day, 7, tzinfo=timezone.utc)  # 02:00 EST
+    finish = datetime(end.year, end.month, end.day, 6, tzinfo=timezone.utc)  # 02:00 EDT
+    return begin <= t < finish
+
+
+def ny7_offset_ms(utc_ms: int) -> int:
+    """Server offset of a broker whose clock is New York + 7 hours."""
+    return (3 if us_dst(utc_ms) else 2) * MS_PER_HOUR
+
+
+class ServerClock:
+    """The broker's offset from UTC at any instant, past or present."""
+
+    def __init__(self, measured_ms: int, now_ms: int) -> None:
+        self.rule = "ny+7" if measured_ms == ny7_offset_ms(now_ms) else "fixed"
+        self.fixed_ms = measured_ms
+
+    def offset(self, utc_ms: int) -> int:
+        return ny7_offset_ms(utc_ms) if self.rule == "ny+7" else self.fixed_ms
+
+    def to_server(self, utc_ms: int) -> int:
+        return utc_ms + self.offset(utc_ms)
+
+    def to_utc(self, server_ms: np.ndarray) -> np.ndarray:
+        """Server stamps to UTC. Offsets change on Sunday mornings, when the
+        market is shut, so the offset two hours before a stamp is its own."""
+        server_ms = np.asarray(server_ms, np.int64)
+        if self.rule == "fixed" or not len(server_ms):
+            return server_ms - self.fixed_ms
+        first = self.offset(int(server_ms[0]) - 2 * MS_PER_HOUR)
+        last = self.offset(int(server_ms[-1]) - 2 * MS_PER_HOUR)
+        if first == last:
+            return server_ms - first
+        offs = np.array([self.offset(int(s) - 2 * MS_PER_HOUR) for s in server_ms], np.int64)
+        return server_ms - offs
+
+    def describe(self) -> str:
+        if self.rule == "ny+7":
+            return "UTC+2 in winter, UTC+3 in US summer time (New York + 7 h)"
+        return f"UTC{self.fixed_ms / MS_PER_HOUR:+g} h all year"
+
+
+# -- one instrument ---------------------------------------------------------------
+
+
+class Track:
+    """One instrument being recorded: its broker symbol, its feed folder and
+    how far recording and history have got."""
+
+    def __init__(self, inst: Instrument, broker_symbol: str, digits: int, feed: Path) -> None:
+        self.inst = inst
+        self.broker_symbol = broker_symbol
+        self.digits = digits
+        self.feed = feed
+        self.store = FeedStore(feed, scale=max(inst.scale, 10**digits))
+        self.lock: FileLock | None = None
+        self.last_ms: int | None = None  # last recorded tick, UTC ms
+        self.at_last = 0  # how many recorded ticks share that millisecond
+        self.files: dict[date, object] = {}
+        self.ticks_today = 0
+        self.day: date | None = None
+        self.history = {"state": "off", "first_day": None, "pending": None, "floor": None, "days": 0}
+        self.todo: list[date] | None = None  # missing history days, newest first
+        self.todo_at = 0.0
+        self.empty_run = 0
+        self.empty_from: date | None = None
+
+    def status(self) -> dict:
+        return {"symbol": self.inst.symbol, "label": self.inst.label, "broker_symbol": self.broker_symbol,
+                "last_tick_ms": self.last_ms, "ticks_today": self.ticks_today, "history": dict(self.history)}
+
+
 class MT5Recorder:
     def __init__(
         self,
         terminal_path: str,
-        symbol: str = config.SYMBOL,
+        symbol: str | None = None,
         root: Path = config.MT5_DIR,
         backfill_days: float = 3.0,
         api=None,
         clock=time.time,
         terminals=running_terminals,
         offset_wait: float = 20.0,
+        symbols: list[str] | None = None,
+        history_from: Callable[[str], date | None] | None = None,
     ) -> None:
         self.terminal_path = terminal_path
         self.offset_wait = offset_wait
-        self.symbol = symbol
+        self.symbols = [symbol] if symbol else list(symbols or INSTRUMENTS)
         self.root = Path(root)
         self.backfill_days = backfill_days
+        self.history_from = history_from
         self._api = api
         self.clock = clock
         self.terminals = terminals
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.status = {"state": "stopped", "message": "", "terminal": terminal_path}
-        self.feed: Path | None = None
-        self.store: FeedStore | None = None
+        self.server_dir: Path | None = None
+        self.tracks: list[Track] = []
         self.offset_ms: int | None = None
+        self.server_clock: ServerClock | None = None
+        #: The instrument whose ticks set the clock: EUR/USD when the broker
+        #: has it, being the busiest.
         self.broker_symbol: str | None = None
-        self.digits = 5
-        self.last_ms: int | None = None  # last recorded tick, UTC ms
-        self.at_last = 0  # how many recorded ticks share that millisecond
-        self._files: dict[date, object] = {}
-        self._lock: FileLock | None = None
-        self._ticks_today = 0
         self._status_at = 0.0
+        self._history_turn = 0
 
     # -- control -------------------------------------------------------------
 
@@ -139,6 +259,9 @@ class MT5Recorder:
         if self.thread:
             self.thread.join(wait)
 
+    def track(self, symbol: str) -> Track | None:
+        return next((t for t in self.tracks if t.inst.symbol == symbol), None)
+
     def _set(self, state: str, message: str = "", **extra) -> None:
         self.status.update({"state": state, "message": message, **extra})
         self._write_status(force=True)
@@ -148,20 +271,26 @@ class MT5Recorder:
         if not force and now - self._status_at < STATUS_EVERY_SECONDS:
             return
         self._status_at = now
+        lasts = [t.last_ms for t in self.tracks if t.last_ms]
         self.status.update({
             "terminal": self.terminal_path,
             "broker_symbol": self.broker_symbol,
             "offset_hours": None if self.offset_ms is None else self.offset_ms / 3_600_000,
-            "last_tick_ms": self.last_ms,
-            "ticks_today": self._ticks_today,
+            "history_clock": self.server_clock.describe() if self.server_clock else None,
+            "last_tick_ms": max(lasts) if lasts else None,
+            "ticks_today": sum(t.ticks_today for t in self.tracks),
             "updated_ms": int(now * 1000),
-            "feed": str(self.feed) if self.feed else None,
+            "symbols": [t.status() for t in self.tracks],
+            "feed": str(self.server_dir) if self.server_dir else None,
         })
-        if self.feed is not None:
-            path = self.feed / "status.json"
+        if self.server_dir is not None:
+            path = self.server_dir / "status.json"
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.status, indent=1), encoding="utf-8")
-            tmp.replace(path)
+            try:
+                tmp.write_text(json.dumps(self.status, indent=1), encoding="utf-8")
+                tmp.replace(path)
+            except OSError:
+                pass  # a reader had it open; the next write will do
 
     # -- main loop -----------------------------------------------------------
 
@@ -181,14 +310,15 @@ class MT5Recorder:
                 self._set("error", f"{type(exc).__name__}: {exc}")
                 self.stop_event.wait(10)
             finally:
-                self._close_files()
+                for t in self.tracks:
+                    self._close_files(t)
+                    if t.lock:
+                        t.lock.release()
+                        t.lock = None
                 try:
                     self.api.shutdown()
                 except Exception:
                     pass
-                if self._lock:
-                    self._lock.release()
-                    self._lock = None
         self._set("stopped", "Recorder stopped.")
 
     def _session(self) -> None:
@@ -200,28 +330,43 @@ class MT5Recorder:
         if account is None:
             raise RuntimeError("The terminal is not logged in to an account")
         mode = TRADE_MODES.get(int(account.trade_mode), str(account.trade_mode))
-        self.broker_symbol = self._find_symbol()
-        info = api.symbol_info(self.broker_symbol)
-        self.digits = int(info.digits) if info is not None else 5
-        api.symbol_select(self.broker_symbol, True)
-
-        self.feed = feed_dir_for(account.server, self.symbol, self.root)
-        self.store = FeedStore(self.feed)
-        (self.feed / "live").mkdir(parents=True, exist_ok=True)
-        self._lock = FileLock(self.feed / "recorder.lock")
-        if not self._lock.acquire():
-            self._lock = None
-            raise RuntimeError("Another recorder is already writing this feed")
+        self.server_dir = self.root / slug(account.server)
         self.status.update({"server": account.server, "company": account.company, "account_type": mode})
 
-        manifest = self.store.manifest()
-        manifest.update({"symbol": self.symbol, "source": "mt5", "server": account.server,
-                         "company": account.company, "broker_symbol": self.broker_symbol})
-        self.store.save_manifest(manifest)
+        self.tracks = []
+        missing = []
+        for symbol in self.symbols:
+            inst = INSTRUMENTS[symbol]
+            name = self._find_symbol(inst)
+            if name is None:
+                missing.append(inst.label)
+                continue
+            info = api.symbol_info(name)
+            api.symbol_select(name, True)
+            track = Track(inst, name, int(info.digits) if info is not None else inst.digits,
+                          feed_dir_for(account.server, inst.symbol, self.root))
+            (track.feed / "live").mkdir(parents=True, exist_ok=True)
+            track.lock = FileLock(track.feed / "recorder.lock")
+            if not track.lock.acquire():
+                track.lock = None
+                missing.append(f"{inst.label} (another recorder is writing it)")
+                continue
+            manifest = track.store.manifest()
+            manifest.update({"symbol": inst.symbol, "source": "mt5", "server": account.server,
+                             "company": account.company, "broker_symbol": name, "scale": track.store.scale})
+            track.store.save_manifest(manifest)
+            self.tracks.append(track)
+        if not self.tracks:
+            raise RuntimeError("This account has none of the simulator's instruments")
+        self.status["missing"] = missing
+        clock_track = self.track(config.SYMBOL) or self.tracks[0]
+        self.broker_symbol = clock_track.broker_symbol
+
         measured = self._measure_offset()
-        self.offset_ms = measured if measured is not None else manifest.get("offset_ms")
-        self._load_last_recorded()
-        self._compact_closed_days()
+        self.offset_ms = measured if measured is not None else clock_track.store.manifest().get("offset_ms")
+        for t in self.tracks:
+            self._load_last_recorded(t)
+            self._compact_closed_days(t)
 
         while self.offset_ms is None and not self.stop_event.is_set():
             self._set("waiting", "Market quiet: waiting for a live tick to read the server clock")
@@ -229,46 +374,60 @@ class MT5Recorder:
             self.offset_ms = self._measure_offset()
         if self.stop_event.is_set():
             return
+        self.server_clock = ServerClock(self.offset_ms, int(self.clock() * 1000))
         self._save_offset()
 
         self._set("backfilling", "Filling the gap from the terminal's tick history")
-        self._backfill()
-        self._roll_day()
-        self._set("recording", f"Recording {self.broker_symbol} from {account.server} ({mode})")
+        for t in self.tracks:
+            self._backfill(t)
+            self._roll_day(t)
+        names = ", ".join(t.broker_symbol for t in self.tracks)
+        self._set("recording", f"Recording {names} from {account.server} ({mode})")
 
         checked = self.clock()
         while not self.stop_event.is_set():
             now = self.clock()
-            quiet = self.last_ms is None or now * 1000 - self.last_ms > REMEASURE_AFTER_MS
+            last = clock_track.last_ms
+            quiet = last is None or now * 1000 - last > REMEASURE_AFTER_MS
             if quiet or now - checked > OFFSET_CHECK_SECONDS:
                 checked = now
                 fresh = self._measure_offset()
                 if fresh is not None and fresh != self.offset_ms:
                     self.offset_ms = fresh
+                    self.server_clock = ServerClock(fresh, int(now * 1000))
                     self._save_offset()
-            ticks = api.copy_ticks_from(self.broker_symbol, self._server_seconds(self.last_ms), 100_000, api.COPY_TICKS_ALL)
-            if ticks is None:
-                if api.terminal_info() is None:
-                    raise TerminalGone()
-                ticks = []
-            self._append(ticks)
-            self._roll_day()
+            for t in self.tracks:
+                ticks = api.copy_ticks_from(t.broker_symbol, self._server_seconds(t.last_ms), 100_000, api.COPY_TICKS_ALL)
+                if ticks is None:
+                    if api.terminal_info() is None:
+                        raise TerminalGone()
+                    ticks = []
+                self._append(t, ticks)
+                self._roll_day(t)
+            busy = self._history_step()
             self._write_status()
-            self.stop_event.wait(POLL_SECONDS)
+            self.stop_event.wait(0.05 if busy else POLL_SECONDS)
 
     # -- pieces --------------------------------------------------------------
 
-    def _find_symbol(self) -> str:
+    def _find_symbol(self, inst: Instrument) -> str | None:
+        """The broker's name for an instrument: its own name, a known alias,
+        or the shortest symbol containing one (EURUSD.r, USOIL.cash)."""
         api = self.api
-        exact = api.symbol_info(self.symbol)
-        if exact is not None:
-            return self.symbol
-        candidates = api.symbols_get(f"*{self.symbol}*") or []
-        base, quote = self.symbol[:3], self.symbol[3:]
-        matches = [s for s in candidates if getattr(s, "currency_base", "") == base and getattr(s, "currency_profit", "") == quote]
+        for name in (inst.symbol, *inst.mt5_names):
+            if api.symbol_info(name) is not None:
+                return name
+        if inst.kind == "fx":
+            candidates = api.symbols_get(f"*{inst.symbol}*") or []
+            matches = [s for s in candidates
+                       if getattr(s, "currency_base", "") == inst.base and getattr(s, "currency_profit", "") == inst.quote]
+        else:
+            matches = []
+            for alias in inst.mt5_names:
+                matches += [s for s in api.symbols_get(f"*{alias}*") or [] if alias.upper() in s.name.upper()]
         if not matches:
-            raise RuntimeError(f"This account has no {self.symbol} symbol")
-        return min(matches, key=lambda s: len(s.name)).name
+            return None
+        return min(matches, key=lambda s: (len(s.name), s.name)).name
 
     def _measure_offset(self) -> int | None:
         """Watch the latest tick until it changes; the new one is seconds
@@ -289,48 +448,52 @@ class MT5Recorder:
         return None
 
     def _save_offset(self) -> None:
-        manifest = self.store.manifest()
-        manifest["offset_ms"] = self.offset_ms
-        self.store.save_manifest(manifest)
+        for t in self.tracks:
+            manifest = t.store.manifest()
+            manifest["offset_ms"] = self.offset_ms
+            manifest["history_clock"] = self.server_clock.rule if self.server_clock else None
+            t.store.save_manifest(manifest)
 
     def _server_seconds(self, utc_ms: int | None) -> int:
         utc_ms = utc_ms if utc_ms is not None else int(self.clock() * 1000)
         return int((utc_ms + self.offset_ms) // 1000)
 
-    def _load_last_recorded(self) -> None:
+    def _load_last_recorded(self, t: Track) -> None:
         """Last tick already on disk: the newest open CSV, else the manifest."""
-        self.last_ms, self.at_last = None, 0
-        live = sorted((self.feed / "live").glob("*.csv"))
+        t.last_ms, t.at_last = None, 0
+        live = sorted((t.feed / "live").glob("*.csv"))
         for path in live:
             _trim_partial_line(path)
         for path in reversed(live):
             ts, _b, _a = read_csv_bytes(path.read_bytes())
             if len(ts):
                 ms = ts // 1_000_000
-                self.last_ms = int(ms[-1])
-                self.at_last = int((ms == ms[-1]).sum())
+                t.last_ms = int(ms[-1])
+                t.at_last = int((ms == ms[-1]).sum())
                 return
-        days = self.store.manifest().get("days", {})
+        days = t.store.manifest().get("days", {})
         lasts = [e["last_ns"] for e in days.values() if e.get("last_ns")]
         if lasts:
-            self.last_ms = max(lasts) // 1_000_000
-            self.at_last = 1
+            t.last_ms = max(lasts) // 1_000_000
+            t.at_last = 1
 
-    def _backfill(self) -> None:
+    def _backfill(self, t: Track) -> None:
+        """Everything since the last recorded tick, or since the start of the
+        UTC day `backfill_days` ago, so the first day is a whole one."""
         now_ms = int(self.clock() * 1000)
-        start = now_ms - int(self.backfill_days * MS_PER_DAY)
-        if self.last_ms is not None:
-            start = max(start, self.last_ms)
+        start = (now_ms - int(self.backfill_days * MS_PER_DAY)) // MS_PER_DAY * MS_PER_DAY
+        if t.last_ms is not None:
+            start = max(start, t.last_ms)
         api = self.api
         while start < now_ms and not self.stop_event.is_set():
             end = min(start + BACKFILL_CHUNK_MS, now_ms)
-            ticks = api.copy_ticks_range(self.broker_symbol, self._server_seconds(start),
+            ticks = api.copy_ticks_range(t.broker_symbol, self._server_seconds(start),
                                          self._server_seconds(end) + 1, api.COPY_TICKS_ALL)
             if ticks is not None:
-                self._append(ticks)
+                self._append(t, ticks)
             start = end
 
-    def _append(self, ticks) -> None:
+    def _append(self, t: Track, ticks) -> None:
         """Write ticks after the last recorded one, in UTC, to their day's CSV."""
         if ticks is None or len(ticks) == 0:
             return
@@ -338,74 +501,177 @@ class MT5Recorder:
         bid = np.asarray(ticks["bid"], np.float64)
         ask = np.asarray(ticks["ask"], np.float64)
         keep = np.ones(len(msc), bool)
-        if self.last_ms is not None:
-            keep = msc > self.last_ms
-            same = np.flatnonzero(msc == self.last_ms)
-            keep[same[self.at_last:]] = True  # same millisecond, not yet written
+        if t.last_ms is not None:
+            keep = msc > t.last_ms
+            same = np.flatnonzero(msc == t.last_ms)
+            keep[same[t.at_last:]] = True  # same millisecond, not yet written
         msc, bid, ask = msc[keep], bid[keep], ask[keep]
         if not len(msc):
             return
         order = np.argsort(msc, kind="stable")
         msc, bid, ask = msc[order], bid[order], ask[order]
-        fmt = f"{{}},{{:.{self.digits}f}},{{:.{self.digits}f}}\n"
+        fmt = f"{{}},{{:.{t.digits}f}},{{:.{t.digits}f}}\n"
         day_idx = msc // MS_PER_DAY
         today = int(self.clock() * 1000) // MS_PER_DAY
         for d in np.unique(day_idx):
             m = day_idx == d
             day = date(1970, 1, 1) + timedelta(days=int(d))
-            fh = self._file(day)
-            fh.write("".join(fmt.format(int(t), float(b), float(a)) for t, b, a in zip(msc[m], bid[m], ask[m])))
+            fh = self._file(t, day)
+            fh.write("".join(fmt.format(int(a), float(b), float(c)) for a, b, c in zip(msc[m], bid[m], ask[m])))
             fh.flush()
             if d == today:
-                self._ticks_today += int(m.sum())
+                t.ticks_today += int(m.sum())
         last = int(msc[-1])
-        self.at_last = int((msc == last).sum()) + (self.at_last if last == self.last_ms else 0)
-        self.last_ms = last
+        t.at_last = int((msc == last).sum()) + (t.at_last if last == t.last_ms else 0)
+        t.last_ms = last
 
-    def _file(self, day: date):
-        fh = self._files.get(day)
+    def _file(self, t: Track, day: date):
+        fh = t.files.get(day)
         if fh is None:
-            fh = open(self.feed / "live" / f"{day.isoformat()}.csv", "a", encoding="ascii", newline="\n")
-            self._files[day] = fh
+            fh = open(t.feed / "live" / f"{day.isoformat()}.csv", "a", encoding="ascii", newline="\n")
+            t.files[day] = fh
         return fh
 
-    def _close_files(self) -> None:
-        for fh in self._files.values():
+    def _close_files(self, t: Track) -> None:
+        for fh in t.files.values():
             try:
                 fh.close()
             except OSError:
                 pass
-        self._files = {}
+        t.files = {}
 
-    def _roll_day(self) -> None:
+    def _today(self) -> date:
+        return date(1970, 1, 1) + timedelta(days=int(self.clock() * 1000) // MS_PER_DAY)
+
+    def _roll_day(self, t: Track) -> None:
         """Close and compact every day before today (UTC)."""
-        today = date(1970, 1, 1) + timedelta(days=int(self.clock() * 1000) // MS_PER_DAY)
-        for day in [d for d in self._files if d < today]:
-            self._files.pop(day).close()
-        self._compact_closed_days(before=today)
-        if self.status.get("day") != today.isoformat():
-            self.status["day"] = today.isoformat()
-            self._ticks_today = 0
+        today = self._today()
+        for day in [d for d in t.files if d < today]:
+            t.files.pop(day).close()
+        self._compact_closed_days(t, before=today)
+        if t.day != today:
+            t.day = today
+            t.ticks_today = 0
 
-    def _compact_closed_days(self, before: date | None = None) -> None:
+    def _compact_closed_days(self, t: Track, before: date | None = None) -> None:
         """Clean every finished day's CSV with Layer 0's rules into Parquet."""
-        before = before or date(1970, 1, 1) + timedelta(days=int(self.clock() * 1000) // MS_PER_DAY)
-        for path in sorted((self.feed / "live").glob("*.csv")):
+        before = before or self._today()
+        for path in sorted((t.feed / "live").glob("*.csv")):
             day = date.fromisoformat(path.stem)
-            if day >= before or day in self._files:
+            if day >= before or day in t.files:
                 continue
             ts, bid, ask = read_csv_bytes(path.read_bytes())
             ts, bid, ask, flag = flag_day(ts, bid, ask)
             if len(ts):
-                old_ts, old_bid, old_ask, _f = self.store.read_day(day)
+                old_ts, old_bid, old_ask, _f = t.store.read_day(day)
                 if len(old_ts):  # a day recorded in two sittings
                     ts, bid, ask, flag = flag_day(np.r_[old_ts, ts], np.r_[old_bid, bid], np.r_[old_ask, ask])
-                self.store.write_day(day, ts, bid, ask, flag)
-            manifest = self.store.manifest()
+                t.store.write_day(day, ts, bid, ask, flag)
+            manifest = t.store.manifest()
             manifest.setdefault("days", {})[day.isoformat()] = day_entry("mt5", ts, flag, complete=True)
             manifest["days"] = dict(sorted(manifest["days"].items()))
-            self.store.save_manifest(manifest)
+            t.store.save_manifest(manifest)
             path.unlink()
+
+    # -- history ---------------------------------------------------------------
+
+    def _history_todo(self, t: Track) -> list[date]:
+        """Weekdays from the start day to yesterday that the feed lacks,
+        newest first, stopping where the broker's history was found to end."""
+        start = self.history_from(t.inst.symbol) if self.history_from else None
+        if start is None:
+            return []
+        manifest = t.store.manifest()
+        floor = manifest.get("history_floor")
+        if floor and date.fromisoformat(floor) > start:
+            start = date.fromisoformat(floor)
+        have = set(manifest.get("days", {}))
+        have |= {p.stem for p in (t.feed / "live").glob("*.csv")}
+        out = []
+        d = self._today() - timedelta(days=1)
+        while d >= start:
+            if d.weekday() != 5 and d.isoformat() not in have:
+                out.append(d)
+            d -= timedelta(days=1)
+        return out
+
+    def _history_step(self) -> bool:
+        """Fetch one missing day for the next instrument in turn. True while
+        there is history left to fetch. Each instrument's list of missing
+        days is worked out again every minute, so a start day changed in the
+        page applies without restarting."""
+        if self.history_from is None or not self.tracks or self.server_clock is None:
+            return False
+        now = self.clock()
+        for k in range(len(self.tracks)):
+            t = self.tracks[(self._history_turn + k) % len(self.tracks)]
+            if t.todo is None or now - t.todo_at > 60:
+                t.todo, t.todo_at = self._history_todo(t), now
+            t.history["pending"] = len(t.todo)
+            if not t.todo:
+                t.history["state"] = "done" if self.history_from(t.inst.symbol) else "off"
+                continue
+            self._history_turn = (self._history_turn + k + 1) % len(self.tracks)
+            t.history["state"] = "fetching"
+            started = time.monotonic()
+            while t.todo and time.monotonic() - started < HISTORY_BUDGET_SECONDS and not self.stop_event.is_set():
+                self._history_day(t, t.todo.pop(0))
+            t.history["pending"] = len(t.todo)
+            return True
+        return False
+
+    def _read_day(self, t: Track, day: date) -> np.ndarray | None:
+        """The broker's ticks for one UTC day, read until two reads agree."""
+        a = int(datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp() * 1000)
+        b = a + MS_PER_DAY
+        frm = self.server_clock.to_server(a) // 1000
+        to = self.server_clock.to_server(b) // 1000
+        prev = None
+        for _ in range(HISTORY_SETTLE_TRIES):
+            ticks = self.api.copy_ticks_range(t.broker_symbol, frm, to, self.api.COPY_TICKS_ALL)
+            n = 0 if ticks is None else len(ticks)
+            if prev is not None and n == prev:
+                return ticks
+            prev = n
+            if self.stop_event.wait(HISTORY_SETTLE_WAIT if n else 2 * HISTORY_SETTLE_WAIT):
+                return None
+        return ticks
+
+    def _history_day(self, t: Track, day: date) -> None:
+        ticks = self._read_day(t, day)
+        if ticks is None:
+            return
+        entry = {"source": "mt5-history", "ticks": 0, "complete": True}
+        if len(ticks):
+            utc = self.server_clock.to_utc(np.asarray(ticks["time_msc"], np.int64))
+            a = int(datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp() * 1000)
+            inside = (utc >= a) & (utc < a + MS_PER_DAY)
+            ts = utc[inside] * 1_000_000
+            bid = np.asarray(ticks["bid"], np.float64)[inside]
+            ask = np.asarray(ticks["ask"], np.float64)[inside]
+            order = np.argsort(ts, kind="stable")
+            ts, bid, ask, flag = flag_day(ts[order], bid[order], ask[order])
+            if len(ts):
+                t.store.write_day(day, ts, bid, ask, flag)
+                entry = day_entry("mt5-history", ts, flag, complete=True)
+        manifest = t.store.manifest()
+        manifest.setdefault("days", {})[day.isoformat()] = entry
+        manifest["days"] = dict(sorted(manifest["days"].items()))
+        if entry["ticks"]:
+            t.empty_run, t.empty_from = 0, None
+            t.history["days"] += 1
+            if not t.history["first_day"] or day.isoformat() < t.history["first_day"]:
+                t.history["first_day"] = day.isoformat()
+        elif day.weekday() < 5:
+            t.empty_run += 1
+            t.empty_from = t.empty_from or day
+            if t.empty_run >= HISTORY_EMPTY_RUN:
+                # The broker keeps nothing older: remember where it ends, so
+                # no later run asks again.
+                manifest["history_floor"] = (t.empty_from + timedelta(days=1)).isoformat()
+                t.history["floor"] = manifest["history_floor"]
+                t.todo = []
+        t.store.save_manifest(manifest)
 
 
 def _trim_partial_line(path: Path) -> None:
@@ -418,13 +684,13 @@ def _trim_partial_line(path: Path) -> None:
 
 
 def read_status(root: Path = config.MT5_DIR) -> list[dict]:
-    """Status of every recorded feed, newest first (for the UI and CLI)."""
+    """Status of every recorded server, newest first."""
     out = []
-    for status_path in Path(root).glob("*/*/status.json"):
+    for status_path in Path(root).glob("*/status.json"):
         try:
             s = json.loads(status_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        s["feed_key"] = f"mt5:{status_path.parent.parent.name}"
+        s["feed_key"] = f"mt5:{status_path.parent.name}"
         out.append(s)
     return sorted(out, key=lambda s: s.get("updated_ms") or 0, reverse=True)

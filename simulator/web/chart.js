@@ -379,6 +379,7 @@
       setMarkers: setMarkers,
       attachOverlay: attachOverlay,
       addPointerHandler: addPointerHandler,
+      handlers: function () { return dragHandlers; },
       timeToX: timeToX, xToTime: xToTime, priceToY: priceToY, yToPrice: yToPrice,
       paneWidth: paneWidth, paneHeight: paneHeight,
       firstTime: function () { return times.length ? times[0] : null; },

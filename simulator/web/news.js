@@ -105,10 +105,12 @@
       return order;
     }
 
-    function draw(ctx, size) {
-      spots = [];
-      if (!events.length) return;
-      var col = colors(document.documentElement.dataset.theme);
+    // Where every dot is right now. Worked out again for each draw and for
+    // each pointer event, never cached between them: the price axis changes
+    // width when the crosshair appears, which moves every candle sideways.
+    function layout() {
+      var out = [];
+      if (!events.length) return out;
       var width = C.paneWidth(), base = C.paneHeight() - 9;
       groups().forEach(function (g) {
         var x = C.timeToX(g.bar);
@@ -116,22 +118,30 @@
         var k = 0;
         [3, 2, 1].forEach(function (imp) {
           if (g.impacts[imp] === undefined) return;
-          var y = base - k * STEP;
+          out.push({ x: x, y: base - k * STEP, impact: imp, released: g.impacts[imp], group: g });
           k++;
-          var c = col[imp];
-          ctx.beginPath();
-          ctx.arc(x, y, R, 0, Math.PI * 2);
-          ctx.lineWidth = 1.5;
-          if (g.impacts[imp]) { ctx.fillStyle = c.fill; ctx.fill(); ctx.strokeStyle = c.stroke; ctx.stroke(); }
-          else { ctx.fillStyle = col.ring; ctx.fill(); ctx.strokeStyle = c.fill; ctx.lineWidth = 2; ctx.stroke(); }
-          spots.push({ x: x, y: y, group: g });
         });
+      });
+      return out;
+    }
+
+    function draw(ctx, size) {
+      spots = layout();
+      if (!spots.length) return;
+      var col = colors(document.documentElement.dataset.theme);
+      spots.forEach(function (s) {
+        var c = col[s.impact];
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, R, 0, Math.PI * 2);
+        ctx.lineWidth = 1.5;
+        if (s.released) { ctx.fillStyle = c.fill; ctx.fill(); ctx.strokeStyle = c.stroke; ctx.stroke(); }
+        else { ctx.fillStyle = col.ring; ctx.fill(); ctx.strokeStyle = c.fill; ctx.lineWidth = 2; ctx.stroke(); }
       });
     }
 
     function hit(pt) {
       var best = null, bestD = R + 4;
-      spots.forEach(function (s) {
+      layout().forEach(function (s) {
         var d = Math.hypot(s.x - pt.x, s.y - pt.y);
         if (d < bestD) { bestD = d; best = s; }
       });
@@ -304,6 +314,7 @@
     }
 
     return { reload: reload, onClock: onClock, clear: clear, redraw: function () { overlay.request(); }, hide: hidePopup,
+             spots: function () { return spots; },
              count: function () { return events.length; } };
   }
 

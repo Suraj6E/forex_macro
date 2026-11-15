@@ -41,6 +41,11 @@ TIMEFRAMES: dict[str, tuple[int, str]] = {
 
 FIELDS = ("time", "open", "high", "low", "close", "spread", "ticks")
 
+#: Candles say which tick layout they were built from (see data/ticks.py).
+#: Ones built from the first layout hold some 2023 prices one unit in the
+#: last place off, so they are rebuilt once.
+TICK_LAYOUT = 2
+
 
 def tf_seconds(tf: str) -> int:
     try:
@@ -117,7 +122,7 @@ class TimeframeBars:
         return int(np.searchsorted(self.end_ns, sim_ns, side="right"))
 
     def slice(self, a: int, b: int) -> list[dict]:
-        return [bar_dict(self.arrays, i) for i in range(max(a, 0), max(b, 0))]
+        return [bar_dict(self.arrays, i) for i in range(max(a, 0), min(max(b, 0), len(self)))]
 
     def index_of_time(self, time_s: int) -> int:
         """Index of the first candle starting at or after `time_s`."""
@@ -201,7 +206,8 @@ class BarStore:
             tmp = directory / f"{tf}.tmp"
             pq.write_table(pa.table(bars.arrays), tmp, compression="zstd")
             tmp.replace(directory / f"{tf}.parquet")
-        (directory / "meta.json").write_text(json.dumps({"keep_flags": list(keep_flags)}), encoding="utf-8")
+        (directory / "meta.json").write_text(json.dumps({"keep_flags": list(keep_flags), "tick_layout": TICK_LAYOUT}),
+                                             encoding="utf-8")
 
     @classmethod
     def load(cls, directory: Path) -> "BarStore":
@@ -215,7 +221,8 @@ class BarStore:
 
     @staticmethod
     def exists(directory: Path, keep_flags=None) -> bool:
-        """Built, and built with these flags (a flag change needs a rebuild)."""
+        """Built, and built with these flags from the current tick layout
+        (a flag change or an older layout needs a rebuild)."""
         directory = Path(directory)
         if not all((directory / f"{tf}.parquet").exists() for tf in TIMEFRAMES):
             return False
@@ -225,4 +232,4 @@ class BarStore:
             meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
             return False
-        return sorted(meta.get("keep_flags", [])) == sorted(keep_flags)
+        return sorted(meta.get("keep_flags", [])) == sorted(keep_flags) and meta.get("tick_layout") == TICK_LAYOUT

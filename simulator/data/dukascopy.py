@@ -14,9 +14,12 @@ failed or was not yet published is fetched again next time, so a day is
 never left with a silent hole.
 
 The feed rate-limits: under load it answers HTTP 429, resets connections or
-stops answering for a while. Requests are paced (about 3 a second across all
-workers), and when the feed stops answering every worker pauses together,
-2 s doubling to 2 minutes, until it answers again.
+stops accepting connections altogether for hours. Requests are paced at
+about one a second across all workers, and when the feed stops answering
+every worker pauses together, 2 s doubling to 15 minutes, until it answers
+again. (At three a second, two days of catch-up on 14-15 Nov 2026 ended with
+the datafeed refusing connections from this machine while its website still
+answered.)
 """
 
 from __future__ import annotations
@@ -47,15 +50,13 @@ PUBLISH_DELAY_NS = 10 * 60 * NS_PER_SECOND
 #: A 404 for an hour older than this means "no data", not "not yet".
 SETTLED_NS = 3 * HOUR_NS
 
-WORKERS = 4
+WORKERS = 2
 RETRIES = 8
-TIMEOUT = (10, 25)
-MAX_PAUSE_SECONDS = 120.0
-#: Steady pace across all workers. The feed answers HTTP 429 when pushed;
-#: about 3 requests a second is gentler than the dukascopy-node downloader
-#: trading-research used (batches of 10, a second apart), and still fetches
-#: a year of hours in under an hour.
-MIN_INTERVAL_SECONDS = 0.33
+TIMEOUT = (15, 30)
+MAX_PAUSE_SECONDS = 900.0
+#: Steady pace across all workers: about one request a second. A year of
+#: one instrument is ~6,000 hour files, so about two hours.
+MIN_INTERVAL_SECONDS = 1.0
 
 
 def point_scale(symbol: str) -> float:

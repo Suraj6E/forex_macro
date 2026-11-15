@@ -140,18 +140,21 @@ then create a login with `manage.py createsuperuser`.
 
 ## Replay simulator
 
-A separate app on its own port: candle-by-candle EUR/USD tick replay with
-simulated orders, an automatic journal and drawing tools, plus a live mode on
-prices recorded from your MT5 terminal.
+A separate app on its own port: candle-by-candle tick replay of nine
+instruments (EUR/USD, GBP/USD, USD/JPY, EUR/JPY, GBP/JPY, EUR/GBP, silver,
+WTI and Brent) with tick volume, this project's economic calendar on the
+chart, simulated orders, an automatic journal and drawing tools, plus a live
+mode and broker tick history from your MT5 terminal.
 
 ```
 .\simulator.cmd
 ```
 
 It always opens at <http://127.0.0.1:8001/>, while Django stays on 8000;
-launching it again opens the running one. Preparing the data, fetching new
-Dukascopy hours and recording live ticks all run inside the app and show in
-its **Market data** panel. Details, fill rules and what was measured are in
+launching it again opens the running one. Preparing the data, downloading
+Dukascopy ticks, recording live ticks and fetching broker history all run
+inside the app and show in its **Market data** panel. Calendar events are read
+from this project's `db.sqlite3`, read only. Details, fill rules and what was measured are in
 [`simulator/README.md`](simulator/README.md).
 
 ## Screens

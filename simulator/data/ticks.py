@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -102,10 +103,27 @@ def ts_to_ns(column: pa.ChunkedArray | pa.Array) -> np.ndarray:
     return raw.to_numpy(zero_copy_only=False).astype(np.int64) * _UNIT_NS[column.type.unit]
 
 
+def _retry(fn, tries: int = 20, wait: float = 0.05):
+    """Run `fn`, retrying on the sharing errors Windows raises when one
+    thread replaces a file another is reading at that instant (a download
+    writing a day while a session reads it). Each lasts milliseconds."""
+    for attempt in range(tries):
+        try:
+            return fn()
+        except FileNotFoundError:
+            raise
+        except OSError:
+            # PermissionError from os.replace, or pyarrow's own OSError
+            # ("used by another process"), which carries no winerror.
+            if attempt == tries - 1:
+                raise
+            time.sleep(wait)
+
+
 def _atomic_write_table(table: pa.Table, path: Path, **options) -> None:
     tmp = path.with_suffix(".tmp")
     pq.write_table(table, tmp, compression="zstd", **options)
-    os.replace(tmp, path)
+    _retry(lambda: os.replace(tmp, path))
 
 
 #: Delta encoding suits ticks: times, prices and spreads move in small steps.
@@ -125,7 +143,7 @@ def infer_scale(*prices: np.ndarray, max_digits: int = 6) -> int:
 def _atomic_write_json(data: dict, path: Path) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    _retry(lambda: os.replace(tmp, path))
 
 
 class FeedStore:
@@ -148,7 +166,7 @@ class FeedStore:
     def manifest(self) -> dict:
         if not self.manifest_path.exists():
             return {"days": {}}
-        return json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        return json.loads(_retry(lambda: self.manifest_path.read_text(encoding="utf-8")))
 
     def save_manifest(self, manifest: dict) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -188,7 +206,7 @@ class FeedStore:
         if not path.exists():
             e = np.empty(0)
             return e.astype(np.int64), e, e, e.astype(np.int8)
-        t = pq.read_table(path)
+        t = _retry(lambda: pq.read_table(path))
         flag = t.column("flag").to_numpy().astype(np.int8)
         if "ms" not in t.column_names:  # first layout: float columns
             return (
@@ -206,7 +224,13 @@ class FeedStore:
         return sorted(self.ticks_dir.glob("*.parquet")) if self.ticks_dir.exists() else []
 
     def size_bytes(self) -> int:
-        return sum(p.stat().st_size for p in self.day_files())
+        total = 0
+        for p in self.day_files():
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass  # replaced or being replaced this instant
+        return total
 
 
 def day_entry(source: str, ts: np.ndarray, flag: np.ndarray, **extra) -> dict:

@@ -813,11 +813,22 @@
         ["State", "<span class='dot " + st[0] + "' style='display:inline-block;margin-right:6px'></span>" + esc(st[1]) + " · " + esc(rec.message || "")],
         ["Terminal", esc(rec.terminal || "")]
       ];
-      if (rec.server) rows.push(["Server", esc(rec.server) + " (" + esc(rec.account_type || "?") + ") · " + esc(rec.broker_symbol || "")]);
-      if (rec.offset_hours !== null && rec.offset_hours !== undefined) rows.push(["Server clock", "UTC" + (rec.offset_hours >= 0 ? "+" : "") + rec.offset_hours + " h, converted to UTC"]);
+      if (rec.server) rows.push(["Server", esc(rec.server) + " (" + esc(rec.account_type || "?") + ")"]);
+      if (rec.offset_hours !== null && rec.offset_hours !== undefined) rows.push(["Server clock", "UTC" + (rec.offset_hours >= 0 ? "+" : "") + rec.offset_hours + " h now, converted to UTC"]);
+      if (rec.history_clock) rows.push(["Past days", "server clock taken as " + esc(rec.history_clock)]);
       if (rec.last_tick_ms) rows.push(["Last tick", utc(rec.last_tick_ms) + " · " + ago(rec.last_tick_ms)]);
-      if (rec.ticks_today !== undefined) rows.push(["Ticks today", String(rec.ticks_today)]);
-      $("recStatus").innerHTML = "<dl class='kv'>" + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") + "</dl>";
+      if (rec.ticks_today !== undefined) rows.push(["Ticks today", num(rec.ticks_today)]);
+      if ((rec.missing || []).length) rows.push(["Not at this broker", esc(rec.missing.join(", "))]);
+      var syms = (rec.symbols || []).map(function (x) {
+        var h = x.history || {};
+        var hist = h.state === "fetching" ? "history: fetching, " + h.pending + " days to go" :
+          h.state === "done" ? "history: complete" + (h.floor ? " (broker has nothing before " + h.floor + ")" : "") : "history: off";
+        return "<tr><td class='mono'>" + esc(x.broker_symbol) + "</td><td>" + esc(x.label) + "</td><td class='mono'>" +
+          (x.last_tick_ms ? ago(x.last_tick_ms) : "-") + "</td><td class='n'>" + num(x.ticks_today || 0) + "</td><td class='tiny'>" + hist + "</td></tr>";
+      }).join("");
+      $("recStatus").innerHTML = "<dl class='kv'>" + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") + "</dl>" +
+        (syms ? "<div class='tablewrap'><table class='t'><thead><tr><th>Broker symbol</th><th>Instrument</th><th>Last tick</th><th class='n'>Today</th><th>History</th></tr></thead><tbody>" +
+          syms + "</tbody></table></div>" : "");
       if (rec.account_type === "real") $("recStatus").innerHTML += "<p class='warnline'>This is a real-money account. Recording only reads prices, but a demo account is the safer source.</p>";
     } else {
       $("recStatus").innerHTML = "<p class='tiny muted'>Not recording.</p>";
@@ -848,17 +859,26 @@
       var miss = !i.enabled ? "<span class='faint'>off</span>" : i.pending_days ?
         i.pending_days + " days<br><span class='pend'>≈ " + hours(i.pending_seconds) + " · " + gb(i.pending_bytes) + "</span>" + (busy ? " <span class='badge ok'>now</span>" : "") :
         "<span class='badge ok'>complete</span>";
+      var rec = d.live && d.live.recorder;
+      var rt = rec && (rec.symbols || []).filter(function (x) { return x.symbol === i.symbol; })[0];
+      var broker = (i.broker || []).map(function (f) {
+        return esc(f.label.replace(/^MT5 /, "")) + ": " + f.first_day + " → " + f.last_day + "<br><span class='pend'>" + f.days + " days</span>";
+      }).join("<br>");
+      if (rt && rt.history && rt.history.state === "fetching") broker += (broker ? "<br>" : "") + "<span class='badge ok'>fetching</span> <span class='pend'>" + rt.history.pending + " days to go</span>";
+      if (rec && rec.state === "recording" && !rt && (rec.missing || []).length) broker = broker || "<span class='faint'>not offered by this broker</span>";
       return "<tr class='" + (i.enabled ? "" : "off") + "'><td><b>" + esc(i.label) + "</b><br><span class='pend mono'>" + esc(i.symbol) + " · " + esc(i.currencies.join(" ")) + " news</span></td>" +
         "<td class='mono tiny'>" + have + "</td>" +
+        "<td class='mono tiny'>" + (broker || "<span class='faint'>-</span>") + "</td>" +
         "<td><input type='date' data-from='" + i.symbol + "' value='" + i.from + "' min='2003-01-01' max='" + new Date().toISOString().slice(0, 10) + "' title='Download ticks from this day on'></td>" +
         "<td class='tiny'>" + miss + "</td>" +
         "<td><label class='check' title='Download this instrument'><input type='checkbox' data-enabled='" + i.symbol + "'" + (i.enabled ? " checked" : "") + "></label></td></tr>";
     });
-    $("instTable").innerHTML = "<thead><tr><th>Instrument</th><th>Stored</th><th>From</th><th>Missing</th><th>On</th></tr></thead><tbody>" + rows.join("") + "</tbody>";
+    $("instTable").innerHTML = "<thead><tr><th>Instrument</th><th>Dukascopy</th><th>Broker (MT5)</th><th>From</th><th>Missing at Dukascopy</th><th>On</th></tr></thead><tbody>" + rows.join("") + "</tbody>";
     var disk = d.disk || {};
     $("diskInfo").innerHTML = "Still to download: " + totalPend + " days, ≈ " + hours(totalSec) + " and " + gb(totalBytes) + " at the datafeed's pace. " +
       "Disk: " + gb(disk.free_bytes || 0) + " free; downloads stop before it drops under " + gb(disk.min_free_bytes || 0) + ". " +
-      "Dukascopy's tick history goes back to 2003 for the currency pairs; an earlier <b>From</b> fetches more, oldest last.";
+      "Dukascopy's tick history goes back to 2003 for the currency pairs; an earlier <b>From</b> fetches more, oldest last. " +
+      "<b>From</b> and <b>On</b> also set how far back the recorder fetches each instrument's history from your broker.";
     var cal = d.calendar || {};
     $("calInfo").innerHTML = cal.ok ? num(cal.events) + " events with a time, " + utc(cal.first_ms).slice(0, 10) + " → " + utc(cal.last_ms).slice(0, 10) +
       ", rated high, medium or low, read from the fxmacro database (<span class='mono'>" + esc(cal.path) + "</span>). " +
@@ -1004,7 +1024,7 @@
   // ---------------------------------------------------------------- boot
 
   // Console handle for debugging: __sim.state, __sim.chart, __sim.drawings.
-  window.__sim = { state: S, chart: C, drawings: D, send: send };
+  window.__sim = { state: S, chart: C, drawings: D, news: N, send: send };
 
 
   var params = new URLSearchParams(location.search);

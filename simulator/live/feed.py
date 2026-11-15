@@ -15,6 +15,7 @@ day is closed and compacted.
 from __future__ import annotations
 
 import io
+import json
 import threading
 import time
 from collections import OrderedDict
@@ -26,7 +27,7 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 
 from simulator import config
-from simulator.data.bars import TIMEFRAMES, TimeframeBars, bars_from_ticks, concat_bars
+from simulator.data.bars import TIMEFRAMES, BarStore, TimeframeBars, bars_from_ticks, concat_bars
 from simulator.data.quality import SPREAD_MULTIPLE
 from simulator.data.ticks import DayTicks, FeedStore
 
@@ -151,7 +152,18 @@ class LiveFeedSource:
                 med = self._reference_spread(day, spread[good])
                 if med > 0:
                     good &= spread <= SPREAD_MULTIPLE * med
-                return DayTicks(day, ts[good], bid[good], ask[good])
+                ts, bid, ask = ts[good], bid[good], ask[good]
+                if self.store.day_path(day).exists():
+                    # Recorded in two sittings: the stored part comes first.
+                    old = self.load_closed(day)
+                    later = ts > (old.ts[-1] if len(old) else -1)
+                    ts, bid, ask = np.r_[old.ts, ts[later]], np.r_[old.bid, bid[later]], np.r_[old.ask, ask[later]]
+                return DayTicks(day, ts, bid, ask)
+            return self.load_closed(day)
+
+    def load_closed(self, day: date) -> DayTicks:
+        """The stored (Parquet) part of a day only."""
+        with self._lock:
             hit = self._closed.get(day)
             if hit is not None:
                 return hit
@@ -171,33 +183,107 @@ class LiveFeedSource:
         return None
 
 
-class FeedBars:
-    """Candles of a growing feed, computed from its ticks on demand.
-
-    Closed days are computed once; the open day is recomputed only when it
-    has new ticks, and only for the timeframe asked for.
-    """
+class _ClosedView:
+    """A feed's stored days only, for building their candles."""
 
     def __init__(self, source: LiveFeedSource) -> None:
         self.source = source
-        self._per_day: dict[tuple[date, str], tuple[int, dict]] = {}
-        self._joined: dict[str, tuple[tuple, TimeframeBars]] = {}
 
-    def __getitem__(self, tf: str) -> TimeframeBars:
+    def days(self) -> list[date]:
+        return self.source.days()
+
+    def load_day(self, day: date) -> DayTicks:
+        return self.source.load_closed(day)
+
+
+class JoinedBars:
+    """Stored candles followed by the open day's, without copying either.
+    Open days are always after every stored candle (they are today's)."""
+
+    def __init__(self, closed: TimeframeBars, open_: TimeframeBars) -> None:
+        self.closed, self.open = closed, open_
+        self.seconds = closed.seconds
+
+    def __len__(self) -> int:
+        return len(self.closed) + len(self.open)
+
+    def completed_count(self, sim_ns: int) -> int:
+        return self.closed.completed_count(sim_ns) + self.open.completed_count(sim_ns)
+
+    def index_of_time(self, time_s: int) -> int:
+        return self.closed.index_of_time(time_s) + self.open.index_of_time(time_s)
+
+    def slice(self, a: int, b: int) -> list[dict]:
+        n = len(self.closed)
+        a, b = max(a, 0), max(b, 0)
+        return self.closed.slice(a, min(b, n)) + self.open.slice(max(a - n, 0), max(b - n, 0))
+
+    @property
+    def arrays(self) -> dict:
+        return concat_bars([self.closed.arrays, self.open.arrays])
+
+
+class FeedBars:
+    """Candles of a recorded feed: stored ones for closed days, kept on disk
+    in `bars/` like the replay history's and updated when days are added
+    (years of broker history are not rebuilt on every frame), plus the open
+    day's, recomputed only when it has new ticks."""
+
+    def __init__(self, source: LiveFeedSource) -> None:
+        self.source = source
+        self.bars_dir = Path(source.dir) / "bars"
+        self.closed: BarStore | None = None
+        self._built: dict[str, int] = {}  # day -> ticks its candles were built from
+        self._version = None
+        self._lock = threading.Lock()
+        self._open: dict[tuple[date, str], tuple[int, TimeframeBars]] = {}
+
+    def _sync_closed(self) -> None:
+        try:
+            mtime = self.source.store.manifest_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            mtime = None
+        open_days = frozenset(d.isoformat() for d in self.source.days() if self.source.is_open(d))
+        version = (mtime, open_days)
+        if version == self._version and self.closed is not None:
+            return
+        with self._lock:
+            if self.closed is None:
+                self.closed, self._built = BarStore.empty(), {}
+                if BarStore.exists(self.bars_dir, self.source.keep_flags):
+                    try:
+                        self._built = json.loads((self.bars_dir / "days.json").read_text(encoding="utf-8"))
+                        self.closed = BarStore.load(self.bars_dir)
+                    except (FileNotFoundError, ValueError):
+                        self.closed, self._built = BarStore.empty(), {}
+            entries = self.source.store.manifest().get("days", {})
+            # An open day's candles are all built from its ticks below, even
+            # the part already stored, so no candle appears twice.
+            wanted = {d: e.get("ticks", 0) for d, e in entries.items() if e.get("ticks") and d not in open_days}
+            changed = [d for d, n in wanted.items() if self._built.get(d) != n]
+            changed += [d for d in self._built if d not in wanted]
+            if changed:
+                self.closed.replace_days(_ClosedView(self.source), [date.fromisoformat(d) for d in changed])
+                self._built = wanted
+                self.closed.save(self.bars_dir, self.source.keep_flags)
+                (self.bars_dir / "days.json").write_text(json.dumps(wanted), encoding="utf-8")
+            self._version = version
+
+    def __getitem__(self, tf: str) -> JoinedBars:
         seconds = TIMEFRAMES[tf][0]
-        parts, signature = [], []
+        self._sync_closed()
+        parts = []
         for day in self.source.days():
+            if not self.source.is_open(day):
+                continue
             t = self.source.load_day(day)
             key = (day, tf)
-            cached = self._per_day.get(key)
+            cached = self._open.get(key)
             if cached is None or cached[0] != len(t):
-                cached = (len(t), bars_from_ticks(t.ts, t.bid, t.ask, seconds))
-                self._per_day[key] = cached
+                cached = (len(t), TimeframeBars.from_arrays(seconds, bars_from_ticks(t.ts, t.bid, t.ask, seconds)))
+                self._open[key] = cached
             parts.append(cached[1])
-            signature.append((day, len(t)))
-        signature = tuple(signature)
-        hit = self._joined.get(tf)
-        if hit is None or hit[0] != signature:
-            hit = (signature, TimeframeBars.from_arrays(seconds, concat_bars(parts)))
-            self._joined[tf] = hit
-        return hit[1]
+        for key in [k for k in self._open if not self.source.is_open(k[0])]:
+            self._open.pop(key)
+        open_bars = TimeframeBars.from_arrays(seconds, concat_bars([p.arrays for p in parts]))
+        return JoinedBars(self.closed[tf], open_bars)

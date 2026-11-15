@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pyarrow.parquet as pq
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -66,7 +67,7 @@ REPLAY_FEED = "dukascopy"
 #: instrument has its latest weeks, and older history fills in behind.
 UPDATE_CHUNK_DAYS = 15
 #: Seconds per hour file at the datafeed's pace, for the time estimate.
-SECONDS_PER_HOUR_FILE = 0.4
+SECONDS_PER_HOUR_FILE = 1.05
 #: Bytes per stored tick in the compact layout, for estimates before an
 #: instrument has any data of its own.
 BYTES_PER_DAY_GUESS = 250_000
@@ -75,51 +76,101 @@ CALENDAR_AHEAD_NS = 3 * 86_400 * NS_PER_SECOND
 
 
 class Feed:
+    """A source of ticks and its candles. `bars` may be a function, so
+    listing feeds never loads candles into memory."""
+
     def __init__(self, key: str, label: str, source, bars, live: bool) -> None:
-        self.key, self.label, self.source, self.bars, self.live = key, label, source, bars, live
+        self.key, self.label, self.source, self._bars, self.live = key, label, source, bars, live
+
+    @property
+    def bars(self):
+        return self._bars() if callable(self._bars) else self._bars
 
 
 class Market:
-    """One instrument's replay history: its ticks and its candles."""
+    """One instrument's replay history: its ticks and its candles.
+
+    Candles are loaded into memory only while something uses them (a
+    session on this instrument, or one that converts its profit through
+    it): nine instruments over years would otherwise hold close to a
+    gigabyte. Downloads update the stored candles either way.
+    """
 
     def __init__(self, inst: Instrument) -> None:
         self.inst = inst
         self.dir = config.duka_dir(inst.symbol)
         self.bars_dir = self.dir / "bars"
         self.source = ParquetTickSource(self.dir)
-        self.bars: BarStore | None = None
-        self.lock = threading.Lock()
+        self._bars: BarStore | None = None
+        self.has_bars = False
+        self.lock = threading.RLock()
         self._size: tuple[float, int] = (0.0, 0)
 
     def load(self) -> bool:
-        """Candles from disk if they match the ticks' flags. True when the
+        """Whether stored candles match the ticks' flags. True when the
         market can be replayed."""
         self.source.refresh()
-        if self.source.ready and BarStore.exists(self.bars_dir, config.KEEP_FLAGS):
-            self.bars = BarStore.load(self.bars_dir)
+        self.has_bars = BarStore.exists(self.bars_dir, config.KEEP_FLAGS)
         return self.ready
 
     @property
+    def bars(self) -> BarStore | None:
+        with self.lock:
+            if self._bars is None and self.has_bars:
+                self._bars = BarStore.load(self.bars_dir)
+            return self._bars
+
+    def release(self) -> None:
+        with self.lock:
+            self._bars = None
+
+    @property
     def ready(self) -> bool:
-        return self.bars is not None and self.source.ready and len(self.bars["m1"]) > 0
+        return self.has_bars and self.source.ready
 
     @property
     def needs_build(self) -> bool:
-        return self.source.ready and self.bars is None
+        return self.source.ready and not self.has_bars
+
+    def stale_days(self) -> list[date]:
+        """Days whose stored candles do not hold exactly the day's kept
+        ticks: a download wrote more of a day after its candles were built
+        (stopped between the two, or an older version of this code). The
+        1-minute candles count their ticks, and the day index counts each
+        day's ticks by quality flag, so the check reads no tick file."""
+        if not self.has_bars:
+            return []
+        entries = self.source.store.manifest().get("days", {})
+        t = pq.read_table(self.bars_dir / "m1.parquet", columns=["time", "ticks"])
+        day_idx = t.column("time").to_numpy() // 86_400
+        uniq, inverse = np.unique(day_idx, return_inverse=True)
+        counted = dict(zip(uniq.tolist(), np.bincount(inverse, weights=t.column("ticks").to_numpy()).astype(np.int64).tolist()))
+        out = set()
+        for d, e in entries.items():
+            flags = e.get("flags") or []
+            kept = sum(flags[f] for f in config.KEEP_FLAGS if f < len(flags))
+            idx = (date.fromisoformat(d) - date(1970, 1, 1)).days
+            if counted.pop(idx, 0) != kept:
+                out.add(date.fromisoformat(d))
+        out |= {date(1970, 1, 1) + timedelta(days=int(k)) for k, n in counted.items() if n}
+        return sorted(out)
 
     def build(self, progress=None) -> None:
         bars = BarStore.build(self.source, progress=progress)
         bars.save(self.bars_dir, config.KEEP_FLAGS)
-        self.bars = bars
+        with self.lock:
+            self.has_bars = True
+            self._bars = None
 
     def add_days(self, days: list[date]) -> None:
-        """New or changed days: candles for exactly those, then saved."""
+        """New or changed days: candles for exactly those, then saved. A
+        store in use is updated in place, so open sessions see the days."""
         with self.lock:
             self.source.refresh()
-            bars = self.bars or BarStore.empty()
+            bars = self._bars or (BarStore.load(self.bars_dir) if self.has_bars else BarStore.empty())
             bars.replace_days(self.source, days)
             bars.save(self.bars_dir, config.KEEP_FLAGS)
-            self.bars = bars
+            self.has_bars = True
 
     def size_bytes(self) -> int:
         at, size = self._size
@@ -134,7 +185,10 @@ class Market:
         pending = dukascopy.pending_days(self.dir, start_day=start, now=now) if settings["enabled"] else []
         size = self.size_bytes()
         per_day = size / len(days) if len(days) >= 20 else BYTES_PER_DAY_GUESS
-        last = self.source.load_day(days[-1]) if days else None
+        # The last tick from the day index, not the file: the newest day is
+        # the one a download may be rewriting at this very moment.
+        entry = self.source._entries.get(days[-1].isoformat(), {}) if days else {}
+        last_ns = entry.get("last_ns")
         return {
             **self.inst.to_json(),
             "enabled": settings["enabled"],
@@ -143,7 +197,7 @@ class Market:
             "first_day": days[0].isoformat() if days else None,
             "last_day": days[-1].isoformat() if days else None,
             "days": len(days),
-            "last_tick_ms": int(last.ts[-1]) // 1_000_000 if last is not None and len(last) else None,
+            "last_tick_ms": last_ns // 1_000_000 if last_ns else None,
             "size_bytes": size,
             "pending_days": len(pending),
             "pending_bytes": int(len(pending) * per_day),
@@ -213,7 +267,8 @@ class Hub:
         layer0_pending = not FeedStore(eur.dir).manifest().get("layer0") and config.TICK_FILE.exists()
         migrations = self._migrations()
         builds = [m for m in self.markets.values() if m.needs_build]
-        if not (layer0_pending or migrations or builds):
+        stale = [m for m in self.markets.values() if m.stale_days()]
+        if not (layer0_pending or migrations or builds or stale):
             self.prepared = True
             if config.AUTO_UPDATE:
                 self.start_update()
@@ -246,6 +301,10 @@ class Hub:
             migrate_feed(feed_dir, scale, progress=on_file, stop=self._job_stop)
         for m in self.markets.values():
             m.source.refresh()
+            stale = m.stale_days()
+            if stale:
+                job.update(done=0, total=len(stale), message=f"Updating {m.inst.label} candles for {len(stale)} changed days")
+                m.add_days(stale)
             if m.needs_build:
                 days = len(m.source.days())
 
@@ -353,6 +412,7 @@ class Hub:
                 if summary["changed"]:
                     job["message"] = f"Building {m.inst.label} candles for the new days"
                     m.add_days(summary["changed"])
+                    self.trim_memory()
                 if summary["stopped"]:
                     break
         gaps = f"; {job['failed_hours']} hours did not answer and are retried next time" if job["failed_hours"] else ""
@@ -372,7 +432,7 @@ class Hub:
         out = {}
         m = self.markets[inst.symbol]
         if m.ready:
-            out[REPLAY_FEED] = Feed(REPLAY_FEED, "Dukascopy history", m.source, m.bars, live=False)
+            out[REPLAY_FEED] = Feed(REPLAY_FEED, "Dukascopy history", m.source, lambda m=m: m.bars, live=False)
         for feed_dir in sorted(config.MT5_DIR.glob(f"*/{inst.symbol}")):
             key = f"mt5:{feed_dir.parent.name}"
             cache_key = f"{key}/{inst.symbol}"
@@ -431,10 +491,36 @@ class Hub:
         config.LIVE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
         config.LIVE_SETTINGS.write_text(json.dumps(settings, indent=1), encoding="utf-8")
 
+    def in_use(self) -> set[str]:
+        """Instruments whose candles open sessions need, with the ones
+        their profit is converted through."""
+        out = set()
+        for live in self.live.values():
+            inst = instruments.get(live.meta.get("symbol"))
+            out.add(inst.symbol)
+            if inst.quote in CONVERSION and inst.base != "USD":
+                out.add(CONVERSION[inst.quote][0])
+        return out
+
+    def trim_memory(self) -> None:
+        keep = self.in_use()
+        for symbol, m in self.markets.items():
+            if symbol not in keep:
+                m.release()
+
+    def history_from(self, symbol: str) -> date | None:
+        """Where the recorder's broker history starts for an instrument:
+        the same start day as its downloads, or none when it is switched off."""
+        s = self.data_settings().get(symbol)
+        return date.fromisoformat(s["from"]) if s and s["enabled"] else None
+
+    def make_recorder(self, terminal: str) -> mt5rec.MT5Recorder:
+        return mt5rec.MT5Recorder(terminal, history_from=self.history_from)
+
     def start_recorder(self, terminal: str) -> None:
         if self.recorder is not None:
             self.recorder.stop()
-        self.recorder = mt5rec.MT5Recorder(terminal)
+        self.recorder = self.make_recorder(terminal)
         self.recorder.start()
         self.save_live_settings({"terminal": terminal, "autostart": True})
 
@@ -450,15 +536,44 @@ class Hub:
 hub = Hub()
 
 
+def _quiet_resets(loop, context) -> None:
+    """Windows reports every browser tab closed mid-request as a
+    ConnectionResetError from asyncio's proactor. It is harmless noise."""
+    if isinstance(context.get("exception"), (ConnectionResetError, ConnectionAbortedError)):
+        return
+    loop.default_exception_handler(context)
+
+
+async def _keep_recorded_candles_current() -> None:
+    """Recorded feeds gain days while the recorder fetches broker history.
+    Their stored candles are brought up to date here, in a worker thread,
+    so the first session on a feed with years of history does not build
+    them inside a request."""
+    while True:
+        await asyncio.sleep(30)
+        if not hub.prepared:
+            continue
+        for symbol in INSTRUMENTS:
+            for feed in list(hub.feeds(symbol).values()):
+                if feed.live:
+                    try:
+                        await asyncio.to_thread(feed.bars._sync_closed)
+                    except Exception:
+                        pass  # the next pass, or the session itself, tries again
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    asyncio.get_running_loop().set_exception_handler(_quiet_resets)
+    maintenance = asyncio.create_task(_keep_recorded_candles_current())
     hub.start()
     settings = hub.live_settings()
     if settings.get("autostart") and settings.get("terminal"):
         # Waits harmlessly until the trader opens that terminal.
-        hub.recorder = mt5rec.MT5Recorder(settings["terminal"])
+        hub.recorder = hub.make_recorder(settings["terminal"])
         hub.recorder.start()
     yield
+    maintenance.cancel()
     for live in list(hub.live.values()):
         live.save()
     hub.stop_job()
@@ -865,6 +980,7 @@ async def _handle(ws: WebSocket, live: Live | None, msg: dict) -> Live | None:
         hub.journal.end_session(live.id)
         live.stop_clock()
         hub.live.pop(live.id, None)
+        hub.trim_memory()
         await live.send({"type": "ended", "session": live.id})
         live.ws = None
         return None
@@ -972,7 +1088,8 @@ def data_status(terminals: int = 0) -> dict:
         "problem": hub.problem,
         "job": job,
         "auto_update": config.AUTO_UPDATE,
-        "instruments": [m.info(settings[s], now) for s, m in hub.markets.items()] if hub.prepared else [],
+        "instruments": [dict(m.info(settings[s], now), broker=[f for f in _feed_list(s) if f["live"]])
+                        for s, m in hub.markets.items()] if hub.prepared else [],
         "disk": hub.disk(),
         "calendar": hub.calendar.status(),
         "live": live,
@@ -1056,6 +1173,7 @@ def delete_session(sid: str) -> dict:
     live = hub.live.pop(sid, None)
     if live is not None:
         live.stop_clock()
+        hub.trim_memory()
     hub.journal.delete_session(sid)
     return {"ok": True}
 
