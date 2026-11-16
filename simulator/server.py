@@ -69,6 +69,11 @@ UPDATE_CHUNK_DAYS = 15
 #: Candles for downloaded days are built at least this often, so a slow
 #: download shows its days without waiting for the whole chunk.
 CANDLES_EVERY_SECONDS = 60.0
+#: A live session sends a frame as soon as the recorder has new ticks, and
+#: at least this often without (the clock moves on).
+LIVE_IDLE_SECONDS = 0.1
+#: The quote board gets at most one message per this many seconds.
+QUOTES_MIN_SECONDS = 0.02
 #: When Dukascopy stops answering altogether, the update tries again after this long.
 RETRY_UPDATE_SECONDS = 30 * 60.0
 #: Seconds per hour file at the datafeed's pace, for the time estimate.
@@ -233,6 +238,10 @@ class Hub:
         self._job_stop = threading.Event()
         self._retry_token = None  # a pending retry after Dukascopy stopped answering
         self.recorder: mt5rec.MT5Recorder | None = None
+        #: Called (from the recorder's thread) with an instrument's symbol
+        #: whenever new live ticks of it are on disk: live sessions and quote
+        #: boards wake on it instead of waiting for their next frame.
+        self.tick_listeners: set = set()
         self.prepared = False
 
     # -- replay history --------------------------------------------------------
@@ -240,7 +249,8 @@ class Hub:
     @property
     def ready(self) -> bool:
         """At least one instrument can be replayed or watched live."""
-        return self.prepared and any(m.ready for m in self.markets.values())
+        return self.prepared and (any(m.ready for m in self.markets.values())
+                                  or any(self.feeds(symbol) for symbol in INSTRUMENTS))
 
     def market(self, symbol: str | None) -> Market:
         return self.markets[instruments.get(symbol).symbol]
@@ -553,7 +563,24 @@ class Hub:
         return date.fromisoformat(s["from"]) if s and s["enabled"] else None
 
     def make_recorder(self, terminal: str) -> mt5rec.MT5Recorder:
-        return mt5rec.MT5Recorder(terminal, history_from=self.history_from)
+        return mt5rec.MT5Recorder(terminal, history_from=self.history_from, on_ticks=self._on_ticks)
+
+    def _on_ticks(self, symbol: str) -> None:
+        for listener in list(self.tick_listeners):
+            listener(symbol)
+
+    def quotes(self) -> dict:
+        """The quote board: each recorded instrument's latest tick."""
+        rec = self.recorder
+        status = rec.status if rec is not None else {}
+        return {
+            "type": "quotes",
+            "now_ms": int(time.time() * 1000),
+            "state": status.get("state", "stopped"),
+            "server": status.get("server"),
+            "quotes": rec.quotes() if rec is not None else [],
+            "live": status.get("live"),
+        }
 
     def start_recorder(self, terminal: str) -> None:
         if self.recorder is not None:
@@ -645,6 +672,13 @@ class Live:
         self.ws: WebSocket | None = None
         self.task: asyncio.Task | None = None
         self.last_save = time.monotonic()
+        self.wake: asyncio.Event | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def _poke(self, symbol: str) -> None:
+        """New ticks recorded (called from the recorder's thread)."""
+        if symbol == self.meta.get("symbol") and self._loop is not None and self.wake is not None:
+            self._loop.call_soon_threadsafe(self.wake.set)
 
     @property
     def id(self) -> str:
@@ -722,7 +756,15 @@ class Live:
     async def clock_loop(self) -> None:
         last = time.perf_counter()
         while True:
-            await asyncio.sleep(FRAME_SECONDS)
+            if self.session.live:
+                # Straight away when the recorder has new ticks.
+                try:
+                    await asyncio.wait_for(self.wake.wait(), LIVE_IDLE_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+                self.wake.clear()
+            else:
+                await asyncio.sleep(FRAME_SECONDS)
             now = time.perf_counter()
             dt, last = now - last, now
             s = self.session
@@ -752,9 +794,13 @@ class Live:
 
     def start_clock(self) -> None:
         if self.task is None or self.task.done():
+            self._loop = asyncio.get_running_loop()
+            self.wake = asyncio.Event()
+            hub.tick_listeners.add(self._poke)
             self.task = asyncio.create_task(self.clock_loop())
 
     def stop_clock(self) -> None:
+        hub.tick_listeners.discard(self._poke)
         if self.task is not None:
             self.task.cancel()
             self.task = None
@@ -863,6 +909,33 @@ def _num(msg: dict, key: str, default=None):
 
 
 # -- websocket -----------------------------------------------------------------
+
+
+@app.websocket("/ws/quotes")
+async def ws_quotes(ws: WebSocket) -> None:
+    """The quote board: every recorded instrument's latest tick, sent the
+    moment the recorder has new ticks (at most every 20 ms), and once a
+    second without."""
+    await ws.accept()
+    loop = asyncio.get_running_loop()
+    wake = asyncio.Event()
+
+    def poke(_symbol: str) -> None:
+        loop.call_soon_threadsafe(wake.set)
+    hub.tick_listeners.add(poke)
+    try:
+        while True:
+            await ws.send_json(hub.quotes())
+            try:
+                await asyncio.wait_for(wake.wait(), 1.0)
+            except asyncio.TimeoutError:
+                pass
+            wake.clear()
+            await asyncio.sleep(QUOTES_MIN_SECONDS)
+    except (WebSocketDisconnect, RuntimeError, ConnectionError):
+        pass
+    finally:
+        hub.tick_listeners.discard(poke)
 
 
 @app.websocket("/ws")

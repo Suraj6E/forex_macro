@@ -230,7 +230,8 @@
 
   function onStatus(st) {
     S.status = st;
-    if (st.live) $("clock").innerHTML = "<span class='livetag'>LIVE</span>" + esc(fmtClock(st.sim_ms));
+    if (st.live) $("clock").innerHTML = "<span class='livetag'>LIVE</span>" + esc(fmtClock(st.sim_ms)) +
+      "<span class='tickage' id='tickAge' title='Since the broker stamped the last tick, by this computer&#39;s clock'></span>";
     else $("clock").textContent = fmtClock(st.sim_ms) + (st.finished ? "  (end of data)" : "");
     $("clock").classList.toggle("playing", st.playing);
     $("playBtn").textContent = st.playing ? "Pause" : "Play";
@@ -246,9 +247,129 @@
     $("bidPx").textContent = px(q.bid);
     $("askPx").textContent = px(q.ask);
     $("spreadPx").textContent = ((q.ask - q.bid) / PIP).toFixed(1);
+    if (S.status && S.status.live && $("tickAge")) $("tickAge").textContent = "tick " + age(Date.now() - q.time_ms) + " ago";
     lotInfo();
     updateTicket();
   }
+
+  // "0.04 s", "12 s", "3 min": how long ago something happened.
+  function age(ms) {
+    ms = Math.max(0, ms);
+    if (ms < 10000) return (ms / 1000).toFixed(ms < 1000 ? 2 : 1) + " s";
+    if (ms < 120000) return Math.round(ms / 1000) + " s";
+    if (ms < 7200000) return Math.round(ms / 60000) + " min";
+    return Math.round(ms / 3600000) + " h";
+  }
+
+  // ---------------------------------------------------------------- live quotes
+
+  // Streamed from /ws/quotes while the panel is open: a message the moment
+  // the recorder has new ticks, and once a second without.
+  var QS = { ws: null, cells: {}, last: {}, delays: [], open: false };
+
+  function openQuotes() {
+    QS.open = true;
+    $("quotesPanel").classList.remove("hidden");
+    $("quotesBtn").classList.add("on");
+    $("quotesBtn").setAttribute("aria-expanded", "true");
+    if (!QS.ws) connectQuotes();
+  }
+
+  function closeQuotes() {
+    QS.open = false;
+    $("quotesPanel").classList.add("hidden");
+    $("quotesBtn").classList.remove("on");
+    $("quotesBtn").setAttribute("aria-expanded", "false");
+    if (QS.ws) { var ws = QS.ws; QS.ws = null; ws.close(); }
+  }
+
+  function connectQuotes() {
+    var ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/quotes");
+    QS.ws = ws;
+    ws.onmessage = function (e) { renderQuotes(JSON.parse(e.data)); };
+    ws.onclose = function () {
+      if (QS.ws !== ws) return;
+      QS.ws = null;
+      if (QS.open) setTimeout(function () { if (QS.open && !QS.ws) connectQuotes(); }, 1000);
+    };
+  }
+
+  function quoteRows(quotes) {
+    var key = quotes.map(function (q) { return q.symbol; }).join(",");
+    if (QS.rowsKey === key) return;
+    QS.rowsKey = key;
+    QS.cells = {};
+    $("qBody").innerHTML = quotes.map(function (q) {
+      return "<tr data-sym='" + esc(q.symbol) + "'><td><b>" + esc(q.label) + "</b> <span class='faint mono'>" + esc(q.broker_symbol) + "</span></td>" +
+        "<td class='n px' data-c='bid'>-</td><td class='n px' data-c='ask'>-</td><td class='n' data-c='spr'>-</td>" +
+        "<td class='n' data-c='age'>-</td><td class='n' data-c='today'>0</td>" +
+        "<td><button type='button' data-watch='" + esc(q.symbol) + "' title='Start a live session on " + esc(q.label) + "'>Watch</button></td></tr>";
+    }).join("");
+    $("qBody").querySelectorAll("tr").forEach(function (tr) {
+      var c = {};
+      tr.querySelectorAll("[data-c]").forEach(function (td) { c[td.dataset.c] = td; });
+      QS.cells[tr.dataset.sym] = c;
+    });
+    $("qBody").querySelectorAll("[data-watch]").forEach(function (b) {
+      b.onclick = function () { closeQuotes(); openSessionDialog({ mode: "live", symbol: b.dataset.watch }); };
+    });
+  }
+
+  function flash(td, dir) {
+    td.classList.remove("up", "down");
+    if (!dir) return;
+    void td.offsetWidth; // restart the fade
+    td.classList.add(dir);
+    clearTimeout(td._fade);
+    td._fade = setTimeout(function () { td.classList.remove("up", "down"); }, 350);
+  }
+
+  function renderQuotes(m) {
+    var quotes = (m.quotes || []).filter(function (q) { return q.symbol; });
+    $("qSource").textContent = m.server ? " · " + m.server : "";
+    if (!quotes.length) {
+      QS.rowsKey = null;
+      $("qBody").innerHTML = "<tr><td colspan='7' class='muted'>" + (m.state === "stopped" ?
+        "The recorder is off. Open your MT5 terminal, then pick it in Market data and press Record." :
+        "Waiting for the recorder: " + esc(m.state) + ".") + "</td></tr>";
+      $("qNote").textContent = "";
+      return;
+    }
+    quoteRows(quotes);
+    var now = Date.now();
+    quotes.forEach(function (q) {
+      var c = QS.cells[q.symbol], prev = QS.last[q.symbol];
+      if (!c || q.bid === undefined) return;
+      var d = q.digits;
+      if (!prev || prev.time_ms !== q.time_ms) {
+        if (prev) QS.delays.push(now - q.time_ms);
+        flash(c.bid, prev && q.bid !== prev.bid ? (q.bid > prev.bid ? "up" : "down") : null);
+        flash(c.ask, prev && q.ask !== prev.ask ? (q.ask > prev.ask ? "up" : "down") : null);
+        c.bid.textContent = q.bid.toFixed(d);
+        c.ask.textContent = q.ask.toFixed(d);
+        c.spr.textContent = ((q.ask - q.bid) / q.pip).toFixed(1);
+        c.today.textContent = num(q.ticks_today || 0);
+      }
+      c.age.textContent = age(now - q.time_ms);
+      var stale = now - q.time_ms > 60000;
+      c.bid.classList.toggle("stale", stale);
+      c.ask.classList.toggle("stale", stale);
+      QS.last[q.symbol] = q;
+    });
+    if (QS.delays.length > 400) QS.delays = QS.delays.slice(-400);
+    var parts = [];
+    var sorted = QS.delays.slice().sort(function (a, b) { return a - b; });
+    if (sorted.length >= 5) parts.push("On this screen " + Math.round(sorted[Math.floor(sorted.length / 2)]) + " ms after the broker's stamp (median of the last " + sorted.length + " ticks)");
+    var L = m.live || {};
+    if (L.ticks) parts.push("saved " + L.delay_ms_median + " ms after it (median, last minute; 90% within " + L.delay_ms_p90 + " ms)");
+    if (L.poll_ms) parts.push("the terminal is read every " + L.poll_ms + " ms" + (L.slowest_call_ms ? "; its slowest answer in the last minute took " + L.slowest_call_ms + " ms" : ""));
+    $("qNote").textContent = parts.length ? parts.join(" · ") + ". Times include any difference between this computer's clock and the broker's." :
+      "Quiet market: no new ticks yet.";
+  }
+
+  $("quotesBtn").onclick = function () { if (QS.open) closeQuotes(); else openQuotes(); };
+  $("quotesClose").onclick = closeQuotes;
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && QS.open) closeQuotes(); });
 
   // What a lot is and what a pip is worth: they differ a lot between
   // EUR/USD, a yen cross, silver and oil.

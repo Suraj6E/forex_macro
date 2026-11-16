@@ -89,6 +89,24 @@ terminal**, then open that terminal yourself.
   machine that is the FTMO terminal (FTMO-Demo).
 - **Every instrument the broker has**, found by name (`EURUSD`, `XAGUSD`,
   `USOIL.cash`, `UKOIL.cash`, ...). Ones it lacks are listed.
+- **Streamed as it happens.** The MT5 package has no push, so the recorder
+  reads each instrument's latest quote every 25 ms and copies the new
+  ticks when it changed. They are written (flushed at once) and handed
+  straight to live sessions and the **Quotes** board, which wake on them
+  instead of waiting for a timer. Broker history is fetched in a second
+  thread; terminal calls take turns, but a history day's waits never hold
+  up the live poll. Against a fake terminal ticking in real time: on disk
+  19 ms after the broker's stamp (median, 44 ms worst), on screen 48 ms
+  (71 ms worst). The previous design, which polled twice a second between
+  history reads, took 0.9 s at the median and up to 4.8 s on FTMO.
+- **Quotes** (top bar) streams every recorded instrument's bid, ask,
+  spread and the age of its last tick, flashing each change; **Watch**
+  starts a live session on it. Below the board: how long ticks take from
+  the broker's stamp to the file and to the screen, and the slowest
+  terminal call in the last minute (a slow one delays the live poll).
+  These include any difference between this computer's clock and the
+  broker's: this PC's clock ran 0.4 s ahead (16 Nov 2026, Windows Time
+  service stopped).
 - **Broker history.** A terminal keeps only a small buffer of recent ticks
   on disk (FTMO's held 124 KB per symbol, plus one month of EUR/USD); older
   ones come from the broker's server when asked for. Between live polls the
@@ -241,13 +259,14 @@ only. Both default to zero and are printed with every session's results.
 .\.venv\Scripts\python.exe -m unittest discover -s simulator/tests -t .
 ```
 
-88 tests: no look-ahead, fill rules, profit in USD for each kind of
+89 tests: no look-ahead, fill rules, profit in USD for each kind of
 instrument, journal and statistics, the Dukascopy decoder, cleaning and
 resumable updater (against a fake datafeed), compact tick files and their
 migration, candles kept in step with their ticks, the calendar's clock rule
 (against a small copy of fxmacro's tables), and the MT5 recorder and its
 history (against a fake terminal on New York + 7 h, across summer and
-winter, with the market open and shut), and reading a broker's clock from
+winter, with the market open and shut; live ticks reaching listeners
+within a poll or two while history is fetched), and reading a broker's clock from
 hourly candles (New York + 7 h, European, fixed, and a broker that changed
 its clock).
 

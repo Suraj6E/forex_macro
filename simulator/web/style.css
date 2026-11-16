@@ -247,6 +247,24 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .recstatus .kv { max-width: 520px; }
 body.live-session .live-hide { display: none !important; }
 .clock .livetag { color: var(--ok); font-weight: 700; margin-right: 6px; }
+.clock .tickage { color: var(--muted); font-size: 11px; margin-left: 8px; }
+
+/* Live quotes: streamed from the recorder, one row per instrument. */
+.quotes {
+  position: fixed; top: 52px; right: 12px; z-index: 40; width: min(660px, calc(100vw - 24px));
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 10px 12px;
+}
+.quotes .qhead { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.quotes .qhead button { margin-left: auto; padding: 0 8px; font-size: 16px; line-height: 22px; }
+.quotes table.qt td { vertical-align: middle; }
+.quotes table.qt td.px { font-weight: 600; transition: color .6s; }
+.quotes table.qt td.px.up { color: var(--pos); transition: none; }
+.quotes table.qt td.px.down { color: var(--neg); transition: none; }
+.quotes table.qt td.stale { color: var(--faint); }
+.quotes table.qt button { padding: 2px 8px; font-size: 11px; }
+.quotes p { margin: 8px 0 0; }
+#quotesBtn.on { border-color: var(--accent); }
 .form .seg { margin-bottom: 0; }
 .form .live-only-field:empty { display: none; }
 

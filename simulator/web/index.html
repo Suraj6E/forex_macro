@@ -38,6 +38,7 @@
 
     <div class="spacer"></div>
     <div class="group">
+      <button id="quotesBtn" class="replay-only" title="Live quotes from your MT5 terminal, tick by tick" aria-expanded="false" aria-controls="quotesPanel">Quotes</button>
       <button id="dataBtn" class="replay-only datachip" title="Market data: history updates and live recording">
         <span class="dot" id="liveDot" aria-hidden="true"></span><span id="dataChip">Data</span>
       </button>
@@ -46,6 +47,18 @@
       <button id="themeBtn" class="ghost" title="Light / dark">◐</button>
     </div>
   </header>
+
+  <section id="quotesPanel" class="quotes hidden" aria-label="Live quotes">
+    <div class="qhead">
+      <b>Live quotes</b><span class="faint" id="qSource"></span>
+      <button type="button" class="ghost" id="quotesClose" title="Close (Esc)" aria-label="Close">×</button>
+    </div>
+    <div class="tablewrap"><table class="t qt">
+      <thead><tr><th>Instrument</th><th class="n">Bid</th><th class="n">Ask</th><th class="n">Spread</th><th class="n" title="Since the broker stamped the latest tick, by this computer's clock">Last tick</th><th class="n">Ticks today</th><th></th></tr></thead>
+      <tbody id="qBody"></tbody>
+    </table></div>
+    <p class="tiny muted" id="qNote"></p>
+  </section>
 
   <div class="main">
     <nav class="tools replay-only" aria-label="Drawing tools">

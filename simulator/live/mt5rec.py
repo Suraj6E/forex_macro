@@ -15,12 +15,15 @@ What it does, in order:
      works with the market shut too, and checked against each new quote
      while the market moves.
   4. Fills the gap since the last recorded tick from the terminal (from the
-     start of the UTC day `backfill_days` ago at most), then polls new ticks
-     twice a second and appends them, converted to UTC, to
-     `live/YYYY-MM-DD.csv`, flushing every poll.
-  5. Between polls, fetches older days from the broker's tick history,
+     start of the UTC day `backfill_days` ago at most), then streams: every
+     25 ms it reads each instrument's latest quote, and when one changed,
+     copies the new ticks, converts them to UTC, appends them to
+     `live/YYYY-MM-DD.csv` (flushed at once) and tells `on_ticks`, which
+     wakes live sessions and the quote board the same moment.
+  5. In a second thread, fetches older days from the broker's tick history,
      newest first, back to each instrument's start day, until the broker
-     has nothing older. A terminal keeps only a small buffer of recent ticks
+     has nothing older. Calls to the terminal take turns (one connection),
+     but the live poll never waits on a history day being worked out. A terminal keeps only a small buffer of recent ticks
      on disk; older ones are downloaded from the broker's server when asked
      for, which is what this does. A day is kept once its ticks cover every
      hour the broker has a candle for.
@@ -46,6 +49,7 @@ import json
 import re
 import threading
 from bisect import bisect_left
+from collections import deque
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -62,7 +66,9 @@ from simulator.live.winproc import FileLock, running_terminals, same_path
 
 MS_PER_DAY = 86_400_000
 MS_PER_HOUR = 3_600_000
-POLL_SECONDS = 0.5
+#: How often each instrument's latest quote is read. Reading a quote is
+#: cheap; ticks are copied only when it changed.
+POLL_SECONDS = 0.025
 STATUS_EVERY_SECONDS = 2.0
 BACKFILL_CHUNK_MS = 6 * 3600 * 1000
 #: The broker has no older history once this many weekdays in a row are empty.
@@ -79,8 +85,16 @@ HISTORY_RECHECK_WAIT = 2.0
 HISTORY_DAY_TRIES = 3
 #: How often each instrument's list of missing days is worked out again.
 HISTORY_TODO_SECONDS = 60.0
-#: Seconds of history work between two polls of live ticks.
+#: Seconds of history work on one instrument before the next one's turn.
 HISTORY_BUDGET_SECONDS = 0.5
+#: The history thread's pause when nothing is left to fetch.
+HISTORY_IDLE_SECONDS = 1.0
+#: A day's open file is closed and compacted this long after midnight UTC,
+#: so ticks stamped just before midnight that arrive just after still land
+#: in their day.
+ROLL_GRACE_MS = 10_000
+#: The live delay shown is measured over this many seconds.
+DELAY_WINDOW_SECONDS = 60.0
 #: How often the clock is read again from the hourly candles (new weeks).
 CLOCK_REFRESH_SECONDS = 3600.0
 #: How often, while recording, the recorder checks the terminal still runs.
@@ -93,6 +107,34 @@ TRADE_MODES = {0: "demo", 1: "contest", 2: "real"}
 
 class TerminalGone(RuntimeError):
     """The terminal was closed; wait for it to come back."""
+
+
+class _OneAtATime:
+    """The MetaTrader5 module with one call at a time. The live poll and the
+    history fetch share the process's one connection to the terminal from
+    two threads; the module is not documented as safe for that."""
+
+    def __init__(self, api, lock: threading.RLock) -> None:
+        self._api, self._lock = api, lock
+        #: (when, ms, name) of calls that held the terminal 50 ms or more:
+        #: the live poll waited that long behind them.
+        self.slow: deque[tuple[float, float, str]] = deque(maxlen=1000)
+
+    def __getattr__(self, name):
+        attr = getattr(self._api, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kwargs):
+            with self._lock:
+                t0 = time.perf_counter()
+                try:
+                    return attr(*args, **kwargs)
+                finally:
+                    ms = (time.perf_counter() - t0) * 1000
+                    if ms >= 50:
+                        self.slow.append((time.time(), ms, name))
+        return call
 
 
 def slug(server: str) -> str:
@@ -348,6 +390,9 @@ class Track:
         self.empty_run = 0
         self.empty_from: date | None = None
         self.tries: dict[date, int] = {}  # passes a day came back with hours missing
+        self.seen: tuple | None = None  # the latest quote already copied: (time_msc, bid, ask)
+        self.quote: dict | None = None  # the latest tick recorded, for the quote board
+        self.rolled_at = 0.0
 
     def status(self) -> dict:
         return {"symbol": self.inst.symbol, "label": self.inst.label, "broker_symbol": self.broker_symbol,
@@ -367,8 +412,12 @@ class MT5Recorder:
         offset_wait: float = 20.0,
         symbols: list[str] | None = None,
         history_from: Callable[[str], date | None] | None = None,
+        on_ticks: Callable[[str], None] | None = None,
     ) -> None:
         self.terminal_path = terminal_path
+        #: Called from the recorder thread with an instrument's symbol each
+        #: time new live ticks of it are on disk.
+        self.on_ticks = on_ticks
         self.offset_wait = offset_wait
         self.symbols = [symbol] if symbol else list(symbols or INSTRUMENTS)
         self.root = Path(root)
@@ -396,16 +445,27 @@ class MT5Recorder:
         self._seen_quote: tuple[int, float] | None = None  # (time_msc, when seen)
         self._status_at = 0.0
         self._history_turn = 0
+        self._api_lock = threading.RLock()
+        self._one_at_a_time: _OneAtATime | None = None
+        #: Set when the current attachment ends, so the history thread stops.
+        self._halt = threading.Event()
+        self._history_thread: threading.Thread | None = None
+        #: (when received, delay in ms) of each live tick, and (when, gap in
+        #: ms) between live polls, for the delay shown in the page.
+        self._delays: deque[tuple[float, float]] = deque(maxlen=50_000)
+        self._gaps: deque[tuple[float, float]] = deque(maxlen=10_000)
 
     # -- control -------------------------------------------------------------
 
     @property
     def api(self):
-        if self._api is None:
-            import MetaTrader5
+        if self._one_at_a_time is None:
+            if self._api is None:
+                import MetaTrader5
 
-            self._api = MetaTrader5
-        return self._api
+                self._api = MetaTrader5
+            self._one_at_a_time = _OneAtATime(self._api, self._api_lock)
+        return self._one_at_a_time
 
     def start(self) -> None:
         if self.thread and self.thread.is_alive():
@@ -416,8 +476,38 @@ class MT5Recorder:
 
     def stop(self, wait: float = 5.0) -> None:
         self.stop_event.set()
+        self._halt.set()
         if self.thread:
             self.thread.join(wait)
+
+    def _pause(self, seconds: float) -> bool:
+        """Wait in the history thread; True when it should stop."""
+        return self._halt.wait(seconds) or self.stop_event.is_set()
+
+    def quotes(self) -> list[dict]:
+        """The latest recorded tick of every instrument, for the quote board."""
+        return [{"symbol": t.inst.symbol, "label": t.inst.label, "broker_symbol": t.broker_symbol,
+                 "digits": t.digits, "pip": t.inst.pip, "ticks_today": t.ticks_today, **(t.quote or {})}
+                for t in self.tracks]
+
+    def live_stats(self) -> dict:
+        """How long live ticks took from the broker's stamp to the file, and
+        the longest pause between two polls, over the last minute."""
+        since = self.clock() - DELAY_WINDOW_SECONDS
+        delays = np.array([d for at, d in list(self._delays) if at >= since])
+        gaps = [g for at, g in list(self._gaps) if at >= since]
+        slow = [(ms, name) for at, ms, name in list(self._one_at_a_time.slow if self._one_at_a_time else []) if at >= since]
+        longest = max(slow) if slow else None
+        return {
+            "slowest_call_ms": round(longest[0]) if longest else None,
+            "slowest_call": longest[1] if longest else None,
+            "ticks": int(len(delays)),
+            "delay_ms_median": round(float(np.median(delays))) if len(delays) else None,
+            "delay_ms_p90": round(float(np.percentile(delays, 90))) if len(delays) else None,
+            "delay_ms_max": round(float(delays.max())) if len(delays) else None,
+            "poll_gap_ms_max": round(max(gaps)) if gaps else None,
+            "poll_ms": round(POLL_SECONDS * 1000),
+        }
 
     def track(self, symbol: str) -> Track | None:
         return next((t for t in self.tracks if t.inst.symbol == symbol), None)
@@ -432,7 +522,10 @@ class MT5Recorder:
             return
         self._status_at = now
         lasts = [t.last_ms for t in self.tracks if t.last_ms]
+        if self.server_clock is not None:
+            self.offset_ms = self.server_clock.offset(int(now * 1000))
         self.status.update({
+            "live": self.live_stats(),
             "terminal": self.terminal_path,
             "broker_symbol": self.broker_symbol,
             "offset_hours": None if self.offset_ms is None else self.offset_ms / 3_600_000,
@@ -511,10 +604,11 @@ class MT5Recorder:
                 track.lock = None
                 missing.append(f"{inst.label} (another recorder is writing it)")
                 continue
-            manifest = track.store.manifest()
-            manifest.update({"symbol": inst.symbol, "source": "mt5", "server": account.server,
-                             "company": account.company, "broker_symbol": name, "scale": track.store.scale})
-            track.store.save_manifest(manifest)
+            with track.store.lock:
+                manifest = track.store.manifest()
+                manifest.update({"symbol": inst.symbol, "source": "mt5", "server": account.server,
+                                 "company": account.company, "broker_symbol": name, "scale": track.store.scale})
+                track.store.save_manifest(manifest)
             self.tracks.append(track)
         if not self.tracks:
             raise RuntimeError("This account has none of the simulator's instruments")
@@ -523,6 +617,9 @@ class MT5Recorder:
         clock_track = self.track(config.SYMBOL) or (fx[0] if fx else self.tracks[0])
         self._clock_track = clock_track
         self.broker_symbol = clock_track.broker_symbol
+        self._halt = threading.Event()
+        if self.stop_event.is_set():
+            self._halt.set()
         for t in self.tracks:
             self._load_last_recorded(t)
             self._compact_closed_days(t)
@@ -558,33 +655,72 @@ class MT5Recorder:
             self._backfill(t)
             self._roll_day(t)
         names = ", ".join(t.broker_symbol for t in self.tracks)
-        self._set("recording", f"Recording {names} from {account.server} ({mode})")
+        self._set("recording", f"Streaming {names} from {account.server} ({mode})")
 
-        clock_read = checked = self.clock()
-        while not self.stop_event.is_set():
-            now = self.clock()
-            if now - checked > TERMINAL_CHECK_SECONDS:
-                checked = now
-                self._check_terminal()
-            if now - clock_read > CLOCK_REFRESH_SECONDS:
-                clock_read = now
-                weeks = self._read_weeks()
-                if weeks and weeks != self.weeks:
-                    self.weeks = weeks
-                    self._use_clock(rebuild=True)
-            self._watch_clock()
-            for t in self.tracks:
-                ticks = api.copy_ticks_from(t.broker_symbol, self._server_seconds(t.last_ms), 100_000, api.COPY_TICKS_ALL)
-                if ticks is None:
-                    if api.terminal_info() is None:
-                        raise TerminalGone()
-                    ticks = []
-                self._append(t, ticks)
-                self._roll_day(t)
-            busy = self._history_step()
-            self.offset_ms = self.server_clock.offset(int(self.clock() * 1000))
-            self._write_status()
-            self.stop_event.wait(0.05 if busy else POLL_SECONDS)
+        self._history_thread = threading.Thread(target=self._history_loop, name="mt5-history", daemon=True)
+        self._history_thread.start()
+        try:
+            checked = last_poll = self.clock()
+            while not self.stop_event.is_set():
+                now = self.clock()
+                self._gaps.append((now, (now - last_poll) * 1000))
+                last_poll = now
+                if now - checked > TERMINAL_CHECK_SECONDS:
+                    checked = now
+                    self._check_terminal()
+                for t in self.tracks:
+                    self._poll(t)
+                self._write_status()
+                self.stop_event.wait(POLL_SECONDS)
+        finally:
+            self._halt.set()
+            self._history_thread.join()
+
+    def _poll(self, t: Track) -> None:
+        """Copy an instrument's new ticks if its latest quote changed."""
+        api = self.api
+        q = api.symbol_info_tick(t.broker_symbol)
+        if q is None or not getattr(q, "time_msc", 0):
+            if api.terminal_info() is None:
+                raise TerminalGone()
+            return
+        seen = (int(q.time_msc), float(q.bid), float(q.ask))
+        if seen == t.seen:
+            self._roll_day(t)
+            return
+        if t is self._clock_track:
+            self._watch_clock(seen[0])
+        ticks = api.copy_ticks_from(t.broker_symbol, self._server_seconds(t.last_ms), 100_000, api.COPY_TICKS_ALL)
+        if ticks is None:
+            if api.terminal_info() is None:
+                raise TerminalGone()
+            return
+        self._roll_day(t)
+        self._append(t, ticks, live=True)
+        # Only once the quote's own tick is on disk: the terminal may show a
+        # quote a moment before its tick can be copied.
+        if t.last_ms is not None and t.last_ms >= int(self.server_clock.to_utc([seen[0]])[0]):
+            t.seen = seen
+
+    def _history_loop(self) -> None:
+        """The history thread: broker history day by day, and the clock read
+        again from the candles every hour, until the attachment ends."""
+        clock_read = self.clock()
+        while not self._pause(0):
+            try:
+                if self.clock() - clock_read > CLOCK_REFRESH_SECONDS:
+                    clock_read = self.clock()
+                    weeks = self._read_weeks()
+                    if weeks and weeks != self.weeks:
+                        self.weeks = weeks
+                        self._use_clock(rebuild=True)
+                busy = self._history_step()
+                self.status.pop("history_error", None)
+            except Exception as exc:  # the live stream goes on regardless
+                self.status["history_error"] = f"{type(exc).__name__}: {exc}"
+                busy = False
+            if self._pause(0.0 if busy else HISTORY_IDLE_SECONDS):
+                return
 
     # -- pieces --------------------------------------------------------------
 
@@ -641,7 +777,7 @@ class MT5Recorder:
             if n is not None and n == prev:
                 return out
             prev = n
-            if self.stop_event.wait(HISTORY_SETTLE_WAIT if n else 2 * HISTORY_SETTLE_WAIT):
+            if self._pause(HISTORY_SETTLE_WAIT if n else 2 * HISTORY_SETTLE_WAIT):
                 return None
         return out
 
@@ -694,15 +830,12 @@ class MT5Recorder:
         self.offset_ms = self.server_clock.offset(int(self.clock() * 1000))
         self._save_offset()
 
-    def _watch_clock(self) -> None:
+    def _watch_clock(self, msc: int) -> None:
         """Check the clock against the clock instrument's latest quote,
         without waiting: a quote that changed since the last poll is
-        seconds old, so its stamp minus now is the offset. Runs before new
+        moments old, so its stamp minus now is the offset. Runs before new
         ticks are converted, so the first quotes of a week whose offset the
         clock did not foresee are converted with the right one."""
-        msc = self._latest_quote_msc()
-        if msc is None:
-            return
         now = self.clock()
         seen = self._seen_quote
         if seen is not None and msc > seen[0] and now - seen[1] < 60:
@@ -713,10 +846,11 @@ class MT5Recorder:
 
     def _save_offset(self) -> None:
         for t in self.tracks:
-            manifest = t.store.manifest()
-            manifest["offset_ms"] = self.offset_ms
-            manifest["history_clock"] = self.server_clock.rule if self.server_clock else None
-            t.store.save_manifest(manifest)
+            with t.store.lock:
+                manifest = t.store.manifest()
+                manifest["offset_ms"] = self.offset_ms
+                manifest["history_clock"] = self.server_clock.rule if self.server_clock else None
+                t.store.save_manifest(manifest)
 
     def _server_seconds(self, utc_ms: int | None) -> int:
         utc_ms = utc_ms if utc_ms is not None else int(self.clock() * 1000)
@@ -757,8 +891,9 @@ class MT5Recorder:
                 self._append(t, ticks)
             start = end
 
-    def _append(self, t: Track, ticks) -> None:
-        """Write ticks after the last recorded one, in UTC, to their day's CSV."""
+    def _append(self, t: Track, ticks, live: bool = False) -> None:
+        """Write ticks after the last recorded one, in UTC, to their day's CSV.
+        Live ones are timed (broker stamp to file) and announced."""
         if ticks is None or len(ticks) == 0:
             return
         msc = self.server_clock.to_utc(np.asarray(ticks["time_msc"], np.int64))
@@ -788,6 +923,15 @@ class MT5Recorder:
         last = int(msc[-1])
         t.at_last = int((msc == last).sum()) + (t.at_last if last == t.last_ms else 0)
         t.last_ms = last
+        received = self.clock()
+        t.quote = {"time_ms": last, "bid": float(bid[-1]), "ask": float(ask[-1]), "received_ms": int(received * 1000)}
+        if live:
+            self._delays.extend((received, received * 1000 - float(m)) for m in msc[-200:])
+            if self.on_ticks is not None:
+                try:
+                    self.on_ticks(t.inst.symbol)
+                except Exception:
+                    pass  # a listener's trouble never stops the recording
 
     def _file(self, t: Track, day: date):
         fh = t.files.get(day)
@@ -808,11 +952,17 @@ class MT5Recorder:
         return date(1970, 1, 1) + timedelta(days=int(self.clock() * 1000) // MS_PER_DAY)
 
     def _roll_day(self, t: Track) -> None:
-        """Close and compact every day before today (UTC)."""
+        """Close and compact every day before today (UTC), once a few
+        seconds into the new day. Checked at most once a second."""
+        now = self.clock()
         today = self._today()
-        for day in [d for d in t.files if d < today]:
+        if t.day == today and now - t.rolled_at < 1.0:
+            return
+        t.rolled_at = now
+        settled = date(1970, 1, 1) + timedelta(days=(int(now * 1000) - ROLL_GRACE_MS) // MS_PER_DAY)
+        for day in [d for d in t.files if d < settled]:
             t.files.pop(day).close()
-        self._compact_closed_days(t, before=today)
+        self._compact_closed_days(t, before=settled)
         if t.day != today:
             t.day = today
             t.ticks_today = 0
@@ -831,10 +981,11 @@ class MT5Recorder:
                 if len(old_ts):  # a day recorded in two sittings
                     ts, bid, ask, flag = flag_day(np.r_[old_ts, ts], np.r_[old_bid, bid], np.r_[old_ask, ask])
                 t.store.write_day(day, ts, bid, ask, flag)
-            manifest = t.store.manifest()
-            manifest.setdefault("days", {})[day.isoformat()] = day_entry("mt5", ts, flag, complete=True)
-            manifest["days"] = dict(sorted(manifest["days"].items()))
-            t.store.save_manifest(manifest)
+            with t.store.lock:
+                manifest = t.store.manifest()
+                manifest.setdefault("days", {})[day.isoformat()] = day_entry("mt5", ts, flag, complete=True)
+                manifest["days"] = dict(sorted(manifest["days"].items()))
+                t.store.save_manifest(manifest)
             path.unlink()
 
     # -- history ---------------------------------------------------------------
@@ -878,7 +1029,7 @@ class MT5Recorder:
             self._history_turn = (self._history_turn + k + 1) % len(self.tracks)
             t.history["state"] = "fetching"
             started = time.monotonic()
-            while t.todo and time.monotonic() - started < HISTORY_BUDGET_SECONDS and not self.stop_event.is_set():
+            while t.todo and time.monotonic() - started < HISTORY_BUDGET_SECONDS and not self._halt.is_set():
                 self._history_day(t, t.todo.pop(0))
             t.history["pending"] = len(t.todo)
             return True
@@ -907,7 +1058,7 @@ class MT5Recorder:
         then kept as it is."""
         read = self._read_day(t, day)
         if read is not None and (len(read[1]) or not len(read[0])):
-            if self.stop_event.wait(HISTORY_RECHECK_WAIT):
+            if self._pause(HISTORY_RECHECK_WAIT):
                 return
             read = self._read_day(t, day)
         if read is None:
@@ -933,6 +1084,10 @@ class MT5Recorder:
                 entry = day_entry("mt5-history", ts, flag, complete=True)
         if len(missing):
             entry["missing_hours"] = int(len(missing))
+        with t.store.lock:
+            self._record_history_day(t, day, entry)
+
+    def _record_history_day(self, t: Track, day: date, entry: dict) -> None:
         manifest = t.store.manifest()
         manifest.setdefault("days", {})[day.isoformat()] = entry
         manifest["days"] = dict(sorted(manifest["days"].items()))

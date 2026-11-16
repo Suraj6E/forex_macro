@@ -507,6 +507,60 @@ class History(unittest.TestCase):
         self.assertIsNone(rec._find_symbol(INSTRUMENTS["XAGUSD"]))
 
 
+class Streaming(unittest.TestCase):
+    """Live ticks reach listeners (live sessions, the quote board) within a
+    poll or two, also while broker history is being fetched with its real
+    waits between reads."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.api = NY7FakeMT5(time.time)
+        self._ticking = threading.Event()
+
+    def tearDown(self):
+        self._ticking.set()
+        self.tmp.cleanup()
+
+    def test_ticks_reach_listeners_at_once_while_history_is_fetched(self):
+        History.add_weeks(self, mt5rec.week_open_ms(int(time.time() * 1000)) - 2 * 86_400_000)
+        start = self.first - timedelta(days=60)
+        arrivals = []
+
+        def on_ticks(symbol):
+            t = rec.track(symbol)
+            arrivals.append(time.time() * 1000 - t.last_ms)
+
+        rec = MT5Recorder("C:/fake/terminal64.exe", root=self.root, backfill_days=1, api=self.api,
+                          terminals=lambda: ["C:/fake/terminal64.exe"], offset_wait=1, symbols=["EURUSD"],
+                          history_from=lambda s: start, on_ticks=on_ticks)
+        rec.start()
+        self.assertTrue(wait_until(lambda: rec.status.get("state") == "recording", 20), rec.status)
+
+        def tick():  # a quote every 50 ms, stamped now
+            while not self._ticking.wait(0.05):
+                with self.api.lock:
+                    now = int(time.time() * 1000)
+                    self.api.ticks.append((now + mt5rec.ny7_offset_ms(now), 1.2, 1.20008))
+        threading.Thread(target=tick, daemon=True).start()
+        time.sleep(3.0)
+        self._ticking.set()
+        history = dict(rec.track("EURUSD").history)
+        quotes = rec.quotes()
+        stats = rec.live_stats()
+        rec.stop()
+
+        self.assertEqual(history["state"], "fetching")  # history ran all along
+        self.assertGreater(len(arrivals), 30)
+        delays = np.array(arrivals)
+        self.assertLess(np.median(delays), 60, delays)
+        self.assertLess(np.percentile(delays, 90), 150, delays)
+        self.assertEqual(quotes[0]["symbol"], "EURUSD")
+        self.assertEqual((quotes[0]["bid"], quotes[0]["ask"]), (1.2, 1.20008))
+        self.assertLess(stats["delay_ms_median"], 60)
+        self.assertEqual(stats["poll_ms"], 25)
+
+
 class StoredFeedBars(unittest.TestCase):
     def test_stored_candles_match_a_full_build_and_follow_new_days(self):
         from simulator.data.bars import BarStore
