@@ -44,9 +44,10 @@ One-time install, if the venv predates the simulator:
 
 | | |
 |---|---|
-| Start | **Sessions** → pick the **Instrument** and the **Data** (Dukascopy history, or your broker's), then **Replay history** (a start time in UTC, or **Random**; **Hide dates** shows weekday and time only) or **Live market**. Balance, leverage, commission, slippage. |
+| One screen | Opening the page shows the market: **live** when the recorder is streaming the instrument, else a **replay at the latest date** (00:00 UTC of the last weekday with data). The instrument picker (● streaming now) and **Live / Replay** in the top bar switch in place. Switching instruments keeps the mode, and in replay the date when the other instrument has data then. The calendar button (or a click on the clock) picks a date: in replay it jumps there, live it opens a replay from there. A reload keeps the tab where it was; a new tab opens on the market again. |
+| Sessions | Behind the screen, each instrument and mode is a session with its own account. Live resumes the instrument's live session; replay resumes one with open positions or orders, else starts at the date. A session the screen opened in which nothing was done (no order, note or drawing) is removed on leaving it, so switching does not fill the journal. **Sessions** sets one up by hand: **Data** (Dukascopy or your broker's), a start time or **Random**, **Hide dates**, balance, leverage, commission, slippage; those are never removed. |
 | Replay | **Play**/**Pause** (Space), speeds 1x to max (a market day in ~3 s), **+1 candle** (Right), **+1 tick** (Shift+Right), **Jump** to a time. |
-| Live | The clock is the real clock; candles form as ticks arrive. No play, step or jump: the market has its own clock. |
+| Live | The clock is the real clock; candles form as ticks arrive, and the clock shows how old the last tick is. No play or step: the market has its own clock. |
 | Volume | Tick volume under the candles, and `V` in the price line: the number of quotes in the candle. |
 | News | A dot per impact level under each candle with releases: red high, yellow medium, near-white low. Filled is released, a ring is still to come. Hover for the names, click for the details. **High / Medium / Low** in the chart corner hide a level. |
 | Orders | Market, limit or stop; size in lots or as % risk from the stop. SL/TP lines on the chart drag to edit. **Close** works per position. The ticket shows what a lot is and what a pip is worth in USD. |
@@ -259,7 +260,7 @@ only. Both default to zero and are printed with every session's results.
 .\.venv\Scripts\python.exe -m unittest discover -s simulator/tests -t .
 ```
 
-89 tests: no look-ahead, fill rules, profit in USD for each kind of
+91 tests: no look-ahead, fill rules, profit in USD for each kind of
 instrument, journal and statistics, the Dukascopy decoder, cleaning and
 resumable updater (against a fake datafeed), compact tick files and their
 migration, candles kept in step with their ticks, the calendar's clock rule

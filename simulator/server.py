@@ -44,6 +44,7 @@ from simulator.data.ticks import (
     NS_PER_SECOND,
     FeedStore,
     ParquetTickSource,
+    day_start_ns,
     import_layer0,
     migrate_feed,
     needs_migration,
@@ -565,6 +566,28 @@ class Hub:
     def make_recorder(self, terminal: str) -> mt5rec.MT5Recorder:
         return mt5rec.MT5Recorder(terminal, history_from=self.history_from, on_ticks=self._on_ticks)
 
+    def streaming_feed(self, symbol: str) -> Feed | None:
+        """The live feed the recorder is streaming this instrument into now."""
+        rec = self.recorder
+        if rec is None or rec.status.get("state") != "recording" or rec.track(symbol) is None:
+            return None
+        return self.feeds(symbol).get(f"mt5:{mt5rec.slug(rec.status.get('server') or '')}")
+
+    def live_feed(self, symbol: str) -> Feed | None:
+        """The streaming feed, else the recorded feed with the newest tick."""
+        feed = self.streaming_feed(symbol)
+        if feed is not None:
+            return feed
+        recorded = [f for f in self.feeds(symbol).values() if f.live and f.source.days()]
+        return max(recorded, key=lambda f: f.source.latest_ns() or 0, default=None)
+
+    def replay_feed(self, symbol: str) -> Feed | None:
+        """Dukascopy history when there is some, else a recorded feed."""
+        feeds = self.feeds(symbol)
+        if REPLAY_FEED in feeds and feeds[REPLAY_FEED].source.days():
+            return feeds[REPLAY_FEED]
+        return self.live_feed(symbol)
+
     def _on_ticks(self, symbol: str) -> None:
         for listener in list(self.tick_listeners):
             listener(symbol)
@@ -856,6 +879,149 @@ async def _attach(live: Live, ws: WebSocket) -> None:
     await live.send_history()
 
 
+def _unused(sid: str) -> bool:
+    """A session the main screen opened in which nothing was done."""
+    row = hub.journal.get_session(sid)
+    return (row is not None and row.get("origin") == "screen" and not row.get("name")
+            and row.get("status") == "active" and not hub.journal.has_records(sid))
+
+
+def _discard(sid: str) -> None:
+    live = hub.live.pop(sid, None)
+    if live is not None:
+        live.stop_clock()
+    hub.journal.delete_session(sid)
+
+
+def _leave(live: Live | None, ws: WebSocket, going_to: Live | None) -> None:
+    """The tab moves from `live` to another session. One the screen opened
+    and nothing was done in is deleted, so switching symbols and modes does
+    not fill the journal with empty sessions."""
+    if live is None or live is going_to or live.ws is not ws:
+        return
+    live.ws = None
+    live.stop_clock()
+    live.save()
+    if _unused(live.id):
+        _discard(live.id)
+
+
+def _latest_start_ns(feed: Feed) -> int:
+    """Where "the latest date" starts: 00:00 UTC of the last weekday with
+    ticks, so there is a day to play."""
+    days = feed.source.days()
+    weekdays = [d for d in days[-4:] if d.weekday() < 5]
+    return day_start_ns(weekdays[-1] if weekdays else days[-1])
+
+
+def _last_tick_ns(feed: Feed) -> int:
+    src = feed.source
+    if hasattr(src, "latest_ns") and src.latest_ns():
+        return src.latest_ns()
+    days = src.days()
+    entry = getattr(src, "_entries", {}).get(days[-1].isoformat(), {}) if days else {}
+    return entry.get("last_ns") or (day_start_ns(days[-1]) + 86_400 * NS_PER_SECOND if days else 0)
+
+
+def _usable_symbol(symbol: str | None) -> Instrument:
+    """The instrument asked for, or the first with any data."""
+    wanted = instruments.get(symbol) if symbol in INSTRUMENTS else instruments.get(config.SYMBOL)
+    for inst in [wanted, *INSTRUMENTS.values()]:
+        if hub.replay_feed(inst.symbol) is not None:
+            return inst
+    raise SessionError("No market data yet: it is downloading (see Market data)")
+
+
+async def _open(ws: WebSocket, live: Live | None, msg: dict) -> Live:
+    """The main screen: show an instrument live, or replay it.
+
+    Without a mode: live when the recorder is streaming the instrument now,
+    else a replay at the latest date. Live resumes the instrument's live
+    session (one per feed). Replay starts at `at`, else at the time the tab
+    was replaying (switching instruments keeps the date) when that
+    instrument has data then, else at the latest date; but an instrument
+    with a replay holding open positions or orders resumes that one."""
+    inst = _usable_symbol(msg.get("symbol") or (live.meta.get("symbol") if live is not None else None))
+    mode = msg.get("mode") if msg.get("mode") in ("live", "replay") else None
+    if mode is None:
+        mode = "live" if hub.streaming_feed(inst.symbol) is not None else "replay"
+    tf = msg.get("timeframe") or (live.session.timeframe if live is not None else config.DEFAULT_TIMEFRAME)
+    tf_seconds(tf)
+    sessions = [r for r in hub.journal.list_sessions()
+                if r["status"] == "active" and r["symbol"] == inst.symbol and r["mode"] == mode]
+
+    target = None
+    if mode == "live":
+        feed = hub.live_feed(inst.symbol)
+        if feed is None:
+            raise SessionError(f"No live {inst.label} yet: open your MT5 terminal, then press Record in Market data")
+        target = next((r["id"] for r in sessions if r["feed"] == feed.key), None)
+        start_ns = max(now_ns(), feed.source.latest_ns() or 0)
+    else:
+        feed = hub.replay_feed(inst.symbol)
+        if feed is None:
+            raise SessionError(f"{inst.label} has no history yet: it is downloading (see Market data)")
+        at = _parse_time(msg["at"]) if msg.get("at") else None
+        if at is None:
+            busy = [r["id"] for r in sessions if hub.journal.has_records(r["id"])
+                    and _has_open_book(r["id"])]
+            target = busy[0] if busy else None
+            if live is not None and not live.session.live:
+                at = live.session.sim_ns
+        days = feed.source.days()
+        if at is not None and day_start_ns(days[0]) + 86_400 * NS_PER_SECOND <= at < _last_tick_ns(feed):
+            start_ns = at
+        else:
+            if msg.get("at"):
+                await ws.send_json({"type": "notice", "message": f"{inst.label} has no data then; "
+                                                                 f"showing its latest date instead."})
+            start_ns = _latest_start_ns(feed)
+
+    if target is not None:
+        found = _restore(target)
+        if found is not None:
+            if found is live and live.ws is ws:
+                await _attach(live, ws)
+                return live
+            _leave(live, ws, found)
+            await _attach(found, ws)
+            return found
+
+    rate_fn = hub.rate_fn(inst)
+    if rate_fn is not None and rate_fn(start_ns) is None:
+        conv = instruments.get(CONVERSION[inst.quote][0])
+        raise SessionError(f"{inst.label} profits are valued in USD through {conv.label}, which has no data yet. "
+                           f"It downloads before {inst.label}; try again in a few minutes.")
+    # Empty sessions the screen opened for this instrument before, in no tab
+    # now (the tab was closed): replaced by this one.
+    for r in sessions:
+        other = hub.live.get(r["id"])
+        if r.get("origin") == "screen" and (other is None or other.ws is None) and _unused(r["id"]):
+            _discard(r["id"])
+    broker = Broker.for_instrument(inst, balance=config.DEFAULT_BALANCE, leverage=config.DEFAULT_LEVERAGE,
+                                   rate_fn=rate_fn)
+    sid = hub.journal.create_session(start_ns=start_ns, timeframe=tf, broker_state=broker.to_state(), hide_dates=False,
+                                     mode=mode, feed=feed.key, symbol=inst.symbol, origin="screen")
+    session = ReplaySession(feed.source, feed.bars, broker, start_ns, tf, sid, live=mode == "live")
+    row = hub.journal.get_session(sid)
+    new_live = Live(session, {k: v for k, v in row.items() if k != "state"})
+    hub.live[sid] = new_live
+    new_live.save()
+    _leave(live, ws, new_live)
+    await _attach(new_live, ws)
+    return new_live
+
+
+def _has_open_book(sid: str) -> bool:
+    """Open positions or pending orders in a session, in memory or saved."""
+    if sid in hub.live:
+        b = hub.live[sid].session.broker
+        return bool(b.positions or b.pending)
+    row = hub.journal.get_session(sid)
+    broker = (row or {}).get("state", {}).get("broker", {})
+    return bool(broker.get("positions") or broker.get("pending"))
+
+
 def _session_info(live: Live) -> dict:
     m = live.meta
     inst = instruments.get(m.get("symbol"))
@@ -1015,12 +1181,12 @@ async def _handle(ws: WebSocket, live: Live | None, msg: dict) -> Live | None:
         new_live = Live(session, {k: v for k, v in row.items() if k != "state"})
         hub.live[sid] = new_live
         new_live.save()
-        if live is not None and live is not new_live and live.ws is ws:
-            live.ws = None
-            live.stop_clock()
-            live.save()
+        _leave(live, ws, new_live)
         await _attach(new_live, ws)
         return new_live
+
+    if kind == "open":
+        return await _open(ws, live, msg)
 
     if live is None or live.ws is not ws:
         raise SessionError("No session is open in this tab")
@@ -1157,7 +1323,8 @@ def _meta() -> dict:
             "symbol": config.SYMBOL,
         },
         "keep_flags": list(config.KEEP_FLAGS),
-        "instruments": [dict(inst.to_json(), feeds=_feed_list(symbol)) for symbol, inst in INSTRUMENTS.items()],
+        "instruments": [dict(inst.to_json(), feeds=_feed_list(symbol), streaming=hub.streaming_feed(symbol) is not None)
+                        for symbol, inst in INSTRUMENTS.items()],
         "calendar": hub.calendar.status(),
     }
 

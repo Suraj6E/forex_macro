@@ -8,7 +8,14 @@
   var PIP = 0.0001, DIGITS = 5, INST = null;  // set from the session's instrument
   var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   var TAGS = ["breakout", "pullback", "reversal", "range", "news", "plan", "fomo", "revenge"];
-  var LS_SESSION = "sim-session";
+  // This tab's session: kept across a reload, not shared with a new tab,
+  // which opens on the market (live, or the latest date).
+  var TAB_SESSION = "sim-tab-session";
+  var LS_SYMBOL = "sim-symbol", LS_TF = "sim-tf";
+  function store(kind, key, value) {
+    try { if (value === null) window[kind].removeItem(key); else window[kind].setItem(key, value); } catch (e) {}
+  }
+  function stored(kind, key) { try { return window[kind].getItem(key); } catch (e) { return null; } }
 
   var S = {
     ws: null, session: null, status: null, quote: null, book: null,
@@ -92,7 +99,8 @@
     PIP = inst.pip; DIGITS = inst.digits;
     C.setInstrument(inst);
     D.setInstrument(inst);
-    $("symbolLabel").textContent = inst.label;
+    ensureSymbolOption(inst);
+    $("symSel").value = inst.symbol;
     $("symLabel").textContent = inst.label;
     document.title = inst.label + " · FX Replay";
     var step = Math.pow(10, -DIGITS).toFixed(DIGITS);
@@ -120,8 +128,9 @@
         openSessionDialog({ start: pendingStart });
         return;
       }
-      var sid = params.get("session") || localStorage.getItem(LS_SESSION);
-      send({ type: "hello", session: sid });
+      var sid = params.get("session") || stored("sessionStorage", TAB_SESSION);
+      if (sid) send({ type: "hello", session: sid });
+      else openView({});
     };
     ws.onmessage = function (e) { onMessage(JSON.parse(e.data)); };
     ws.onclose = function () {
@@ -144,8 +153,11 @@
         waitUntilReady();
         break;
       case "no_session":
-        localStorage.removeItem(LS_SESSION);
-        openSessionDialog({ meta: m.meta });
+        store("sessionStorage", TAB_SESSION, null);
+        openView({});
+        break;
+      case "notice":
+        toast(m.message);
         break;
       case "session":
         S.session = m.session;
@@ -153,7 +165,9 @@
         setInstrument(m.session.instrument);
         N.clear();
         S.timeframes = m.session.timeframes;
-        localStorage.setItem(LS_SESSION, m.session.id);
+        store("sessionStorage", TAB_SESSION, m.session.id);
+        store("localStorage", LS_SYMBOL, m.session.instrument.symbol);
+        showMode(m.session.mode);
         if (new URLSearchParams(location.search).get("session")) history.replaceState(null, "", "/");
         C.setHideDates(m.session.hide_dates);
         document.body.classList.toggle("live-session", m.session.mode === "live");
@@ -214,11 +228,11 @@
         toast(m.message + " Reload this page to take it back.", "err");
         break;
       case "ended":
-        localStorage.removeItem(LS_SESSION);
+        store("sessionStorage", TAB_SESSION, null);
         S.attached = false;
         toast("Session ended. Its trades are in the journal.");
         N.clear();
-        openSessionDialog({});
+        openView({ symbol: INST && INST.symbol });
         break;
       case "drawing_saved": break;
       case "annotated": toast("Saved to the journal."); break;
@@ -311,7 +325,7 @@
       QS.cells[tr.dataset.sym] = c;
     });
     $("qBody").querySelectorAll("[data-watch]").forEach(function (b) {
-      b.onclick = function () { closeQuotes(); openSessionDialog({ mode: "live", symbol: b.dataset.watch }); };
+      b.onclick = function () { closeQuotes(); openView({ mode: "live", symbol: b.dataset.watch }); };
     });
   }
 
@@ -570,6 +584,7 @@
 
   function setTimeframe(tf) {
     S.chartTf = tf;
+    store("localStorage", LS_TF, tf);
     var t = S.timeframes.filter(function (x) { return x.key === tf; })[0];
     if (t) { S.tfSeconds = t.seconds; $("tfLabel").textContent = t.label; }
     document.querySelectorAll("#tfGroup [data-tf]").forEach(function (b) { b.classList.toggle("on", b.dataset.tf === tf); });
@@ -583,10 +598,99 @@
   $("speedSel").onchange = function () { send({ type: "speed", value: this.value }); };
   $("stepTick").onclick = function () { send({ type: "step", kind: "tick" }); };
   $("stepCandle").onclick = function () { send({ type: "step", kind: "candle" }); };
+  // The date picker opens from the calendar button or the clock, set to
+  // the time on screen.
+  function toggleDatePop(open) {
+    open = open === undefined ? $("datePop").classList.contains("hidden") : open;
+    $("datePop").classList.toggle("hidden", !open);
+    $("dateBtn").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      if (S.status && S.status.sim_ms) $("jumpInput").value = isoMinute(S.status.sim_ms);
+      $("jumpInput").focus();
+    }
+  }
+  $("dateBtn").onclick = function (e) { e.stopPropagation(); toggleDatePop(); };
+  $("clock").onclick = function (e) { e.stopPropagation(); toggleDatePop(true); };
+  $("datePop").onclick = function (e) { e.stopPropagation(); };
+  document.addEventListener("click", function () { if (!$("datePop").classList.contains("hidden")) toggleDatePop(false); });
+  $("jumpInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") $("jumpBtn").click();
+    else if (e.key === "Escape") toggleDatePop(false);
+  });
+
   $("jumpBtn").onclick = function () {
     var v = $("jumpInput").value;
-    if (v) send({ type: "jump", time: v });
+    if (!v) return;
+    toggleDatePop(false);
+    // Live has no going back: a date opens a replay of it instead.
+    if (S.session && S.session.mode === "live") openView({ mode: "replay", at: v });
+    else send({ type: "jump", time: v });
   };
+
+  // ---------------------------------------------------------------- one screen: instrument, live or replay
+
+  // Ask the server for an instrument live or in replay. Without a mode it
+  // picks: live when the recorder is streaming it, else the latest date.
+  function openView(opts) {
+    opts = opts || {};
+    var msg = { type: "open", timeframe: S.chartTf || stored("localStorage", LS_TF) || undefined };
+    msg.symbol = opts.symbol || (INST && INST.symbol) || stored("localStorage", LS_SYMBOL) || undefined;
+    if (opts.mode) msg.mode = opts.mode;
+    if (opts.at) msg.at = opts.at;
+    send(msg);
+  }
+
+  var SYMS = {};  // symbol -> instrument from /api/meta, with its feeds
+
+  function ensureSymbolOption(inst) {
+    if (!$("symSel").querySelector("option[value='" + inst.symbol + "']")) {
+      var o = document.createElement("option");
+      o.value = inst.symbol; o.textContent = inst.label;
+      $("symSel").appendChild(o);
+    }
+  }
+
+  function loadSymbols() {
+    return fetch("/api/meta").then(function (r) { return r.json(); }).then(function (meta) {
+      if (!meta.ready) return;
+      SYMS = {};
+      meta.instruments.forEach(function (i) { SYMS[i.symbol] = i; });
+      var cur = INST ? INST.symbol : $("symSel").value;
+      $("symSel").innerHTML = meta.instruments.map(function (i) {
+        // ● streaming live now; greyed out: no data yet (downloading).
+        return "<option value='" + i.symbol + "'" + (i.feeds.length ? "" : " disabled") + ">" + esc(i.label + (i.streaming ? "  ●" : "")) + "</option>";
+      }).join("");
+      if (cur) $("symSel").value = cur;
+      if (S.session) showMode(S.session.mode);
+    }).catch(function () {});
+  }
+
+  function showMode(mode) {
+    var inst = INST && SYMS[INST.symbol];
+    var canLive = !inst || inst.feeds.some(function (f) { return f.live; });
+    document.querySelectorAll("#modeBar [data-m]").forEach(function (b) {
+      b.classList.toggle("on", b.dataset.m === mode);
+      b.setAttribute("aria-pressed", b.dataset.m === mode ? "true" : "false");
+    });
+    var lb = $("modeBar").querySelector("[data-m=live]");
+    lb.disabled = !canLive && mode !== "live";
+    lb.title = canLive ? "The market now, streamed from your MT5 terminal" :
+      "No live data for this instrument: open your MT5 terminal and press Record in Market data";
+    $("jumpBtn").textContent = mode === "live" ? "Replay from here" : "Jump";
+    $("jumpInput").title = mode === "live" ? "Replay from this date and time (UTC)" : "Jump to (UTC)";
+    $("dateBtn").title = mode === "live" ? "Replay from a date (UTC)" : "Go to a date (UTC)";
+  }
+
+  $("symSel").onchange = function () {
+    openView({ symbol: this.value, mode: S.session ? S.session.mode : undefined });
+  };
+  $("modeBar").onclick = function (e) {
+    var b = e.target.closest("[data-m]");
+    if (!b || b.disabled || (S.session && S.session.mode === b.dataset.m)) return;
+    openView({ mode: b.dataset.m });
+  };
+  loadSymbols();
+  setInterval(loadSymbols, 60000);
 
   document.addEventListener("keydown", function (e) {
     var tag = (e.target && e.target.tagName) || "";
@@ -865,7 +969,9 @@
     var rec = d.live && d.live.recorder;
     var st = rec ? (REC_STATE[rec.state] || ["", rec.state]) : ["", "Off"];
     $("liveDot").className = "dot " + st[0];
-    $("dataChip").textContent = text + " · Live: " + st[1];
+    // Short in the bar; the dot shows the recorder, the tooltip the rest.
+    $("dataChip").textContent = d.job && d.job.running ? "Data " + pct(d.job) + "%" : "Data";
+    $("dataBtn").title = text + " · Live: " + st[1] + ". Market data: history updates and live recording.";
   }
 
   function pct(job) { return job.total ? Math.floor(100 * job.done / job.total) : 0; }

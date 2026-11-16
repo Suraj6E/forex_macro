@@ -13,7 +13,12 @@
 <body>
 <div class="app">
   <header class="topbar">
-    <div class="brand">FX Replay<small id="symbolLabel">EUR/USD</small></div>
+    <div class="brand">FX Replay</div>
+    <select id="symSel" class="symsel replay-only" aria-label="Instrument" title="Instrument: the chart switches to it, live or at the same replay date"></select>
+    <div class="seg modebar replay-only" id="modeBar" role="group" aria-label="Live or replay">
+      <button type="button" data-m="live" title="The market now, streamed from your MT5 terminal">Live</button>
+      <button type="button" data-m="replay" title="Replay: the latest date, or pick one on the right">Replay</button>
+    </div>
     <div class="sep"></div>
 
     <div class="group tf" id="tfGroup" role="group" aria-label="Timeframe"></div>
@@ -26,9 +31,14 @@
       <select id="speedSel" title="Market seconds per real second"></select>
     </div>
     <div class="clock replay-only" id="clock" title="Simulation time, UTC">--</div>
-    <div class="group replay-only live-hide">
-      <input type="datetime-local" id="jumpInput" step="60" title="Jump to (UTC)">
-      <button id="jumpBtn">Jump</button>
+    <div class="group replay-only datepick">
+      <button type="button" id="dateBtn" class="iconbtn" title="Go to a date (UTC)" aria-label="Go to a date" aria-expanded="false" aria-controls="datePop">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>
+      </button>
+      <div class="datepop hidden" id="datePop" role="dialog" aria-label="Go to a date">
+        <input type="datetime-local" id="jumpInput" step="60" title="Jump to (UTC)">
+        <button id="jumpBtn" class="primary" title="Go to this date and time (UTC)">Jump</button>
+      </div>
     </div>
 
     <div class="group review-only">

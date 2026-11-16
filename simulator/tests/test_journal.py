@@ -128,6 +128,38 @@ class Store(unittest.TestCase):
         self.j.save_drawing(sid, {"id": "b", "kind": "hline", "points": [{"time": 1, "price": 1.3}], "created_sim_ns": MON + 20 * HOUR})
         self.assertEqual(self.j.drawings(sid, visible_at_ns=MON + 9 * HOUR)[0]["points"][0]["price"], 1.3)
 
+    def test_sessions_the_screen_opened_and_whether_anything_was_done(self):
+        form = self.j.create_session(start_ns=MON, timeframe="m15", broker_state=Broker().to_state(), hide_dates=False)
+        screen = self.j.create_session(start_ns=MON, timeframe="m15", broker_state=Broker().to_state(), hide_dates=False,
+                                       mode="live", feed="mt5:ftmo-demo", origin="screen")
+        self.assertEqual((self.j.get_session(form)["origin"], self.j.get_session(screen)["origin"]), ("form", "screen"))
+        self.assertFalse(self.j.has_records(screen))
+        self.j.save_drawing(screen, {"id": "a", "kind": "hline", "points": [{"time": 1, "price": 1.1}], "created_sim_ns": MON})
+        self.assertTrue(self.j.has_records(screen))
+        self.assertFalse(self.j.has_records(form))
+        self.j.upsert_order(form, {"id": 1, "side": "buy", "type": "market", "lots": 0.1, "price": None, "sl": None,
+                                   "tp": None, "risk_pct": None, "placed_ns": MON, "status": "pending", "filled_ns": None,
+                                   "fill_price": None, "position_id": None, "reason": None})
+        self.assertTrue(self.j.has_records(form))
+
+    def test_a_journal_from_before_screen_sessions_gains_the_column(self):
+        import sqlite3
+        from contextlib import closing
+        path = Path(self.tmp.name) / "old.sqlite3"
+        with closing(sqlite3.connect(path)) as db, db:  # the sessions table as it was
+            db.execute("""CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', symbol TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, start_ns INTEGER NOT NULL, sim_ns INTEGER NOT NULL,
+                timeframe TEXT NOT NULL, starting_balance REAL NOT NULL, leverage REAL NOT NULL,
+                commission_per_lot REAL NOT NULL, slippage_pips REAL NOT NULL, hide_dates INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active', mode TEXT NOT NULL DEFAULT 'replay',
+                feed TEXT NOT NULL DEFAULT 'dukascopy', state TEXT NOT NULL)""")
+            db.execute("""INSERT INTO sessions (id, symbol, created_at, updated_at, start_ns, sim_ns, timeframe,
+                starting_balance, leverage, commission_per_lot, slippage_pips, state)
+                VALUES ('old1', 'EURUSD', 'x', 'x', 1, 1, 'm15', 10000, 30, 0, 0, '{}')""")
+        j = Journal(path)
+        self.assertEqual(j.get_session("old1")["origin"], "form")  # never removed by the screen
+        self.assertEqual([s["origin"] for s in j.list_sessions()], ["form"])
+
     def test_deleting_a_session_removes_its_rows(self):
         sid = self.j.create_session(start_ns=MON, timeframe="m15", broker_state=Broker().to_state(), hide_dates=False)
         self.j.add_note(sid, MON, "hello")

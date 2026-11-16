@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     status TEXT NOT NULL DEFAULT 'active',
     mode TEXT NOT NULL DEFAULT 'replay',
     feed TEXT NOT NULL DEFAULT 'dukascopy',
+    origin TEXT NOT NULL DEFAULT 'form',
     state TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS orders (
@@ -141,6 +142,10 @@ class Journal:
                 db.execute("ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'replay'")
             if "feed" not in have:
                 db.execute("ALTER TABLE sessions ADD COLUMN feed TEXT NOT NULL DEFAULT 'dukascopy'")
+            # 'screen': opened by the main screen (symbol picker, Live/Replay);
+            # 'form': set up in the Sessions form.
+            if "origin" not in have:
+                db.execute("ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'form'")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -157,7 +162,8 @@ class Journal:
     # -- sessions ----------------------------------------------------------
 
     def create_session(self, *, start_ns: int, timeframe: str, broker_state: dict, hide_dates: bool, name: str = "",
-                       mode: str = "replay", feed: str = "dukascopy", symbol: str = config.SYMBOL) -> str:
+                       mode: str = "replay", feed: str = "dukascopy", symbol: str = config.SYMBOL,
+                       origin: str = "form") -> str:
         sid = uuid.uuid4().hex[:12]
         now = _now()
         state = {"sim_ns": start_ns, "timeframe": timeframe, "speed": 60.0, "broker": broker_state}
@@ -165,13 +171,13 @@ class Journal:
             db.execute(
                 """INSERT INTO sessions (id, name, symbol, created_at, updated_at, start_ns, sim_ns,
                    timeframe, starting_balance, leverage, commission_per_lot, slippage_pips,
-                   hide_dates, status, mode, feed, state)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+                   hide_dates, status, mode, feed, origin, state)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
                 (
                     sid, name, symbol, now, now, start_ns, start_ns, timeframe,
                     broker_state["starting_balance"], broker_state["leverage"],
                     broker_state["commission_per_lot"], broker_state["slippage_pips"],
-                    int(hide_dates), mode, feed, json.dumps(state),
+                    int(hide_dates), mode, feed, origin, json.dumps(state),
                 ),
             )
         return sid
@@ -195,6 +201,15 @@ class Journal:
         with self._conn() as db:
             db.execute("DELETE FROM sessions WHERE id = ?", (sid,))
 
+    def has_records(self, sid: str) -> bool:
+        """Whether anything was done in a session: an order (and so any
+        position), a trade, a note, a drawing or a snapshot."""
+        with self._conn() as db:
+            for table in ("orders", "trades", "notes", "drawings", "snapshots"):
+                if db.execute(f"SELECT 1 FROM {table} WHERE session_id = ? LIMIT 1", (sid,)).fetchone():
+                    return True
+        return False
+
     def get_session(self, sid: str) -> dict | None:
         with self._conn() as db:
             row = db.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
@@ -209,7 +224,7 @@ class Journal:
             rows = db.execute(
                 """SELECT s.id, s.name, s.symbol, s.created_at, s.updated_at, s.start_ns, s.sim_ns,
                           s.timeframe, s.starting_balance, s.leverage, s.commission_per_lot,
-                          s.slippage_pips, s.hide_dates, s.status, s.mode, s.feed,
+                          s.slippage_pips, s.hide_dates, s.status, s.mode, s.feed, s.origin,
                           COUNT(t.id) AS trades, COALESCE(SUM(t.net_usd), 0) AS net_usd
                    FROM sessions s LEFT JOIN trades t ON t.session_id = s.id
                    GROUP BY s.id ORDER BY s.updated_at DESC"""

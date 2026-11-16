@@ -91,14 +91,28 @@ label { color: var(--muted); font-size: 12px; }
 
 .app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
 .topbar {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
   padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface);
 }
 .brand { font-weight: 650; letter-spacing: .01em; margin-right: 4px; }
+.symsel { font-weight: 600; width: 140px; }
+.modebar { margin-bottom: 0; }
+.modebar button { padding-left: 10px; padding-right: 10px; }
+.modebar button[data-m="live"].on { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); }
+.modebar button:disabled { opacity: .45; cursor: not-allowed; }
 .brand small { color: var(--muted); font-weight: 400; margin-left: 6px; }
 .group { display: flex; align-items: center; gap: 4px; }
 .sep { width: 1px; height: 22px; background: var(--border); }
-.tf button { padding: 5px 8px; min-width: 38px; }
+.tf button { padding: 5px 7px; min-width: 34px; }
+.iconbtn { padding: 4px 7px; line-height: 0; }
+.iconbtn svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.7; }
+.datepick { position: relative; }
+.datepop {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 45; display: flex; gap: 6px;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 8px;
+}
+.clock { cursor: pointer; }
 .clock {
   font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 14px;
   padding: 4px 10px; border-radius: var(--radius-sm); background: var(--surface-2);
@@ -213,7 +227,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 
 /* ---------- data panel ---------- */
 
-.datachip { display: inline-flex; align-items: center; gap: 7px; max-width: 360px; }
+.datachip { display: inline-flex; align-items: center; gap: 7px; max-width: 260px; }
 .datachip span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
 .dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
