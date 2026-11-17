@@ -36,7 +36,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from simulator import analysis, config, instruments
+from simulator import analysis, config, instruments, strength
 from simulator.data import dukascopy
 from simulator.data.bars import TIMEFRAMES, BarStore, tf_seconds
 from simulator.data.calendar import Calendar
@@ -52,7 +52,7 @@ from simulator.data.ticks import (
 )
 from simulator.engine.broker import UNSET, Broker, OrderError
 from simulator.engine.clock import FRAME_SECONDS, SPEEDS
-from simulator.engine.session import ReplaySession, SessionError, random_start_ns
+from simulator.engine.session import HISTORY_LIMIT, ReplaySession, SessionError, random_start_ns
 from simulator.instruments import CONVERSION, INSTRUMENTS, Instrument
 from simulator.journal import stats
 from simulator.journal.store import Journal
@@ -244,6 +244,10 @@ class Hub:
         #: boards wake on it instead of waiting for their next frame.
         self.tick_listeners: set = set()
         self.prepared = False
+        #: The strength indicator, built in the background from every
+        #: instrument's 1-minute candles (strength.py).
+        self.strength = strength.StrengthStore(config.STORE_DIR / "strength", self.strength_sources)
+        self._strength_sources: dict[str, strength.Source] = {}
 
     # -- replay history --------------------------------------------------------
 
@@ -588,6 +592,26 @@ class Hub:
             return feeds[REPLAY_FEED]
         return self.live_feed(symbol)
 
+    def strength_sources(self, symbol: str) -> list[strength.Source]:
+        """An instrument's 1-minute candles for the strength indicator:
+        Dukascopy history, then each recorded broker feed (its open days from
+        the live ticks). Kept, so their file caches last between rounds."""
+        wanted = []
+        m = self.markets.get(symbol)
+        if m is not None:
+            wanted.append((REPLAY_FEED, lambda: [strength.M1File(m.bars_dir / "m1.parquet")]))
+        for key, feed in self.feeds(symbol).items():
+            if feed.live:
+                wanted.append((key, lambda feed=feed: [strength.M1File(Path(feed.source.dir) / "bars" / "m1.parquet"),
+                                                       strength.OpenDays(feed.source)]))
+        out = []
+        for key, parts in wanted:
+            cache = f"{key}/{symbol}"
+            if cache not in self._strength_sources:
+                self._strength_sources[cache] = strength.Source(key, parts())
+            out.append(self._strength_sources[cache])
+        return out
+
     def _on_ticks(self, symbol: str) -> None:
         for listener in list(self.tick_listeners):
             listener(symbol)
@@ -655,6 +679,7 @@ async def lifespan(app: FastAPI):
     asyncio.get_running_loop().set_exception_handler(_quiet_resets)
     maintenance = asyncio.create_task(_keep_recorded_candles_current())
     hub.start()
+    hub.strength.start(lambda: hub.prepared)
     settings = hub.live_settings()
     if settings.get("autostart") and settings.get("terminal"):
         # Waits harmlessly until the trader opens that terminal.
@@ -662,6 +687,7 @@ async def lifespan(app: FastAPI):
         hub.recorder.start()
     yield
     maintenance.cancel()
+    hub.strength.stop()
     for live in list(hub.live.values()):
         live.save()
     hub.stop_job()
@@ -697,6 +723,10 @@ class Live:
         self.last_save = time.monotonic()
         self.wake: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        #: The strength rows' version last sent, and whether candles on
+        #: screen went without a value (the indicator still being built).
+        self.strength_version = hub.strength.version
+        self.strength_missing = False
 
     def _poke(self, symbol: str) -> None:
         """New ticks recorded (called from the recorder's thread)."""
@@ -738,12 +768,43 @@ class Live:
         } for o in b.pending]
         return {"positions": positions, "pending": pending, "account": b.account()}
 
+    def strength(self, bars: list[dict], tf: str | None = None) -> list[dict]:
+        """Candles with the strength indicator's values, as of the clock."""
+        hub.strength.annotate(bars, tf_seconds(tf or self.session.timeframe), self.session.sim_ns)
+        return bars
+
+    async def send_strength(self) -> None:
+        """New strength rows were saved. Live, the last few candles get
+        theirs again: one that closed before the builder's round went out
+        with an earlier minute's value, or none. A replay whose candles went
+        without (the first build still running) gets the screen's again."""
+        version = hub.strength.version
+        if version == self.strength_version:
+            return
+        self.strength_version = version
+        s = self.session
+        if not (s.live or self.strength_missing):
+            return
+        store = s.bars[s.timeframe]
+        n = store.completed_count(s.sim_ns)
+        bars = store.slice(n - (6 if s.live else HISTORY_LIMIT), n)
+        forming = s.forming(s.timeframe)
+        if forming:
+            bars.append(forming)
+        self.strength(bars)
+        if not s.live:
+            self.strength_missing = any(b.get("s") is None for b in bars[:-1])
+        await self.send({"type": "strength", "timeframe": s.timeframe,
+                         "bars": [{"time": b["time"], "s": b.get("s"), "w": b.get("w")} for b in bars]})
+
     async def send_history(self) -> None:
         s = self.session
+        bars = self.strength(s.history())
+        self.strength_missing = any(b.get("s") is None for b in bars[:-1])
         await self.send({
             "type": "history",
             "status": s.status(),
-            "bars": s.history(),
+            "bars": bars,
             "quote": s.quote(),
             "book": self.book(),
             "drawings": hub.journal.drawings(self.id, visible_at_ns=s.sim_ns),
@@ -758,10 +819,11 @@ class Live:
             await self.send({
                 "type": "frame",
                 "status": s.status(),
-                "bars": bars,
+                "bars": self.strength(bars),
                 "quote": s.quote(),
                 "book": self.book(),
             })
+        await self.send_strength()
         await self.flush_events()
 
     async def flush_events(self) -> None:
@@ -1222,7 +1284,8 @@ async def _handle(ws: WebSocket, live: Live | None, msg: dict) -> Live | None:
         await live.send_history()
         await live.flush_events()
     elif kind == "more_history":
-        bars = s.history(msg.get("timeframe") or s.timeframe, limit=1500, before=int(msg["before"]))
+        tf = msg.get("timeframe") or s.timeframe
+        bars = live.strength(s.history(tf, limit=1500, before=int(msg["before"])), tf)
         await live.send({"type": "older", "timeframe": msg.get("timeframe") or s.timeframe, "bars": bars})
     elif kind == "order":
         s.broker.place(
@@ -1369,6 +1432,7 @@ def data_status(terminals: int = 0) -> dict:
                         for s, m in hub.markets.items()] if hub.prepared else [],
         "disk": hub.disk(),
         "calendar": hub.calendar.status(),
+        "strength": hub.strength.status,
         "live": live,
     }
 
@@ -1591,7 +1655,7 @@ def analysis_now(session: str | None = None) -> dict:
         sources[symbol] = order
     out = analysis.measure(sources, at)
     out.update(live=is_live, at_ms=None if is_live else at // 1_000_000,
-               hide_dates=bool((row or {}).get("hide_dates")))
+               hide_dates=bool((row or {}).get("hide_dates")), indicator=hub.strength.status)
     return out
 
 

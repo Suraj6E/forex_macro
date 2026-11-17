@@ -121,7 +121,26 @@
 
   // ---------------------------------------------------------------- chart
 
-  var C = window.SimChart.create($("chart"), {});
+  // The strength indicator's lines, in the order the server sends them
+  // (strength.KEYS); the four currencies show unless switched off.
+  var IND_KEYS = [
+    { key: "USD", label: "USD", color: "--s1" }, { key: "EUR", label: "EUR", color: "--s2" },
+    { key: "GBP", label: "GBP", color: "--s3" }, { key: "JPY", label: "JPY", color: "--s4" },
+    { key: "XAUUSD", label: "Gold", color: "--s5" }, { key: "XAGUSD", label: "Silver", color: "--s6" },
+    { key: "WTI", label: "WTI", color: "--s7" }, { key: "BRENT", label: "Brent", color: "--s8" }
+  ];
+  var LS_IND = "sim-ind", LS_IND_KEYS = "sim-ind-keys";
+  (function () {
+    var saved = stored("localStorage", LS_IND_KEYS);
+    var on = saved === "none" ? [] : saved ? saved.split(",") : ["USD", "EUR", "GBP", "JPY"];
+    IND_KEYS.forEach(function (k) { k.on = on.indexOf(k.key) >= 0; });
+  })();
+
+  var C = window.SimChart.create($("chart"), {
+    indicatorEl: $("indChart"),
+    indicatorKeys: IND_KEYS,
+    onIndicatorHover: function (st, hovering) { renderIndLegend(st, hovering); }
+  });
   var D = window.SimDrawings.create(C, {
     getTimeframe: function () { return S.chartTf || "m15"; },
     getTimeframeSeconds: function () { return S.tfSeconds; },
@@ -267,6 +286,9 @@
         }
         onQuote(m.quote);
         onBook(m.book);
+        break;
+      case "strength":
+        if (m.timeframe === S.chartTf) C.setStrengths(m.bars);
         break;
       case "older":
         S.loadingOlder = false;
@@ -492,9 +514,62 @@
   setInterval(analysisTick, 500);
 
   function pct2(v) { return (Math.abs(v) < 0.005 ? "" : v > 0 ? "+" : "−") + Math.abs(v).toFixed(2) + "%"; }
+
+  // ---------------------------------------------------------------- strength indicator
+
+  // The pane under the chart: the panel's strength at every candle's close,
+  // worked out and saved by the server in the background. Its legend shows
+  // the candle under the crosshair, else the latest; a name shows or hides
+  // its line.
+  S.strengthStatus = null;
+  function indStatusText() {
+    var st = S.strengthStatus;
+    if (!st) return "";
+    if (st.state === "ready") return "Indicator: up to date.";
+    if (st.state === "building") return "Indicator: " + st.message + ". Candles show it as each month is done.";
+    if (st.state === "error") return "Indicator problem: " + st.message;
+    return "Indicator: " + (st.message || st.state);
+  }
+  function onStrengthStatus(st) {
+    S.strengthStatus = st || null;
+    $("indStatus").textContent = indStatusText();
+  }
+
+  var indLegendHtml = "";
+  function renderIndLegend(st, hovering) {
+    var html = "<span class='indtitle' title='Each currency&#39;s average move since 17:00 New York at the candle&#39;s close, and its matches won of those played'>Strength</span>" +
+      IND_KEYS.map(function (k, i) {
+        var v = st && st.s ? st.s[i] : null;
+        var won = i < 4 && st && st.w && st.w.length ? " <small>" + st.w[2 * i] + "/" + st.w[2 * i + 1] + "</small>" : "";
+        return "<button type='button' data-ind='" + k.key + "' class='" + (k.on ? "" : "off") + "' aria-pressed='" + k.on + "'" +
+          " title='" + (k.on ? "Hide " : "Show ") + k.label + "'><i style='background:var(" + k.color + ")'></i>" + k.label +
+          " <b>" + (v === null || v === undefined ? "–" : pct2(v)) + "</b>" + won + "</button>";
+      }).join("") +
+      (st && st.s ? "" : "<span>" + esc(hovering ? "No value for this candle." : indStatusText() || "No values here yet.") + "</span>");
+    if (html !== indLegendHtml) { indLegendHtml = html; $("indLegend").innerHTML = html; }
+  }
+  $("indLegend").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-ind]");
+    if (!b) return;
+    var on = {};
+    IND_KEYS.forEach(function (k) { if (k.key === b.dataset.ind) k.on = !k.on; on[k.key] = k.on; });
+    C.setIndicatorKeys(on);
+    var keys = IND_KEYS.filter(function (k) { return k.on; }).map(function (k) { return k.key; });
+    store("localStorage", LS_IND_KEYS, keys.length ? keys.join(",") : "none");
+    renderIndLegend(C.lastStrength(), false);
+  });
+  function setIndicator(on) {
+    $("indToggle").checked = on;
+    document.body.classList.toggle("show-ind", on);
+    store("localStorage", LS_IND, on ? null : "0");
+    C.showIndicator(on);
+  }
+  setIndicator(stored("localStorage", LS_IND) !== "0");
+  $("indToggle").onchange = function () { setIndicator(this.checked); };
   function arrow(v) { return v > 0 ? "<span class='arr up' aria-hidden='true'>▲</span>" : v < 0 ? "<span class='arr down' aria-hidden='true'>▼</span>" : ""; }
 
   function renderAnalysis(d) {
+    onStrengthStatus(d.indicator);
     if (d.day_open_ms === null) {
       $("anWhen").textContent = "No currency pair has any ticks yet.";
     } else if (d.live) {
@@ -1150,6 +1225,7 @@
     var open = PANEL.open === "data";
     fetch("/api/data" + (open ? "?terminals=1" : "")).then(function (r) { return r.json(); }).then(function (d) {
       renderChip(d);
+      onStrengthStatus(d.strength);
       if (open) renderDataDialog(d);
       var prep = $("prepNotice");
       if (prep) {

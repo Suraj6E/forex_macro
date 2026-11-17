@@ -30,6 +30,12 @@
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
   --shadow: 0 8px 30px rgba(0, 0, 0, .5);
+  /* Indicator lines: the reference categorical palette in its fixed order
+     (dataviz palette, checked for colour-vision deficiency on adjacent
+     pairs in both modes): USD, EUR, GBP, JPY, then gold, silver, WTI,
+     Brent. Every line is also named in the legend and on its scale. */
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #0ca30c; --s7: #9085e9; --s8: #e66767;
 }
 
 :root[data-theme="light"] {
@@ -51,6 +57,8 @@
   --warn-bg: rgba(250, 178, 25, .16);
   --err-bg: rgba(208, 59, 59, .09);
   --shadow: 0 8px 30px rgba(0, 0, 0, .12);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
 }
 
 * { box-sizing: border-box; }
@@ -133,7 +141,27 @@ label { color: var(--muted); font-size: 12px; }
 .tools button { width: 36px; height: 34px; padding: 0; display: grid; place-items: center; }
 .tools svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.6; }
 .chartwrap { position: relative; min-width: 0; min-height: 0; }
-#chart { position: absolute; inset: 0; }
+/* The strength indicator takes the bottom of the chart area when shown. */
+.chartwrap { --ind-h: 0px; }
+body.show-ind:not(.review) .chartwrap { --ind-h: 170px; }
+#chart { position: absolute; inset: 0 0 var(--ind-h) 0; }
+.indpane { display: none; position: absolute; left: 0; right: 0; bottom: 0; height: var(--ind-h); border-top: 1px solid var(--border); }
+body.show-ind:not(.review) .indpane { display: block; }
+#indChart { position: absolute; inset: 0; }
+.indlegend {
+  position: absolute; left: 10px; top: 5px; right: 96px; z-index: 5; pointer-events: none;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 11px; color: var(--muted);
+}
+.indlegend .indtitle { color: var(--text); font-weight: 600; }
+.indlegend button {
+  pointer-events: auto; padding: 1px 4px; border: none; background: transparent; font-size: 11px;
+  display: inline-flex; align-items: center; gap: 4px; color: var(--text);
+}
+.indlegend button:hover:not(:disabled) { background: var(--surface-2); }
+.indlegend button.off { opacity: .45; }
+.indlegend button i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+.indlegend button b { font-family: var(--mono); font-weight: 500; font-variant-numeric: tabular-nums; }
+.indlegend button small { color: var(--muted); font-family: var(--mono); }
 .chart-overlay {
   position: absolute; left: 12px; top: 10px; z-index: 5; pointer-events: none;
   font-size: 12px; color: var(--muted);

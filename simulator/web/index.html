@@ -73,6 +73,10 @@
 
     <div class="chartwrap">
       <div id="chart"></div>
+      <div class="indpane" id="indPane" aria-label="Currency strength indicator">
+        <div id="indChart"></div>
+        <div class="indlegend" id="indLegend"></div>
+      </div>
       <div class="chart-overlay"><span class="sym" id="symLabel">EUR/USD</span> · <span id="tfLabel">15M</span> · Bid · <span id="ohlc"></span></div>
       <div class="chartstack">
         <div class="oneclick hidden replay-only" id="oneClick" role="group" aria-label="One-click trading">
@@ -176,6 +180,10 @@
       <section class="dpanel hidden" data-panel="analysis" aria-label="Analysis">
         <div class="phead"><h2>Analysis</h2><button type="button" class="ghost pclose" title="Hide" aria-label="Hide">×</button></div>
         <p class="tiny muted anwhen" id="anWhen">Loading…</p>
+        <div class="toggles">
+          <label class="check" title="The strength below, worked out for every candle: each currency's average move since 17:00 New York, at the candle's close"><input type="checkbox" id="indToggle" checked> Show the strength indicator under the chart</label>
+          <span class="tiny muted" id="indStatus"></span>
+        </div>
         <section class="panel">
           <h3>Currency strength <span class="faint">won · average move</span></h3>
           <div class="strength" id="anRank"></div>

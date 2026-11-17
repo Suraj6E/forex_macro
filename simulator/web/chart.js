@@ -10,6 +10,7 @@
  *   setQuote(quote)               Bid and Ask lines and labels (candles are Bid)
  *   setLines(lines)               order / position lines, some draggable
  *   setMarkers(markers)           arrows for entries and exits
+ *   showIndicator(on)             the strength pane under the chart (same candles)
  *   setInstrument(inst)           price precision of the instrument
  *   attachOverlay(drawFn)         canvas callback (drawings.js, news.js)
  *   screenshot()                  PNG data URL of the chart
@@ -113,15 +114,128 @@
 
     function strip(b) { return { time: b.time, open: b.open, high: b.high, low: b.low, close: b.close }; }
 
+    // ---- strength indicator: a pane under the chart ----
+    //
+    // A second chart holding exactly the main chart's candles (a value or a
+    // gap for each), so the two scroll, zoom and point at the same moment.
+    // Each candle arrives with `s`, its strength values in the order of
+    // `indicatorKeys`, and `w`, matches won and played per currency.
+
+    var IND_KEYS = options.indicatorKeys || [];
+    var strengths = [];  // {s, w} or null per candle, same order as `data`
+    var ind = null, indZero = null, indLines = [], indShown = false;
+    function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+    function pct(v) { return (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(2) + "%"; }
+    if (options.indicatorEl) {
+      ind = LWC.createChart(options.indicatorEl, {
+        autoSize: true,
+        layout: { background: { color: "transparent" }, textColor: t.muted, fontSize: 11 },
+        grid: { vertLines: { color: t.grid }, horzLines: { color: t.grid } },
+        rightPriceScale: { borderColor: t.grid, scaleMargins: { top: 0.2, bottom: 0.08 } },
+        timeScale: { visible: false, rightOffset: 12 },
+        crosshair: { mode: LWC.CrosshairMode.Normal },
+        localization: { timeFormatter: timeLabel, priceFormatter: pct }
+      });
+      // Zero: the day's open. Always in view, and where the crosshair sits.
+      indZero = ind.addLineSeries({ color: t.faint, lineWidth: 1, lineStyle: LWC.LineStyle.Dashed,
+        lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false });
+      indLines = IND_KEYS.map(function (k) {
+        return ind.addLineSeries({ color: cssVar(k.color), lineWidth: 2, title: k.label, visible: !!k.on,
+          priceLineVisible: false, crosshairMarkerVisible: false, priceFormat: { type: "custom", formatter: pct, minMove: 0.001 } });
+      });
+    }
+    function strengthOf(b) { return b.s ? { s: b.s, w: b.w || [] } : null; }
+    function indPoint(i, k) {
+      var st = strengths[i], v = st ? st.s[k] : null;
+      return v === null || v === undefined ? { time: times[i] } : { time: times[i], value: v };
+    }
+    function indSetAll() {
+      if (!ind || !indShown) return;
+      indZero.setData(times.map(function (tm) { return { time: tm, value: 0 }; }));
+      indLines.forEach(function (line, k) { line.setData(times.map(function (_tm, i) { return indPoint(i, k); })); });
+      var r = chart.timeScale().getVisibleLogicalRange();
+      if (r) ind.timeScale().setVisibleLogicalRange(r);
+      requestAnimationFrame(alignWidths);
+    }
+    function indUpdateLast() {
+      if (!ind || !indShown || !times.length) return;
+      var i = times.length - 1;
+      indZero.update({ time: times[i], value: 0 });
+      indLines.forEach(function (line, k) { line.update(indPoint(i, k)); });
+    }
+    // Both price scales as wide as the wider, so the candles line up.
+    function alignWidths() {
+      if (!ind || !indShown) return;
+      var a = chart.priceScale("right").width(), b = ind.priceScale("right").width(), w = Math.max(a, b);
+      if (w && a < w) chart.applyOptions({ rightPriceScale: { minimumWidth: w } });
+      if (w && b < w) ind.applyOptions({ rightPriceScale: { minimumWidth: w } });
+    }
+    var syncing = false;
+    function follow(target) {
+      return function (r) {
+        if (!r || syncing || !ind || !indShown) return;
+        syncing = true;
+        try { target.timeScale().setVisibleLogicalRange(r); } finally { syncing = false; }
+        alignWidths();
+      };
+    }
+    function indexOf(time) {
+      var lo = 0, hi = times.length - 1;
+      while (lo <= hi) { var mid = (lo + hi) >> 1; if (times[mid] < time) lo = mid + 1; else if (times[mid] > time) hi = mid - 1; else return mid; }
+      return -1;
+    }
+    // The legend shows the candle under the crosshair, else the latest.
+    var hoverAt = -1;
+    function hovered(i) { hoverAt = i; legend(); }
+    function legend() {
+      if (options.onIndicatorHover) options.onIndicatorHover(hoverAt >= 0 ? strengths[hoverAt] : lastStrength(), hoverAt >= 0);
+    }
+    // The latest candle with a value: the forming one has none until a
+    // minute of it has closed.
+    function lastStrength() {
+      for (var i = strengths.length - 1; i >= Math.max(0, strengths.length - 4); i--) if (strengths[i]) return strengths[i];
+      return null;
+    }
+    // Values sent again for candles already on the chart (see send_strength).
+    function setStrengths(bars) {
+      var changed = false;
+      bars.forEach(function (b) {
+        var i = indexOf(b.time);
+        if (i >= 0) { strengths[i] = strengthOf(b); changed = true; }
+      });
+      if (changed) { indSetAll(); if (hoverAt < 0) legend(); }
+    }
+    if (ind) {
+      chart.timeScale().subscribeVisibleLogicalRangeChange(follow(ind));
+      ind.timeScale().subscribeVisibleLogicalRangeChange(follow(chart));
+      chart.subscribeCrosshairMove(function (p) {
+        if (!indShown) return;
+        if (p.time === undefined) { ind.clearCrosshairPosition(); hovered(-1); return; }
+        ind.setCrosshairPosition(0, p.time, indZero);
+        hovered(indexOf(p.time));
+      });
+      ind.subscribeCrosshairMove(function (p) { if (indShown && p.sourceEvent !== undefined) hovered(p.time === undefined ? -1 : indexOf(p.time)); });
+    }
+    function showIndicator(on) {
+      indShown = !!(ind && on);
+      if (indShown) requestAnimationFrame(function () { indSetAll(); hovered(-1); });
+    }
+    function setIndicatorKeys(on) {
+      IND_KEYS.forEach(function (k, i) { k.on = !!on[k.key]; if (indLines[i]) indLines[i].applyOptions({ visible: k.on }); });
+    }
+
     // ---- candles ----
 
     function setHistory(bars, seconds) {
       tfSeconds = seconds || tfSeconds;
       data = bars.map(strip);
       vols = bars.map(volBar);
+      strengths = bars.map(strengthOf);
       times = data.map(function (b) { return b.time; });
       series.setData(data);
       volume.setData(vols);
+      indSetAll();
+      if (indShown) hovered(-1);
       requestOverlays();
     }
 
@@ -133,9 +247,11 @@
         var c = strip(b), v = volBar(b);
         series.update(c);
         volume.update(v);
-        if (b.time > last) { times.push(b.time); data.push(c); vols.push(v); }
-        else { data[data.length - 1] = c; vols[vols.length - 1] = v; }
+        if (b.time > last) { times.push(b.time); data.push(c); vols.push(v); strengths.push(strengthOf(b)); }
+        else { data[data.length - 1] = c; vols[vols.length - 1] = v; strengths[strengths.length - 1] = strengthOf(b); }
+        indUpdateLast();
       }
+      if (bars.length && indShown && hoverAt < 0) legend();
     }
 
     function prependBars(bars) {
@@ -146,10 +262,12 @@
       var range = chart.timeScale().getVisibleLogicalRange();
       data = older.map(strip).concat(data);
       vols = older.map(volBar).concat(vols);
+      strengths = older.map(strengthOf).concat(strengths);
       times = data.map(function (b) { return b.time; });
       series.setData(data);
       volume.setData(vols);
       if (range) chart.timeScale().setVisibleLogicalRange({ from: range.from + older.length, to: range.to + older.length });
+      indSetAll();
       return older.length;
     }
 
@@ -438,6 +556,12 @@
       vols = data.map(function (c, i) { return { time: c.time, value: vols[i] ? vols[i].value : 0, color: c.close >= c.open ? volColors.up : volColors.down }; });
       volume.setData(vols);
       quoteColors = { bid: n.down, ask: n.up };
+      if (ind) {
+        ind.applyOptions({ layout: { textColor: n.muted }, grid: { vertLines: { color: n.grid }, horzLines: { color: n.grid } },
+          rightPriceScale: { borderColor: n.grid } });
+        indZero.applyOptions({ color: n.faint });
+        indLines.forEach(function (line, k) { line.applyOptions({ color: cssVar(IND_KEYS[k].color) }); });
+      }
       if (bidLine) { bidLine.applyOptions({ color: n.down }); askLine.applyOptions({ color: n.up }); }
       quoteRedraw();
       requestOverlays();
@@ -460,6 +584,11 @@
       prependBars: prependBars,
       setQuote: setQuote,
       quoteLabels: quoteLabels,
+      showIndicator: showIndicator,
+      setStrengths: setStrengths,
+      setIndicatorKeys: setIndicatorKeys,
+      strengthAt: function (i) { return strengths[i] || null; },
+      lastStrength: lastStrength,
       setLines: setLines,
       setMarkers: setMarkers,
       attachOverlay: attachOverlay,
