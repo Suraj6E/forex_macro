@@ -706,12 +706,25 @@
     });
   }
 
+  // Trade history on the chart: closed trades' entry arrows and exits, as
+  // MT5's "Show trade history". Ticked in the Trade panel (on unless
+  // switched off); open positions always show. Review always shows its trade.
+  var LS_HISTORY = "sim-trade-history";
+  S.showHistory = stored("localStorage", LS_HISTORY) !== "0";
+  $("histToggle").checked = S.showHistory;
+  $("histToggle").onchange = function () {
+    S.showHistory = this.checked;
+    store("localStorage", LS_HISTORY, this.checked ? null : "0");
+    refreshMarkers(true);
+  };
+
   var markerKey = "";
   function refreshMarkers(force) {
     var T = C.tokens();
     var first = C.firstTime(), last = C.lastTime();
     if (first === null) return;
-    var key = [S.chartTf, first, (S.trades || []).length, document.documentElement.dataset.theme,
+    var history = S.review || S.showHistory;
+    var key = [S.chartTf, first, (S.trades || []).length, document.documentElement.dataset.theme, history,
       ((S.book && S.book.positions) || []).map(function (p) { return p.id; }).join("-")].join("|");
     if (key === markerKey && !force) return;
     markerKey = key;
@@ -719,7 +732,7 @@
     function barTime(ms) { return Math.floor(ms / 1000 / tf) * tf; }
     var ms = [];
     function add(m) { if (m.time >= first && m.time <= last) ms.push(m); }
-    (S.trades || []).forEach(function (t) {
+    (history ? S.trades || [] : []).forEach(function (t) {
       add({ time: barTime(t.entry_ms), position: t.side === "buy" ? "belowBar" : "aboveBar", color: t.side === "buy" ? T.up : T.down,
         shape: t.side === "buy" ? "arrowUp" : "arrowDown", text: (t.side === "buy" ? "B " : "S ") + t.lots.toFixed(2) });
       add({ time: barTime(t.exit_ms), position: t.side === "buy" ? "aboveBar" : "belowBar", color: T.muted, shape: "circle",

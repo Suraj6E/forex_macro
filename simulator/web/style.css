@@ -165,7 +165,8 @@ label { color: var(--muted); font-size: 12px; }
 .phead .pclose { padding: 0 8px; font-size: 18px; line-height: 24px; }
 .dlg .phead { margin-bottom: 6px; }
 .check { display: flex; align-items: center; gap: 8px; }
-.octoggle { color: var(--text); font-size: 12px; margin: -4px 0 -2px; }
+.toggles { display: flex; flex-direction: column; gap: 6px; margin: -4px 0 -2px; }
+.toggles .check { color: var(--text); font-size: 12px; }
 .panel h3 {
   margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
   color: var(--muted); font-weight: 600; display: flex; justify-content: space-between;

@@ -7,7 +7,7 @@
  *   setHistory(bars, tfSeconds)   replace all candles
  *   updateBars(bars)              apply forming / newly completed candles
  *   prependBars(bars)             older candles when scrolling back
- *   setQuote(quote)               the Ask line (the series shows the Bid)
+ *   setQuote(quote)               Bid and Ask lines and labels (candles are Bid)
  *   setLines(lines)               order / position lines, some draggable
  *   setMarkers(markers)           arrows for entries and exits
  *   setInstrument(inst)           price precision of the instrument
@@ -70,9 +70,13 @@
     });
     var digits = 5;
 
+    // No last-price label or line of the series' own: it is the Bid, but
+    // coloured by the candle's direction, so it turned blue like the BUY
+    // side whenever the candle was up. Bid and Ask get their own (setQuote).
     var series = chart.addCandlestickSeries({
       upColor: t.up, downColor: t.down, borderUpColor: t.up, borderDownColor: t.down,
       wickUpColor: t.up, wickDownColor: t.down,
+      lastValueVisible: false, priceLineVisible: false,
       priceFormat: { type: "price", precision: 5, minMove: 0.00001 }
     });
     // Candles keep the top 78% of the pane; tick volume sits in the bottom
@@ -104,7 +108,6 @@
     var data = [];       // the candles themselves, same order
     var vols = [];       // tick volume per candle, same order
     var tfSeconds = 900;
-    var askLine = null;
     var lines = {};      // id -> {spec, line}
     var dragHandlers = [];
 
@@ -185,16 +188,95 @@
     function paneWidth() { return chart.timeScale().width(); }
     function paneHeight() { var h = el.clientHeight - chart.timeScale().height(); return h > 0 ? h : el.clientHeight; }
 
-    // ---- quote and lines ----
+    // ---- quote: Bid and Ask ----
+    //
+    // Each has a line and a label on the price scale, always in the same
+    // colours: Bid the SELL red and Ask the BUY blue, as on the order
+    // buttons. The labels are placed here rather than by the library. It
+    // spreads overlapping labels apart from the middle of the pane and breaks
+    // ties by list order, so with Ask equal to Bid (a third of EUR/USD ticks
+    // on a raw-spread account) the two swapped sides whenever the price
+    // crossed the middle. Here each sits at its price, and when the two are
+    // closer than a label's height they stack round the middle of the
+    // spread: Ask above, Bid below, whatever the market does.
+
+    var quote = null, bidLine = null, askLine = null;
+    var quoteColors = { bid: t.down, ask: t.up };
+    var LABEL_HEIGHT = 18;  // the price scale's labels at an 11 px font, and a little air
+
+    function quoteLabels() {
+      if (!quote) return null;
+      var ya = series.priceToCoordinate(quote.ask), yb = series.priceToCoordinate(quote.bid);
+      if (ya === null || yb === null) return null;
+      var stacked = yb - ya < LABEL_HEIGHT;
+      if (stacked) {
+        var mid = (ya + yb) / 2;
+        ya = mid - LABEL_HEIGHT / 2;
+        yb = mid + LABEL_HEIGHT / 2;
+      }
+      return { ask: ya, bid: yb, stacked: stacked };
+    }
+
+    function quoteAxisView(side) {
+      function y() { var at = quoteLabels(); return at ? at[side] : -1000; }
+      return {
+        coordinate: y,
+        fixedCoordinate: y,
+        text: function () { return quote ? quote[side].toFixed(digits) : ""; },
+        textColor: function () { return "#ffffff"; },
+        backColor: function () { return quoteColors[side]; },
+        visible: function () { return quote !== null; },
+        // The tick marks the exact price; a stacked label is beside it.
+        tickVisible: function () { var at = quoteLabels(); return !!at && !at.stacked; }
+      };
+    }
+    var quoteViews = [quoteAxisView("ask"), quoteAxisView("bid")];
+    // "Ask" and "Bid" tags at the pane's right edge beside the labels, so the
+    // two are named, not told apart by colour alone.
+    var tagRenderer = {
+      draw: function (target) {
+        target.useMediaCoordinateSpace(function (scope) {
+          var at = quoteLabels();
+          if (!at) return;
+          var ctx = scope.context, w = scope.mediaSize.width, h = scope.mediaSize.height;
+          ctx.font = "600 10px -apple-system, 'Segoe UI', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          [["ask", "Ask"], ["bid", "Bid"]].forEach(function (s) {
+            var y = at[s[0]];
+            if (y < -10 || y > h + 10) return;
+            ctx.fillStyle = quoteColors[s[0]];
+            ctx.beginPath();
+            ctx.roundRect(w - 29, y - 8, 27, 16, 3);
+            ctx.fill();
+            ctx.fillStyle = "#ffffff";
+            ctx.fillText(s[1], w - 15.5, y + 0.5);
+          });
+        });
+      }
+    };
+    var tagView = { renderer: function () { return tagRenderer; }, zOrder: function () { return "top"; } };
+    var quoteRedraw = function () {};
+    series.attachPrimitive({
+      attached: function (p) { quoteRedraw = p.requestUpdate; },
+      detached: function () {},
+      updateAllViews: function () {},
+      priceAxisViews: function () { return quoteViews; },
+      paneViews: function () { return [tagView]; }
+    });
 
     function setQuote(q) {
       if (!q) return;
-      if (!askLine) {
-        askLine = series.createPriceLine({ price: q.ask, color: tokens().faint, lineWidth: 1,
-          lineStyle: LWC.LineStyle.Dotted, axisLabelVisible: true, title: "Ask" });
+      quote = { bid: q.bid, ask: q.ask };
+      var style = { lineWidth: 1, lineStyle: LWC.LineStyle.Dotted, axisLabelVisible: false };
+      if (!bidLine) {
+        bidLine = series.createPriceLine(Object.assign({ price: q.bid, color: quoteColors.bid, title: "Bid" }, style));
+        askLine = series.createPriceLine(Object.assign({ price: q.ask, color: quoteColors.ask, title: "Ask" }, style));
       } else {
+        bidLine.applyOptions({ price: q.bid });
         askLine.applyOptions({ price: q.ask });
       }
+      quoteRedraw();
     }
 
     var STYLE = { solid: 0, dotted: 1, dashed: 2 };
@@ -355,7 +437,9 @@
       volColors = { up: hexA(n.up, 0.35), down: hexA(n.down, 0.35) };
       vols = data.map(function (c, i) { return { time: c.time, value: vols[i] ? vols[i].value : 0, color: c.close >= c.open ? volColors.up : volColors.down }; });
       volume.setData(vols);
-      if (askLine) askLine.applyOptions({ color: n.faint });
+      quoteColors = { bid: n.down, ask: n.up };
+      if (bidLine) { bidLine.applyOptions({ color: n.down }); askLine.applyOptions({ color: n.up }); }
+      quoteRedraw();
       requestOverlays();
     }
 
@@ -375,6 +459,7 @@
       updateBars: updateBars,
       prependBars: prependBars,
       setQuote: setQuote,
+      quoteLabels: quoteLabels,
       setLines: setLines,
       setMarkers: setMarkers,
       attachOverlay: attachOverlay,

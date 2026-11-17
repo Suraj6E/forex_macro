@@ -99,7 +99,10 @@
 
       <section class="dpanel hidden" data-panel="trade" aria-label="Trade">
         <div class="phead"><h2>Trade</h2><button type="button" class="ghost pclose" title="Hide" aria-label="Hide">×</button></div>
-        <label class="check octoggle"><input type="checkbox" id="ocToggle"> Show one-click trading on the chart</label>
+        <div class="toggles">
+          <label class="check"><input type="checkbox" id="ocToggle"> Show one-click trading on the chart</label>
+          <label class="check" title="Entry arrows and exits of this session's closed trades. Open positions always show."><input type="checkbox" id="histToggle" checked> Show trade history on the chart</label>
+        </div>
         <section class="panel ticket">
           <h3>Order <span class="faint" id="orderHint"></span></h3>
           <div class="sides">
