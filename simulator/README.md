@@ -50,7 +50,7 @@ One-time install, if the venv predates the simulator:
 | Side panel | **Trade**, **Quotes**, **Data** and **Sessions** (top right) and **Analysis** (top left) slide a panel in from the right and hide it again; the chart makes room rather than being covered. One at a time. Trade, Analysis and Quotes are remembered across visits (Trade the first time); Sessions and Market data close back to the panel you had open, and Esc closes them. |
 | Trade | The order ticket, account, positions, pending orders, last closed trade and session notes. **Show one-click trading on the chart** puts **SELL** / lots / **BUY** at the chart's top left (the calendar filter moves below it): one click is a market order, no ticket. The setting and the lots are remembered. **Show trade history on the chart** (on unless switched off) shows this session's closed trades: entry arrows and exits with their reason and pips. Open positions always show. |
 | Analysis | Currency strength today. USD, EUR, GBP and JPY play each other through the six pairs: EUR/USD up means EUR beat USD, USD/JPY down means JPY beat USD. Each currency's score is the matches it won (3 of 3 strong against all, 0 of 3 weak against all); equal scores go to the bigger average move, each pair's move taken from that currency's side. A row-against-column table shows every match, then each pair's move in % and pips. Gold, silver, WTI and Brent are shown on their own, outside the matches. The day opens at 17:00 New York (a New York + 7 broker's daily candle); a move is the Bid now against the day's first Bid. Live it updates every 2 s; in a replay it is measured at the replay's clock and never later. |
-| Strength indicator | The same method for every candle over a rolling day, in a pane under the chart, shown or hidden by the wave button at the bottom of the left toolbar (or **Show the strength indicator under the chart** in Analysis): a line per currency, its average move over the 24 hours to the candle's close, so the lines run on through each day's open and the weekend instead of starting again from zero; the legend gives each value with matches won (`2/3`) for the candle under the crosshair, else the latest, and a name hides or shows its line (gold, silver, WTI and Brent are there too, off at first). A candle carries the value at its last complete minute; the one still forming, at the last minute the clock has completed, so a replay never sees past its clock. Worked out in the background from every instrument's 1-minute candles and saved (see *The strength indicator*). |
+| Strength indicator | The same method for every candle, in a pane under the chart, shown or hidden by the wave button at the bottom of the left toolbar (or **Show the strength indicator under the chart** in Analysis). **Day / Session / Week / 24 h** at the pane's top left choose the period: since 17:00 New York, since the current session opened (the journal's sessions), since Sunday 17:00 New York, or a rolling 24 hours that never starts again; all four are saved and the choice is remembered. A line per currency, its average move over the period at the candle's close; the legend gives each value with matches won (`2/3`) for the candle under the crosshair, else the latest, and a name hides or shows its line (gold, silver, WTI and Brent are there too, off at first). A candle carries the value at its last complete minute; the one still forming, at the last minute the clock has completed, so a replay never sees past its clock. Worked out in the background from every instrument's 1-minute candles and saved (see *The strength indicator*). |
 | Replay | **Play**/**Pause** (Space), speeds 1x to max (a market day in ~3 s), **+1 candle** (Right), **+1 tick** (Shift+Right), **Jump** to a time. |
 | Live | The clock is the real clock; candles form as ticks arrive, and the clock shows how old the last tick is. No play or step: the market has its own clock. Every recorded tick reaches the quote and the broker in the order it was recorded, whatever its stamp says about this computer's clock (see *Live market data*). |
 | Bid and Ask | Candles are Bid. The price scale has a **Bid** label (red, the SELL side) and an **Ask** label (blue, the BUY side), each with a dotted line and named at the chart's edge. When the two are closer than a label's height (on a raw-spread account Ask often equals Bid) they stack: Ask always above, Bid below. Before, the Bid was the candles' own last-price label, coloured by the candle's direction, and the chart library put equal-priced labels on either side depending on which half of the chart the price was in, so the two seemed to swap as the market moved. |
@@ -68,16 +68,30 @@ recorded meanwhile is given to its orders and positions, in order.
 
 ## The strength indicator
 
-The Analysis panel's method at every minute over a rolling day, saved, so
-a replay draws it as well as live. Worked out from the 1-minute Bid
-candles: each pair's close at the minute against its close 24 hours before
-(the last candle at or before each, so on Sunday night and Monday the day
-before is Friday's close), then the same matches and average move as the
-panel. The panel's own numbers are "today", since 17:00 New York; an
-indicator measured that way dropped to zero at every day's open (the first
-version, 17 Nov 2026), which is why this one rolls. `tests/test_strength.py`
-checks it minute by minute against the same thing worked out by hand,
-across a day's open and a weekend.
+The Analysis panel's method at every minute, over four periods, saved, so
+a replay draws it as well as live. Every period is scored on the full
+sequence: each of the six pairs between USD, EUR, GBP and JPY is a match
+(EUR/USD up: EUR beat USD; USD/JPY down: JPY beat USD), each currency plays
+its three matches from its own pair moves, and is ranked on matches won,
+then on its average move. Gold, silver, WTI and Brent are measured over the
+same period on their own. Only where a move is measured from differs:
+
+| Period | A move is | Starts again |
+|---|---|---|
+| Day | the pair's close against the open of its first candle since 17:00 New York (the panel's "today") | every day at 17:00 New York |
+| Session | the same since the current session opened: Asia 22:00, London 07:00, London/NY overlap 12:00, New York 16:00 UTC, the journal's sessions | at each of those |
+| Week | the same since Sunday 17:00 New York | every week |
+| 24 h | the close against the close 24 hours before (Friday's close across a weekend) | never |
+
+A pair with no candle yet in the period has no move: it is left out of the
+matches rather than carried over from the period before. Each period is
+worked out on its own from the 1-minute Bid candles; a week is not added up
+from days. `tests/test_strength.py` checks every period minute by minute
+against the same thing worked out by hand (finding each period's start
+independently), the day against the Analysis panel itself, the sessions
+against the journal's, and that each period starts again where it should
+and nowhere else. (The first version, 17 Nov 2026, had only the day, which
+dropped to zero at every open; the rolling day came next.)
 
 - **Sources.** For each instrument and UTC day, Dukascopy history or a
   recorded broker feed, whichever covers the day later (Dukascopy when
@@ -90,16 +104,16 @@ across a day's open and a weekend.
   is live, older ones when downloads fill them in. Live candles that closed
   before a round get their value then.
 - **Saved** in `store/strength/` (gitignored with the rest of `store/`):
-  `m1/YYYY-MM.parquet`, a row per minute with the four currencies' average
-  move and matches won and played, and gold, silver, WTI and Brent's move,
-  in whole numbers of 0.001 %; `h1.parquet`, the last row of each hour, for
+  `m1/YYYY-MM.parquet`, a row per minute with, for each of the four
+  periods, the four currencies' average move and matches won and played,
+  and gold, silver, WTI and Brent's move, in whole numbers of 0.001 %; `h1.parquet`, the last row of each hour, for
   1H to 1D candles; `state.json`, a fingerprint of the candles each month
   was built from. Deleting the folder builds it again.
 - **Changing the method** (a version number in `strength.py`) builds every
-  month again by itself, about half a minute.
+  month again by itself, under a minute.
 - **Measured** on this machine's data (17 Nov 2026: 47 months, ten
-  instruments, 1,213 broker days): the full build took 30–34 s and wrote
-  24 MB; a live round takes about half a second. The files are read with
+  instruments, 1,213 broker days): the full build of all four periods took
+  53 s and wrote 85 MB; a live round takes about a second. The files are read with
   the system allocator: Arrow's default one kept what it freed, and the
   build held 665 MB instead of about 140 MB.
 
@@ -318,7 +332,7 @@ only. Both default to zero and are printed with every session's results.
 .\.venv\Scripts\python.exe -m unittest discover -s simulator/tests -t .
 ```
 
-110 tests: no look-ahead, fill rules, profit in USD for each kind of
+112 tests: no look-ahead, fill rules, profit in USD for each kind of
 instrument, journal and statistics, the Dukascopy decoder, cleaning and
 resumable updater (against a fake datafeed), compact tick files and their
 migration, candles kept in step with their ticks, the calendar's clock rule
@@ -331,9 +345,11 @@ its clock); live sessions with this computer's clock ahead of the broker's,
 and resuming one; currency strength (the FX day across New York's clock
 changes, the matches and their order, a weekend, a pair with no ticks, a
 stale feed, and nothing read after the clock); the strength indicator
-(the rolling day minute by minute against working it out by hand, no drop
-at the day's open, Friday's close after the weekend, the source per day, months built again only when changed, and no candle given a
-minute that had not closed by the clock).
+(each period minute by minute against working it out by hand, the day
+against the panel, the sessions against the journal's, each period starting
+again where it should and nowhere else, Friday's close after the weekend,
+the source per day, months built again only when changed, and no candle
+given a minute that had not closed by the clock).
 
 `python -m simulator check` prints the tick file's layout and day load times
 (guide step 1).

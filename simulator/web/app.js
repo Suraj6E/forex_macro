@@ -129,7 +129,10 @@
     { key: "XAUUSD", label: "Gold", color: "--s5" }, { key: "XAGUSD", label: "Silver", color: "--s6" },
     { key: "WTI", label: "WTI", color: "--s7" }, { key: "BRENT", label: "Brent", color: "--s8" }
   ];
-  var LS_IND = "sim-ind", LS_IND_KEYS = "sim-ind-keys";
+  var LS_IND = "sim-ind", LS_IND_KEYS = "sim-ind-keys", LS_IND_MODE = "sim-ind-mode";
+  // The period strength is measured over (server: strength.MODES).
+  var IND_MODES = { day: "since 17:00 New York", session: "this session", week: "this week", rolling: "24 h" };
+  var IND_MODE = IND_MODES[stored("localStorage", LS_IND_MODE)] ? stored("localStorage", LS_IND_MODE) : "rolling";
   (function () {
     var saved = stored("localStorage", LS_IND_KEYS);
     var on = saved === "none" ? [] : saved ? saved.split(",") : ["USD", "EUR", "GBP", "JPY"];
@@ -223,6 +226,8 @@
   }
 
   function send(msg) {
+    // A session opened in this tab starts with the tab's strength period.
+    if (msg.type === "hello" || msg.type === "open" || msg.type === "new") msg.strength_mode = IND_MODE;
     if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(msg));
   }
 
@@ -288,7 +293,7 @@
         onBook(m.book);
         break;
       case "strength":
-        if (m.timeframe === S.chartTf) C.setStrengths(m.bars);
+        if (m.timeframe === S.chartTf && (!m.mode || m.mode === IND_MODE)) C.setStrengths(m.bars);
         break;
       case "older":
         S.loadingOlder = false;
@@ -537,7 +542,7 @@
 
   var indLegendHtml = "";
   function renderIndLegend(st, hovering) {
-    var html = "<span class='indtitle' title='Each currency&#39;s average move over the 24 hours to the candle&#39;s close, and its matches won of those played'>Strength 24 h</span>" +
+    var html = "<span class='indtitle' title='Each currency&#39;s average move at the candle&#39;s close over the period chosen on the left, and its matches won of those played'>Strength · " + IND_MODES[IND_MODE] + "</span>" +
       IND_KEYS.map(function (k, i) {
         var v = st && st.s ? st.s[i] : null;
         var won = i < 4 && st && st.w && st.w.length ? " <small>" + st.w[2 * i] + "/" + st.w[2 * i + 1] + "</small>" : "";
@@ -569,6 +574,25 @@
   setIndicator(stored("localStorage", LS_IND) !== "0");
   $("indToggle").onchange = function () { setIndicator(this.checked); };
   $("indToolBtn").onclick = function () { setIndicator(!$("indToggle").checked); };
+
+  // The period: every candle on the chart gets its values again from the
+  // server, which has all four saved.
+  function showIndMode() {
+    document.querySelectorAll("#indModes [data-mode]").forEach(function (b) {
+      b.classList.toggle("on", b.dataset.mode === IND_MODE);
+      b.setAttribute("aria-pressed", b.dataset.mode === IND_MODE ? "true" : "false");
+    });
+  }
+  showIndMode();
+  $("indModes").onclick = function (e) {
+    var b = e.target.closest("[data-mode]");
+    if (!b || b.dataset.mode === IND_MODE) return;
+    IND_MODE = b.dataset.mode;
+    store("localStorage", LS_IND_MODE, IND_MODE);
+    showIndMode();
+    renderIndLegend(null, false);
+    send({ type: "strength_mode", mode: IND_MODE, since: C.firstTime() || 0 });
+  };
   function arrow(v) { return v > 0 ? "<span class='arr up' aria-hidden='true'>▲</span>" : v < 0 ? "<span class='arr down' aria-hidden='true'>▼</span>" : ""; }
 
   function renderAnalysis(d) {

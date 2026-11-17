@@ -150,10 +150,13 @@ body.show-ind:not(.review) .chartwrap { --ind-h: 170px; }
 .indpane { display: none; position: absolute; left: 0; right: 0; bottom: 0; height: var(--ind-h); border-top: 1px solid var(--border); }
 body.show-ind:not(.review) .indpane { display: block; }
 #indChart { position: absolute; inset: 0; }
-.indlegend {
+.indhead {
   position: absolute; left: 10px; top: 5px; right: 96px; z-index: 5; pointer-events: none;
-  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 11px; color: var(--muted);
+  display: flex; align-items: flex-start; gap: 10px;
 }
+.indmodes { pointer-events: auto; margin: 0; flex: none; }
+.indmodes button { padding: 1px 8px; font-size: 11px; }
+.indlegend { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 11px; color: var(--muted); padding-top: 2px; }
 .indlegend .indtitle { color: var(--text); font-weight: 600; }
 .indlegend button {
   pointer-events: auto; padding: 1px 4px; border: none; background: transparent; font-size: 11px;

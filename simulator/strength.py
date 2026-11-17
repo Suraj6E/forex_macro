@@ -1,15 +1,31 @@
 """Currency strength as an indicator: the Analysis panel's method at every
-minute over a rolling day, worked out in the background, saved, and sent
-with each candle so a replay shows it as well as live.
+minute, over four periods, worked out in the background, saved, and sent with
+each candle so a replay shows it as well as live.
 
-A minute's value, from 1-minute Bid candles: each pair's close at that
-minute against its close 24 hours before (the last candle at or before
-each, so across a weekend the day before is Friday's close); USD, EUR, GBP
-and JPY scored on the six matches as in analysis.py (matches won, average
-move); and gold, silver and the two oils on their own. The window rolls with
-the clock, so the lines run on through every 17:00 New York instead of
-starting again from zero, as the panel's "today" does. (Until 18 Nov 2026
-the indicator used the panel's day and dropped to zero at each day's open.)
+Every period is scored the same way, the full sequence and no shortcut:
+each of the six pairs between USD, EUR, GBP and JPY is a match between its
+two currencies (EUR/USD up: EUR beat USD; USD/JPY down: JPY beat USD), each
+currency plays its three matches from its own pair moves, and is scored on
+matches won, then on its average move (each pair's move taken from its
+side), as in analysis.py. Gold, silver and the two oils are measured over
+the same period on their own. Only where a move is measured from differs:
+
+  day      since 17:00 New York, the FX day's open (the Analysis panel's
+           "today"); starts again every day
+  session  since the current session opened, the journal's sessions:
+           Asia 22-07 UTC, London 07-12, London/NY overlap 12-16, New York
+           16-22; starts again at each
+  week     since Sunday 17:00 New York, the FX week's open; starts again
+           every week
+  rolling  over the last 24 hours: the close at the minute against the
+           close a day before (Friday's close across a weekend); never
+           starts again
+
+A period's move is the pair's last close by the minute's close against the
+open of its first candle of the period. A pair with no candle yet in the
+period has no move: it is left out of the matches, not carried over from
+the period before. Each period is worked out on its own from the 1-minute
+candles; a week is not added up from days.
 
 A candle of any timeframe gets the value at its last complete minute. The
 candle still forming gets the value at the last minute the clock has
@@ -23,7 +39,8 @@ instruments costs nothing that shows. An open day of a recorded feed is
 read from its live ticks.
 
 Saved in store/strength/, moves as whole numbers of 0.001 %:
-  m1/YYYY-MM.parquet  a row per minute in which any instrument traded
+  m1/YYYY-MM.parquet  a row per minute in which any instrument traded, with
+                      all four periods' values
   h1.parquet          the last row of every hour (1H, 4H and 1D candles)
   state.json          a fingerprint of the candles each month was built
                       from, so only months whose candles changed are
@@ -54,9 +71,10 @@ from simulator.analysis import CURRENCIES, ON_THEIR_OWN, PAIRS
 from simulator.data.bars import bars_from_ticks
 from simulator.data.ticks import NS_PER_SECOND
 from simulator.instruments import INSTRUMENTS
+from simulator.live.mt5rec import us_dst, week_open_ms
 
 #: Bumped when the calculation or the files change: every month is built again.
-VERSION = 3
+VERSION = 4
 DAY = 86_400
 HOUR = 3_600
 MINUTE = 60
@@ -64,13 +82,18 @@ SYMBOLS = PAIRS + ON_THEIR_OWN
 #: What each candle carries, in this order: the currencies' average move,
 #: then gold, silver, WTI and Brent's move, all in percent.
 KEYS = CURRENCIES + ON_THEIR_OWN
-#: The window a move is measured over.
+#: The periods, in the order the page offers them.
+MODES = ("day", "session", "week", "rolling")
+DEFAULT_MODE = "rolling"
+#: Session starts, UTC hours: the journal's sessions (journal/stats.py).
+SESSION_STARTS_H = (7, 12, 16, 22)
+#: The rolling window.
 WINDOW_S = DAY
 #: A price older than this is not used: a gap in the data, not a weekend.
 STALE_S = 4 * DAY
-#: Days of candles read before a month, for its first minutes' prices a day
-#: earlier across a weekend or holiday.
-LEAD_DAYS = 5
+#: Days of candles read before a month: its first minutes need their week's
+#: first candle (up to 8 days back, Sunday evening) and a day before.
+LEAD_DAYS = 9
 #: A source whose day ends at least this much later wins the day.
 LATER_BY_S = 5 * MINUTE
 #: How often changed months are looked for (today's minutes, new days).
@@ -89,14 +112,15 @@ EMPTY = -32768
 def pack(rows: dict) -> dict[str, np.ndarray]:
     """The saved form of computed rows: what the chart shows, and smaller."""
     out = {"time": rows["time"].astype(np.int64)}
-    for k in KEYS:
-        v = rows[k].astype(np.float64)
-        q = np.clip(np.round(np.nan_to_num(v, nan=0.0) * SCALE), -32767, 32767).astype(np.int16)
-        q[np.isnan(v)] = EMPTY
-        out[k] = q
-    for c in CURRENCIES:
-        out[c + "_won"] = rows[c + "_won"].astype(np.int8)
-        out[c + "_played"] = rows[c + "_played"].astype(np.int8)
+    for mode in MODES:
+        for k in KEYS:
+            v = rows[f"{mode}_{k}"].astype(np.float64)
+            q = np.clip(np.round(np.nan_to_num(v, nan=0.0) * SCALE), -32767, 32767).astype(np.int16)
+            q[np.isnan(v)] = EMPTY
+            out[f"{mode}_{k}"] = q
+        for c in CURRENCIES:
+            out[f"{mode}_{c}_won"] = rows[f"{mode}_{c}_won"].astype(np.int8)
+            out[f"{mode}_{c}_played"] = rows[f"{mode}_{c}_played"].astype(np.int8)
     return out
 
 _EPOCH = date(1970, 1, 1)
@@ -112,50 +136,120 @@ def _read(path: Path, columns: list[str] | None = None, a: int | None = None, b:
     return ds.dataset(path, format="parquet").to_table(columns=columns, filter=where, memory_pool=_POOL)
 
 
-def compute(bars: dict, a: int, b: int) -> dict[str, np.ndarray]:
-    """Rows for the minutes in [a, b) (epoch seconds, minute starts).
+# -- where each period starts --------------------------------------------------
 
-    `bars` maps a symbol to its 1-minute candles (time, open, close), sorted,
-    from at least LEAD_DAYS before `a`. A minute's row is as of its close:
-    each instrument's last close then, against its last close at or before
-    the same minute a day earlier."""
-    per, grid_parts = {}, []
-    for s in SYMBOLS:
-        t, _o, c = bars.get(s, (np.empty(0, np.int64), np.empty(0), np.empty(0)))
-        if not len(t):
-            continue
-        per[s] = (t, c)
-        grid_parts.append(t[(t >= a) & (t < b)])
-    grid = np.unique(np.concatenate(grid_parts)) if grid_parts else np.empty(0, np.int64)
-    moves = {}
-    for s in SYMBOLS:
-        if s not in per or not len(grid):
-            moves[s] = np.full(len(grid), np.nan)
-            continue
-        t, c = per[s]
-        k = np.searchsorted(t, grid, side="right") - 1             # now
-        j = np.searchsorted(t, grid - WINDOW_S, side="right") - 1  # a day before
+
+def day_start_s(times_s) -> np.ndarray:
+    """For each time (epoch seconds), when its FX day opened: the latest
+    17:00 New York at or before it."""
+    t = np.asarray(times_s, np.int64)
+    if not len(t):
+        return t
+    day = t // DAY
+    lo, hi = int(day.min()) - 1, int(day.max())
+    opens = np.array([d * DAY + (21 if us_dst((d * DAY + 21 * HOUR) * 1000) else 22) * HOUR
+                      for d in range(lo, hi + 1)], np.int64)
+    today = opens[day - lo]
+    return np.where(t >= today, today, opens[day - lo - 1])
+
+
+def session_start_s(times_s) -> np.ndarray:
+    """When the session holding each time opened (SESSION_STARTS_H, UTC)."""
+    t = np.asarray(times_s, np.int64)
+    base = t // DAY * DAY
+    starts = np.array(SESSION_STARTS_H, np.int64) * HOUR
+    i = np.searchsorted(starts, t - base, side="right") - 1
+    return np.where(i >= 0, base + starts[np.maximum(i, 0)], base - DAY + starts[-1])
+
+
+def week_start_s(times_s) -> np.ndarray:
+    """When the FX week holding each time opened: the last Sunday 17:00 New
+    York at or before it (a weekend belongs to the week before)."""
+    t = np.asarray(times_s, np.int64)
+    if not len(t):
+        return t
+    days, inverse = np.unique(t // DAY, return_inverse=True)
+    # A UTC day holds at most one week open (Sunday evening).
+    late = np.array([week_open_ms(int((d + 1) * DAY * 1000 - 1)) // 1000 for d in days], np.int64)[inverse]
+    early = np.array([week_open_ms(int(d * DAY * 1000)) // 1000 for d in days], np.int64)[inverse]
+    return np.where(t >= late, late, early)
+
+
+PERIOD_START = {"day": day_start_s, "session": session_start_s, "week": week_start_s}
+
+
+# -- the calculation -------------------------------------------------------------
+
+
+def _since_start(per: dict, grid: np.ndarray, start_of) -> dict[str, np.ndarray]:
+    """Each instrument's move at every grid minute since its first candle of
+    the period holding that minute; none before it has one."""
+    grid_start = start_of(grid)
+    out = {}
+    for s, (t, o, c) in per.items():
+        period = start_of(t)
+        first = np.flatnonzero(np.r_[True, period[1:] != period[:-1]])
+        opened = np.repeat(o[first], np.diff(np.r_[first, len(t)]))
+        k = np.searchsorted(t, grid, side="right") - 1
+        kk = np.maximum(k, 0)
+        same = (k >= 0) & (period[kk] == grid_start)
+        out[s] = np.where(same, (c[kk] / opened[kk] - 1.0) * 100.0, np.nan)
+    return out
+
+
+def _rolling(per: dict, grid: np.ndarray) -> dict[str, np.ndarray]:
+    """Each instrument's move over the 24 hours to every grid minute: its last
+    close by then against its last close at or before a day earlier."""
+    out = {}
+    for s, (t, _o, c) in per.items():
+        k = np.searchsorted(t, grid, side="right") - 1
+        j = np.searchsorted(t, grid - WINDOW_S, side="right") - 1
         kk, jj = np.maximum(k, 0), np.maximum(j, 0)
         ok = (k >= 0) & (j >= 0) & (grid - t[kk] <= STALE_S) & (grid - WINDOW_S - t[jj] <= STALE_S)
-        moves[s] = np.where(ok, (c[kk] / c[jj] - 1.0) * 100.0, np.nan)
-    cols: dict[str, np.ndarray] = {"time": grid.astype(np.int64)}
+        out[s] = np.where(ok, (c[kk] / c[jj] - 1.0) * 100.0, np.nan)
+    return out
+
+
+def _score(moves: dict, n: int, prefix: str, cols: dict) -> None:
+    """The matches: every currency against the other three through their
+    pair, from that currency's side; won, played and the average move."""
     for cur in CURRENCIES:
         sides = []
         for p in PAIRS:
             inst = INSTRUMENTS[p]
+            move = moves.get(p, np.full(n, np.nan))
             if inst.base == cur:
-                sides.append(moves[p])
+                sides.append(move)
             elif inst.quote == cur:
-                sides.append(-moves[p])
-        m = np.vstack(sides) if len(grid) else np.empty((3, 0))
+                sides.append(-move)
+        m = np.vstack(sides) if n else np.empty((3, 0))
         played = (~np.isnan(m)).sum(axis=0)
         with np.errstate(invalid="ignore"):
             avg = np.where(played > 0, np.nansum(m, axis=0) / np.maximum(played, 1), np.nan)
-        cols[cur] = avg.astype(np.float32)
-        cols[cur + "_won"] = (m > 0).sum(axis=0).astype(np.int8)
-        cols[cur + "_played"] = played.astype(np.int8)
+        cols[prefix + cur] = avg.astype(np.float32)
+        cols[prefix + cur + "_won"] = (m > 0).sum(axis=0).astype(np.int8)
+        cols[prefix + cur + "_played"] = played.astype(np.int8)
     for s in SYMBOLS:
-        cols[s] = moves[s].astype(np.float32)
+        cols[prefix + s] = moves.get(s, np.full(n, np.nan)).astype(np.float32)
+
+
+def compute(bars: dict, a: int, b: int) -> dict[str, np.ndarray]:
+    """Rows for the minutes in [a, b) (epoch seconds, minute starts), every
+    period's values in columns named <mode>_<key>.
+
+    `bars` maps a symbol to its 1-minute candles (time, open, close), sorted,
+    from at least LEAD_DAYS before `a`. A minute's row is as of its close."""
+    per, grid_parts = {}, []
+    for s in SYMBOLS:
+        t, o, c = bars.get(s, (np.empty(0, np.int64), np.empty(0), np.empty(0)))
+        if len(t):
+            per[s] = (t, o, c)
+            grid_parts.append(t[(t >= a) & (t < b)])
+    grid = np.unique(np.concatenate(grid_parts)) if grid_parts else np.empty(0, np.int64)
+    cols: dict[str, np.ndarray] = {"time": grid.astype(np.int64)}
+    for mode in MODES:
+        moves = _rolling(per, grid) if mode == "rolling" else _since_start(per, grid, PERIOD_START[mode])
+        _score(moves, len(grid), mode + "_", cols)
     return cols
 
 
@@ -514,11 +608,12 @@ class StrengthStore:
                     out[i] = (rows, int(j))
         return out
 
-    def annotate(self, bars: list[dict], width_s: int, sim_ns: int) -> None:
-        """Give each candle its strength: `s` the values of KEYS (percent to
-        0.001, None when unknown) and `w` matches won and played per currency, at
-        its last complete minute, or for the forming candle at the last
-        minute the clock has completed."""
+    def annotate(self, bars: list[dict], width_s: int, sim_ns: int, mode: str = DEFAULT_MODE) -> None:
+        """Give each candle its strength over `mode`'s period: `s` the values
+        of KEYS (percent to 0.001, None when unknown) and `w` matches won and
+        played per currency, at its last complete minute, or for the forming
+        candle at the last minute the clock has completed."""
+        mode = mode if mode in MODES else DEFAULT_MODE
         if not bars:
             return
         sim_s = sim_ns // NS_PER_SECOND
@@ -529,5 +624,6 @@ class StrengthStore:
                 bar["s"] = None
                 continue
             rows, j = hit
-            bar["s"] = [None if rows[k][j] == EMPTY else round(int(rows[k][j]) / SCALE, 3) for k in KEYS]
-            bar["w"] = [int(rows[c + f][j]) for c in CURRENCIES for f in ("_won", "_played")]
+            bar["s"] = [None if rows[f"{mode}_{k}"][j] == EMPTY else round(int(rows[f"{mode}_{k}"][j]) / SCALE, 3)
+                        for k in KEYS]
+            bar["w"] = [int(rows[f"{mode}_{c}{f}"][j]) for c in CURRENCIES for f in ("_won", "_played")]

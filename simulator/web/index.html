@@ -77,7 +77,15 @@
       <div id="chart"></div>
       <div class="indpane" id="indPane" aria-label="Currency strength indicator">
         <div id="indChart"></div>
-        <div class="indlegend" id="indLegend"></div>
+        <div class="indhead">
+          <div class="seg indmodes" id="indModes" role="group" aria-label="Strength measured over">
+            <button type="button" data-mode="day" title="Since 17:00 New York, the FX day's open (the Analysis panel's today); starts again every day">Day</button>
+            <button type="button" data-mode="session" title="Since the current session opened: Asia 22-07 UTC, London 07-12, London/NY overlap 12-16, New York 16-22 (the journal's sessions); starts again at each">Session</button>
+            <button type="button" data-mode="week" title="Since Sunday 17:00 New York, the FX week's open; starts again every week">Week</button>
+            <button type="button" data-mode="rolling" title="Over the last 24 hours, rolling: never starts again">24 h</button>
+          </div>
+          <div class="indlegend" id="indLegend"></div>
+        </div>
       </div>
       <div class="chart-overlay"><span class="sym" id="symLabel">EUR/USD</span> · <span id="tfLabel">15M</span> · Bid · <span id="ohlc"></span></div>
       <div class="chartstack">
@@ -183,7 +191,7 @@
         <div class="phead"><h2>Analysis</h2><button type="button" class="ghost pclose" title="Hide" aria-label="Hide">×</button></div>
         <p class="tiny muted anwhen" id="anWhen">Loading…</p>
         <div class="toggles">
-          <label class="check" title="The strength below, worked out for every candle over a rolling day: each currency's average move over the 24 hours to the candle's close"><input type="checkbox" id="indToggle" checked> Show the strength indicator under the chart</label>
+          <label class="check" title="The strength below, worked out for every candle: each currency's matches won and average move at the candle's close, over the day, the session, the week or a rolling 24 hours (chosen in the pane)"><input type="checkbox" id="indToggle" checked> Show the strength indicator under the chart</label>
           <span class="tiny muted" id="indStatus"></span>
         </div>
         <section class="panel">

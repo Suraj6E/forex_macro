@@ -727,6 +727,8 @@ class Live:
         #: screen went without a value (the indicator still being built).
         self.strength_version = hub.strength.version
         self.strength_missing = False
+        #: The period the tab shows strength over (strength.MODES).
+        self.strength_mode = strength.DEFAULT_MODE
 
     def _poke(self, symbol: str) -> None:
         """New ticks recorded (called from the recorder's thread)."""
@@ -769,32 +771,39 @@ class Live:
         return {"positions": positions, "pending": pending, "account": b.account()}
 
     def strength(self, bars: list[dict], tf: str | None = None) -> list[dict]:
-        """Candles with the strength indicator's values, as of the clock."""
-        hub.strength.annotate(bars, tf_seconds(tf or self.session.timeframe), self.session.sim_ns)
+        """Candles with the strength indicator's values over the tab's
+        period, as of the clock."""
+        hub.strength.annotate(bars, tf_seconds(tf or self.session.timeframe), self.session.sim_ns, self.strength_mode)
         return bars
 
-    async def send_strength(self) -> None:
-        """New strength rows were saved. Live, the last few candles get
-        theirs again: one that closed before the builder's round went out
-        with an earlier minute's value, or none. A replay whose candles went
-        without (the first build still running) gets the screen's again."""
-        version = hub.strength.version
-        if version == self.strength_version:
-            return
-        self.strength_version = version
+    async def send_strength(self, since: int | None = None) -> None:
+        """Strength values again for candles already on screen. With `since`
+        (the tab changed the period): every candle from that time on. Else
+        when new rows were saved: live, the last few candles (one that closed
+        before the builder's round went out with an earlier minute's value,
+        or none); a replay whose candles went without (the first build still
+        running), the screen's."""
         s = self.session
-        if not (s.live or self.strength_missing):
-            return
         store = s.bars[s.timeframe]
         n = store.completed_count(s.sim_ns)
-        bars = store.slice(n - (6 if s.live else HISTORY_LIMIT), n)
+        if since is not None:
+            first = store.index_of_time(int(since))
+        else:
+            version = hub.strength.version
+            if version == self.strength_version:
+                return
+            self.strength_version = version
+            if not (s.live or self.strength_missing):
+                return
+            first = n - (6 if s.live else HISTORY_LIMIT)
+        bars = store.slice(first, n)
         forming = s.forming(s.timeframe)
         if forming:
             bars.append(forming)
         self.strength(bars)
         if not s.live:
             self.strength_missing = any(b.get("s") is None for b in bars[:-1])
-        await self.send({"type": "strength", "timeframe": s.timeframe,
+        await self.send({"type": "strength", "timeframe": s.timeframe, "mode": self.strength_mode,
                          "bars": [{"time": b["time"], "s": b.get("s"), "w": b.get("w")} for b in bars]})
 
     async def send_history(self) -> None:
@@ -922,7 +931,12 @@ def _restore(sid: str) -> Live | None:
     return live
 
 
+#: The strength period each tab asked for (sent with hello, open and new).
+_TAB_STRENGTH: dict[WebSocket, str] = {}
+
+
 async def _attach(live: Live, ws: WebSocket) -> None:
+    live.strength_mode = _TAB_STRENGTH.get(ws, live.strength_mode)
     if live.ws is not None and live.ws is not ws:
         old = live.ws
         live.ws = None
@@ -1186,6 +1200,7 @@ async def websocket(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        _TAB_STRENGTH.pop(ws, None)
         if live is not None and live.ws is ws:
             live.ws = None
             live.session.clock.playing = False
@@ -1195,6 +1210,8 @@ async def websocket(ws: WebSocket) -> None:
 
 async def _handle(ws: WebSocket, live: Live | None, msg: dict) -> Live | None:
     kind = msg.get("type")
+    if msg.get("strength_mode") in strength.MODES:
+        _TAB_STRENGTH[ws] = msg["strength_mode"]
 
     if kind == "hello":
         sid = msg.get("session")
@@ -1283,6 +1300,11 @@ async def _handle(ws: WebSocket, live: Live | None, msg: dict) -> Live | None:
         live.save()
         await live.send_history()
         await live.flush_events()
+    elif kind == "strength_mode":
+        if msg.get("mode") not in strength.MODES:
+            raise ValueError(f"Strength period must be one of {', '.join(strength.MODES)}")
+        live.strength_mode = _TAB_STRENGTH[ws] = msg["mode"]
+        await live.send_strength(since=int(msg.get("since") or 0))
     elif kind == "more_history":
         tf = msg.get("timeframe") or s.timeframe
         bars = live.strength(s.history(tf, limit=1500, before=int(msg["before"])), tf)
