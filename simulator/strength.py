@@ -257,6 +257,10 @@ def _empty_rows() -> dict[str, np.ndarray]:
     return pack(compute({}, 0, 0))
 
 
+#: The columns of a saved file in this version's layout.
+_COLUMNS = tuple(_empty_rows())
+
+
 def _concat(parts: list[dict]) -> dict[str, np.ndarray]:
     parts = [p for p in parts if len(p["time"])]
     if not parts:
@@ -547,14 +551,35 @@ class StrengthStore:
             pq.write_table(pa.table(self._h1), tmp, compression="zstd")
             tmp.replace(self.root / "h1.parquet")
 
+    # Saved files are read only for months this version has built: after a
+    # change of method or layout (VERSION) the old files are still there
+    # until each month is built again, and reading them would mix the two
+    # (17 Nov 2026: the four-period layout read a rolling-day file, raised
+    # KeyError on every candle and stopped every session).
+
+    def _built(self) -> set[str]:
+        return set(self._load_state()["months"])
+
+    def _load_rows(self, path: Path) -> dict | None:
+        """A saved file's rows, or None when it is missing or not in this
+        version's layout."""
+        try:
+            t = _read(path)
+        except (FileNotFoundError, OSError, pa.ArrowInvalid):
+            return None
+        if not set(_COLUMNS) <= set(t.column_names):
+            return None
+        return {k: t.column(k).to_numpy() for k in _COLUMNS}
+
     def _hourly(self) -> dict:
         with self._lock:
             if self._h1 is None:
-                try:
-                    t = _read(self.root / "h1.parquet")
-                    self._h1 = {k: t.column(k).to_numpy() for k in t.column_names}
-                except (FileNotFoundError, OSError, pa.ArrowInvalid):
+                rows = self._load_rows(self.root / "h1.parquet")
+                if rows is None or not len(rows["time"]):
                     self._h1 = _empty_rows()
+                else:
+                    months = rows["time"].astype("datetime64[s]").astype("datetime64[M]").astype(str)
+                    self._h1 = _take(rows, np.isin(months, sorted(self._built())))
             return self._h1
 
     def _month(self, key: str) -> dict:
@@ -563,10 +588,8 @@ class StrengthStore:
             if hit is not None:
                 self._months.move_to_end(key)
                 return hit
-        try:
-            t = _read(self.m1_dir / f"{key}.parquet")
-            rows = {k: t.column(k).to_numpy() for k in t.column_names}
-        except (FileNotFoundError, OSError, pa.ArrowInvalid):
+        rows = self._load_rows(self.m1_dir / f"{key}.parquet") if key in self._built() else None
+        if rows is None:
             rows = _empty_rows()
         with self._lock:
             self._months[key] = rows

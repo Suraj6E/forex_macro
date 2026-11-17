@@ -259,6 +259,32 @@ class Store(unittest.TestCase):
         self.assertEqual(seen["day"], seen["week"])
         self.assertEqual(len({tuple(v) for v in seen.values()}), 3)
 
+    def test_files_from_an_earlier_version_are_never_read(self):
+        # 17 Nov 2026: the four-period version started on files saved by the
+        # rolling-day one (columns USD, EUR, ...), raised KeyError on every
+        # candle and stopped every session.
+        import json
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        root = Path(self.tmp.name)
+        (root / "m1").mkdir(parents=True)
+        old = {"time": np.array([s_("2026-11-02T10:00")], np.int64)}
+        for k in strength.KEYS:
+            old[k] = np.array([123], np.int16)
+        for c in strength.CURRENCIES:
+            old[c + "_won"] = old[c + "_played"] = np.array([1], np.int8)
+        for path in (root / "m1" / "2026-11.parquet", root / "h1.parquet"):
+            pq.write_table(pa.table(old), path)
+        (root / "state.json").write_text(json.dumps({"version": strength.VERSION - 1, "months": {"2026-11": "x"}}))
+        sim = s_("2026-11-02T11:00") * NS_PER_SECOND
+        bars = [{"time": s_("2026-11-02T10:00")}]
+        self.store.annotate(bars, 3600, sim, "day")  # before any rebuild: no value, no error
+        self.assertIsNone(bars[0]["s"])
+        self.assertEqual(self.store.update(), 2)     # both months built again over the old files
+        self.store.annotate(bars, 3600, sim, "day")
+        self.assertIsNotNone(bars[0]["s"])
+
     def test_a_minute_still_open_is_not_used(self):
         self.store.update()
         sim = s_("2026-11-02T10:37") - 1

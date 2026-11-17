@@ -772,8 +772,14 @@ class Live:
 
     def strength(self, bars: list[dict], tf: str | None = None) -> list[dict]:
         """Candles with the strength indicator's values over the tab's
-        period, as of the clock."""
-        hub.strength.annotate(bars, tf_seconds(tf or self.session.timeframe), self.session.sim_ns, self.strength_mode)
+        period, as of the clock. The indicator is never allowed to stop a
+        session: if it fails, the candles go without values."""
+        try:
+            hub.strength.annotate(bars, tf_seconds(tf or self.session.timeframe), self.session.sim_ns, self.strength_mode)
+        except Exception as exc:
+            for b in bars:
+                b["s"] = None
+            hub.strength.status.update(state="error", message=f"Reading the indicator: {type(exc).__name__}: {exc}")
         return bars
 
     async def send_strength(self, since: int | None = None) -> None:
@@ -832,7 +838,10 @@ class Live:
                 "quote": s.quote(),
                 "book": self.book(),
             })
-        await self.send_strength()
+        try:
+            await self.send_strength()
+        except Exception as exc:  # never stops the frames
+            hub.strength.status.update(state="error", message=f"Sending the indicator: {type(exc).__name__}: {exc}")
         await self.flush_events()
 
     async def flush_events(self) -> None:
