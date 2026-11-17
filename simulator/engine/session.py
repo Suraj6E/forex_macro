@@ -26,6 +26,7 @@ from simulator.data.ticks import (
     TickSource,
     day_of_ns,
     day_start_ns,
+    now_ns,
 )
 from simulator.engine.broker import Broker
 from simulator.engine.clock import Clock
@@ -46,6 +47,12 @@ MAX_FRAME_BARS = 400
 #: Live sessions have no end of data.
 OPEN_END = 2**62
 
+#: In a quiet live market the candle clock trails this computer's clock by
+#: this much, so a tick stamped just before a candle boundary that reaches
+#: the disk a moment late (recording delay, or this clock running ahead of
+#: the broker's) still lands in its own candle. A tick moves it on at once.
+LIVE_LAG_NS = 2 * NS_PER_SECOND
+
 
 class SessionError(ValueError):
     """A request the session refuses; the message is shown as is."""
@@ -54,10 +61,12 @@ class SessionError(ValueError):
 class ReplaySession:
     """A replay, or with `live=True` a session whose clock is the wall clock.
 
-    Live is the same engine on a growing feed: the clock is set to now on
-    every frame, every tick that arrived is given to the broker, and there
-    is nothing to step into or jump to, because the future does not exist
-    yet. Orders still fill on the tick after the one on screen.
+    Live is the same engine on a growing feed: every tick recorded since the
+    last one is given to the broker, whatever its stamp says about this
+    computer's clock (`follow`), and there is nothing to step into or jump
+    to, because the future does not exist yet. Orders still fill on the
+    tick after the one on screen: they are stamped with that tick's time
+    (`order_ns`), not with this computer's.
     """
 
     def __init__(
@@ -168,6 +177,41 @@ class ReplaySession:
             self.clock.playing = False
         self._skip_dead_time()
         return True
+
+    def follow(self, now_ns: int, after_ns: int | None = None) -> bool:
+        """Live: give the broker every tick recorded after the last one it
+        was given (or after `after_ns`), then move the clock to the later of
+        now less LIVE_LAG_NS and that tick.
+
+        Ticks are taken in the order they reach the disk, not by comparing
+        their stamps with this computer's clock: a clock running half a
+        second ahead of the broker's would otherwise find every new tick
+        already in its past and skip it, leaving the quote, and every order,
+        stuck on the last tick before."""
+        if after_ns is None:
+            after_ns = self.last_tick[0] if self.last_tick is not None else self.sim_ns
+        moved = False
+        for day in self.days[bisect_left(self.days, day_of_ns(max(after_ns, 0))):]:
+            t = self.source.load_day(day)
+            lo = int(np.searchsorted(t.ts, after_ns, side="right"))
+            if len(t.ts) > lo:
+                self.broker.on_ticks(t.ts[lo:], t.bid[lo:], t.ask[lo:])
+                self.last_tick = (int(t.ts[-1]), float(t.bid[-1]), float(t.ask[-1]))
+                after_ns, moved = self.last_tick[0], True
+        clock = int(now_ns) - LIVE_LAG_NS
+        if self.last_tick is not None:
+            clock = max(clock, self.last_tick[0])
+        self.sim_ns = max(self.sim_ns, clock)
+        return moved
+
+    @property
+    def order_ns(self) -> int:
+        """The time an order, or a close, placed now is stamped with. In a
+        replay, the clock. Live, the broker's stamp of the quote on screen,
+        so it fills on the next tick the broker sends."""
+        if self.live and self.last_tick is not None:
+            return self.last_tick[0]
+        return self.sim_ns
 
     def _skip_dead_time(self) -> None:
         if self.finished or self.live:
@@ -307,6 +351,9 @@ class ReplaySession:
             "first_ms": self.first_ns // 1_000_000,
             "end_ms": None if self.live else self.end_ns // 1_000_000,
             "live": self.live,
+            # Live, the clock on screen is this computer's; the candles
+            # follow the ticks (sim_ms, up to LIVE_LAG_NS behind).
+            "now_ms": now_ns() // 1_000_000 if self.live else None,
         }
 
     # -- persistence -------------------------------------------------------
@@ -324,11 +371,13 @@ class ReplaySession:
                    live: bool = False, now: int | None = None, rate_fn=None) -> "ReplaySession":
         broker = Broker.from_state(state["broker"])
         broker.rate_fn = rate_fn
+        seen = broker.quote_ns  # the last tick its orders and positions saw
         session = cls(source, bars, broker, state["sim_ns"], state["timeframe"], session_id, live=live)
         if live:
-            # Everything that arrived while the session was closed is given
-            # to its orders and positions, in order, before it is shown.
-            session.advance(now if now is not None else state["sim_ns"])
+            # Everything recorded after that tick, including what arrived
+            # while the session was closed, is given to its orders and
+            # positions, in order, before it is shown.
+            session.follow(now if now is not None else state["sim_ns"], after_ns=seen)
         else:
             session.clock.speed = state.get("speed", 60.0)
         return session

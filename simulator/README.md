@@ -2,9 +2,10 @@
 
 Candle-by-candle tick replay with simulated orders, tick volume, the economic
 calendar on the chart, an automatic journal and drawing tools, plus a live
-mode and broker tick history from your MT5 terminal. Nine instruments:
-EUR/USD, GBP/USD, USD/JPY, EUR/JPY, GBP/JPY, EUR/GBP, silver (XAG/USD), WTI
-crude (US) and Brent crude (Europe). Built from `Replay Simulator
+mode and broker tick history from your MT5 terminal, one-click trading and
+a currency-strength view. Ten instruments: EUR/USD, GBP/USD, USD/JPY,
+EUR/JPY, GBP/JPY, EUR/GBP, gold (XAU/USD), silver (XAG/USD), WTI crude (US)
+and Brent crude (Europe). Built from `Replay Simulator
 Step-by-Step Build Guide.md`, steps 1 to 6. It is a separate app from the
 Django site: its own server, its own port, its own journal. It reads the
 trading-research tick file and fxmacro's calendar database and writes
@@ -46,13 +47,16 @@ One-time install, if the venv predates the simulator:
 |---|---|
 | One screen | Opening the page shows the market: **live** when the recorder is streaming the instrument, else a **replay at the latest date** (00:00 UTC of the last weekday with data). The instrument picker (● streaming now) and **Live / Replay** in the top bar switch in place. Switching instruments keeps the mode, and in replay the date when the other instrument has data then. The calendar button (or a click on the clock) picks a date: in replay it jumps there, live it opens a replay from there. A reload keeps the tab where it was; a new tab opens on the market again. |
 | Sessions | Behind the screen, each instrument and mode is a session with its own account. Live resumes the instrument's live session; replay resumes one with open positions or orders, else starts at the date. A session the screen opened in which nothing was done (no order, note or drawing) is removed on leaving it, so switching does not fill the journal. **Sessions** sets one up by hand: **Data** (Dukascopy or your broker's), a start time or **Random**, **Hide dates**, balance, leverage, commission, slippage; those are never removed. |
+| Side panel | **Trade**, **Quotes**, **Data** and **Sessions** (top right) and **Analysis** (top left) slide a panel in from the right and hide it again; the chart makes room rather than being covered. One at a time. Trade, Analysis and Quotes are remembered across visits (Trade the first time); Sessions and Market data close back to the panel you had open, and Esc closes them. |
+| Trade | The order ticket, account, positions, pending orders, last closed trade and session notes. **Show one-click trading on the chart** puts **SELL** / lots / **BUY** at the chart's top left (the calendar filter moves below it): one click is a market order, no ticket. The setting and the lots are remembered. |
+| Analysis | Currency strength today. USD, EUR, GBP and JPY play each other through the six pairs: EUR/USD up means EUR beat USD, USD/JPY down means JPY beat USD. Each currency's score is the matches it won (3 of 3 strong against all, 0 of 3 weak against all); equal scores go to the bigger average move, each pair's move taken from that currency's side. A row-against-column table shows every match, then each pair's move in % and pips. Gold, silver, WTI and Brent are shown on their own, outside the matches. The day opens at 17:00 New York (a New York + 7 broker's daily candle); a move is the Bid now against the day's first Bid. Live it updates every 2 s; in a replay it is measured at the replay's clock and never later. |
 | Replay | **Play**/**Pause** (Space), speeds 1x to max (a market day in ~3 s), **+1 candle** (Right), **+1 tick** (Shift+Right), **Jump** to a time. |
-| Live | The clock is the real clock; candles form as ticks arrive, and the clock shows how old the last tick is. No play or step: the market has its own clock. |
+| Live | The clock is the real clock; candles form as ticks arrive, and the clock shows how old the last tick is. No play or step: the market has its own clock. Every recorded tick reaches the quote and the broker in the order it was recorded, whatever its stamp says about this computer's clock (see *Live market data*). |
 | Volume | Tick volume under the candles, and `V` in the price line: the number of quotes in the candle. |
 | News | A dot per impact level under each candle with releases: red high, yellow medium, near-white low. Filled is released, a ring is still to come. Hover for the names, click for the details. **High / Medium / Low** in the chart corner hide a level. |
 | Orders | Market, limit or stop; size in lots or as % risk from the stop. SL/TP lines on the chart drag to edit. **Close** works per position. The ticket shows what a lot is and what a pip is worth in USD. |
 | Drawings | Horizontal line, trend line, rectangle, position box. A selected position box has **Send as order**. Esc cancels, Delete removes. |
-| Market data | The top-bar button (also in the session form): per instrument what is stored, from which day to download (**From**), on or off, what is missing; disk space; the calendar; the recorder. |
+| Market data | The **Data** panel (also from Sessions): per instrument what is stored, from which day to download (**From**), on or off, what is missing; disk space; the calendar; the recorder. |
 | Journal | <http://127.0.0.1:8001/journal>: stats with a 95% win-rate range, equity curve, splits by session/weekday/tag/exit/instrument, tags and notes, chart snapshots at entry and exit, **Review** to reopen any trade on the chart. |
 
 Everything saves as it happens. Closing the tab, or stopping the server
@@ -129,9 +133,24 @@ terminal**, then open that terminal yourself.
   used; otherwise each week its own. This needs no live quote, so it works
   at the weekend. While the market moves, each new quote is checked against
   it.
-- **Gaps fill themselves.** On start it copies the terminal's ticks since
-  the last recorded one, from the start of the UTC day three days back at
-  most, and the history pass fills anything older.
+- **Gaps fill themselves.** On start it asks the terminal for its own tick
+  history from the last recorded tick to now (from the start of the UTC day
+  three days back at most) and appends it before streaming, so a restart
+  leaves no hole: the ticks are the broker's own, the same ones streaming
+  would have caught. Whole days missing are fetched by the history pass.
+  Checked 17 Nov 2026 after several restarts: the longest gaps in the
+  recorded days were the broker's own daily break (21:55 to 22:05 UTC) and
+  quiet seconds, under 25 s, in the day itself.
+- **Live sessions follow the recording, not this computer's clock.** Each
+  frame gives the broker every tick written since the last one it got, and
+  an order placed live is stamped with the time of the quote on screen, so
+  it fills on the next tick. Before (until 17 Nov 2026) the session took
+  ticks stamped after its last frame by this computer's clock; with the PC
+  clock ~0.5 s ahead of the broker's every new tick looked old on arrival
+  and was skipped, so the Ask (and the Bid in the ticket) stopped moving
+  and live orders never filled, while the candles, read straight from the
+  file, still moved. The candle clock now trails this computer's by 2 s in
+  a quiet market so a late tick still lands in its own candle.
 - **One feed per broker server and instrument.** Prices and spreads differ
   by broker, so recorded data is never mixed with Dukascopy history.
 - Closed days are cleaned with the same Layer 0 rules and stored like
@@ -260,7 +279,7 @@ only. Both default to zero and are printed with every session's results.
 .\.venv\Scripts\python.exe -m unittest discover -s simulator/tests -t .
 ```
 
-91 tests: no look-ahead, fill rules, profit in USD for each kind of
+102 tests: no look-ahead, fill rules, profit in USD for each kind of
 instrument, journal and statistics, the Dukascopy decoder, cleaning and
 resumable updater (against a fake datafeed), compact tick files and their
 migration, candles kept in step with their ticks, the calendar's clock rule
@@ -269,7 +288,10 @@ history (against a fake terminal on New York + 7 h, across summer and
 winter, with the market open and shut; live ticks reaching listeners
 within a poll or two while history is fetched), and reading a broker's clock from
 hourly candles (New York + 7 h, European, fixed, and a broker that changed
-its clock).
+its clock); live sessions with this computer's clock ahead of the broker's,
+and resuming one; currency strength (the FX day across New York's clock
+changes, the matches and their order, a weekend, a pair with no ticks, a
+stale feed, and nothing read after the clock).
 
 `python -m simulator check` prints the tick file's layout and day load times
 (guide step 1).
@@ -279,7 +301,8 @@ its clock).
 ```
 simulator/
   config.py           paths, port, flags, defaults
-  instruments.py      the nine instruments: digits, pip, lot, currencies
+  instruments.py      the ten instruments: digits, pip, lot, currencies
+  analysis.py         currency strength for the Analysis panel
   __main__.py         launcher: one port, one instance
   server.py           FastAPI, one WebSocket per tab; background data jobs
   data/ticks.py       per-day tick files (compact layout); the Layer 0 import

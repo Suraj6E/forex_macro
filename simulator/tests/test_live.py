@@ -623,6 +623,50 @@ class LiveSession(unittest.TestCase):
             self.assertEqual(hist[-1]["close"], 1.103)
             self.assertFalse(s.finished)
 
+    def _feed_with_ticks(self, d, n=100):
+        feed = Path(d) / "x" / "EURUSD"
+        (feed / "live").mkdir(parents=True)
+        now = int(time.time() * 1000)
+        start = now - (now % 86_400_000) + 1000  # just after midnight UTC
+        path = feed / "live" / f"{day_of_ns(start * 1_000_000).isoformat()}.csv"
+        with open(path, "w", newline="\n") as fh:
+            for k in range(n):
+                fh.write(f"{start + k * 1000},{1.1 + k * 1e-5:.5f},{1.10008 + k * 1e-5:.5f}\n")
+        return feed, path, start
+
+    def test_a_computer_clock_ahead_of_the_brokers_still_gets_every_tick(self):
+        # This computer's clock runs 0.6 s ahead of the broker's, so every
+        # tick reaches the disk stamped in the session's past. Before, those
+        # ticks were skipped: the quote froze and orders never filled.
+        with tempfile.TemporaryDirectory() as d:
+            feed, path, start = self._feed_with_ticks(d)
+            src = LiveFeedSource(feed)
+            s = ReplaySession(src, FeedBars(src), Broker(), (start + 99_600) * 1_000_000, "m1", live=True)
+            s.follow((start + 99_600) * 1_000_000)
+            order = s.broker.place("buy", "market", s.order_ns, lots=0.1)
+            self.assertEqual(order.placed_ns, (start + 99_000) * 1_000_000)  # the quote on screen, not the PC clock
+            for k, ask in ((99_400, 1.20008), (99_500, 1.20011)):
+                with open(path, "a", newline="\n") as fh:  # stamped before the clock
+                    fh.write(f"{start + k},1.20000,{ask:.5f}\n")
+                s.follow((start + 100_000 + k % 1000) * 1_000_000)
+                self.assertEqual(s.quote()["ask"], ask)
+            self.assertEqual(s.broker.positions[0].entry_price, 1.20008)  # the next tick after the order
+            self.assertGreaterEqual(s.sim_ns, (start + 99_500) * 1_000_000)
+
+    def test_a_restored_live_session_resumes_from_the_last_tick_its_broker_saw(self):
+        with tempfile.TemporaryDirectory() as d:
+            feed, path, start = self._feed_with_ticks(d)
+            src = LiveFeedSource(feed)
+            s = ReplaySession(src, FeedBars(src), Broker(), (start + 99_000) * 1_000_000, "m1", live=True)
+            s.broker.place("buy", "stop", s.order_ns, lots=0.1, price=1.2)
+            state = s.to_state()
+            state["sim_ns"] = (start + 101_000) * 1_000_000  # saved by a clock ahead of the ticks below
+            with open(path, "a", newline="\n") as fh:
+                fh.write(f"{start + 100_000},1.20000,1.20010\n")
+            again = ReplaySession.from_state(src, FeedBars(src), state, "s", live=True, now=(start + 102_000) * 1_000_000)
+            self.assertEqual(again.broker.positions[0].entry_price, 1.2001)
+            self.assertEqual(again.quote()["ask"], 1.2001)
+
 
 if __name__ == "__main__":
     unittest.main()

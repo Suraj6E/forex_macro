@@ -9,7 +9,9 @@ Dukascopy names the oils differently from most brokers: WTI is
 files are scaled by 10**digits for every instrument here.
 
 Contract sizes follow the common CFD convention: 100,000 units for the
-currency pairs, 5,000 ounces for silver and 1,000 barrels for oil. Brokers
+currency pairs, 100 ounces for gold, 5,000 ounces for silver and 1,000
+barrels for oil. A pip of gold is 0.10 USD, the usual retail convention,
+so a pip of a lot is worth 10 USD, as on EUR/USD. Brokers
 differ (some sell oil in lots of 100 barrels), so the ticket always says
 what one lot is.
 """
@@ -55,6 +57,8 @@ INSTRUMENTS: dict[str, Instrument] = {
         Instrument("EURJPY", "EUR/JPY", "EURJPY", 3, 0.01, 100_000, "EUR", "JPY", ("EUR", "JPY"), "EUR"),
         Instrument("GBPJPY", "GBP/JPY", "GBPJPY", 3, 0.01, 100_000, "GBP", "JPY", ("GBP", "JPY"), "GBP"),
         Instrument("EURGBP", "EUR/GBP", "EURGBP", 5, 0.0001, 100_000, "EUR", "GBP", ("EUR", "GBP"), "EUR"),
+        Instrument("XAUUSD", "Gold", "XAUUSD", 3, 0.1, 100, "XAU", "USD", ("USD",), "oz", "metal",
+                   ("XAUUSD", "GOLD")),
         Instrument("XAGUSD", "Silver", "XAGUSD", 3, 0.01, 5_000, "XAG", "USD", ("USD",), "oz", "metal",
                    ("XAGUSD", "SILVER")),
         Instrument("WTI", "WTI crude oil (US)", "LIGHTCMDUSD", 3, 0.01, 1_000, "WTI", "USD", ("USD",), "barrels",

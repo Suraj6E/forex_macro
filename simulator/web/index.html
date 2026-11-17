@@ -19,6 +19,8 @@
       <button type="button" data-m="live" title="The market now, streamed from your MT5 terminal">Live</button>
       <button type="button" data-m="replay" title="Replay: the latest date, or pick one on the right">Replay</button>
     </div>
+    <button type="button" id="analysisBtn" class="replay-only" data-panel-btn="analysis" aria-controls="drawer" aria-expanded="false"
+      title="Currency strength today: USD, EUR, GBP and JPY against each other; gold, silver and oil on their own">Analysis</button>
     <div class="sep"></div>
 
     <div class="group tf" id="tfGroup" role="group" aria-label="Timeframe"></div>
@@ -48,27 +50,16 @@
 
     <div class="spacer"></div>
     <div class="group">
-      <button id="quotesBtn" class="replay-only" title="Live quotes from your MT5 terminal, tick by tick" aria-expanded="false" aria-controls="quotesPanel">Quotes</button>
-      <button id="dataBtn" class="replay-only datachip" title="Market data: history updates and live recording">
+      <button type="button" id="tradeBtn" class="replay-only" data-panel-btn="trade" aria-controls="drawer" aria-expanded="false" title="Order ticket, account, positions and orders">Trade</button>
+      <button type="button" id="quotesBtn" class="replay-only" data-panel-btn="quotes" aria-controls="drawer" aria-expanded="false" title="Live quotes from your MT5 terminal, tick by tick">Quotes</button>
+      <button type="button" id="dataBtn" class="replay-only datachip" data-panel-btn="data" aria-controls="drawer" aria-expanded="false" title="Market data: history updates and live recording">
         <span class="dot" id="liveDot" aria-hidden="true"></span><span id="dataChip">Data</span>
       </button>
-      <button id="sessionBtn" class="replay-only" title="New or resume a session">Sessions</button>
+      <button type="button" id="sessionBtn" class="replay-only" data-panel-btn="sessions" aria-controls="drawer" aria-expanded="false" title="New or resume a session">Sessions</button>
       <a href="/journal"><button type="button">Journal</button></a>
       <button id="themeBtn" class="ghost" title="Light / dark">◐</button>
     </div>
   </header>
-
-  <section id="quotesPanel" class="quotes hidden" aria-label="Live quotes">
-    <div class="qhead">
-      <b>Live quotes</b><span class="faint" id="qSource"></span>
-      <button type="button" class="ghost" id="quotesClose" title="Close (Esc)" aria-label="Close">×</button>
-    </div>
-    <div class="tablewrap"><table class="t qt">
-      <thead><tr><th>Instrument</th><th class="n">Bid</th><th class="n">Ask</th><th class="n">Spread</th><th class="n" title="Since the broker stamped the latest tick, by this computer's clock">Last tick</th><th class="n">Ticks today</th><th></th></tr></thead>
-      <tbody id="qBody"></tbody>
-    </table></div>
-    <p class="tiny muted" id="qNote"></p>
-  </section>
 
   <div class="main">
     <nav class="tools replay-only" aria-label="Drawing tools">
@@ -83,7 +74,17 @@
     <div class="chartwrap">
       <div id="chart"></div>
       <div class="chart-overlay"><span class="sym" id="symLabel">EUR/USD</span> · <span id="tfLabel">15M</span> · Bid · <span id="ohlc"></span></div>
-      <div class="newsfilter" id="newsFilter" aria-label="Economic calendar impact filter"></div>
+      <div class="chartstack">
+        <div class="oneclick hidden replay-only" id="oneClick" role="group" aria-label="One-click trading">
+          <button type="button" class="ocsell" id="ocSell" title="Sell at market, at once"><span>SELL</span><b id="ocBid">-</b></button>
+          <div class="oclots">
+            <input id="ocLots" type="number" step="0.01" min="0.01" value="0.10" aria-label="Lots" title="Lots for one-click orders">
+            <span class="ocspread" id="ocSpread" title="Spread in pips"></span>
+          </div>
+          <button type="button" class="ocbuy" id="ocBuy" title="Buy at market, at once"><span>BUY</span><b id="ocAsk">-</b></button>
+        </div>
+        <div class="newsfilter" id="newsFilter" aria-label="Economic calendar impact filter"></div>
+      </div>
       <div class="newstip hidden" id="newsTip" role="tooltip"></div>
       <div class="newspop hidden" id="newsPop" role="dialog" aria-label="Economic calendar event"></div>
       <div class="drawbar hidden" id="drawbar">
@@ -92,152 +93,196 @@
       </div>
     </div>
 
-    <aside class="side">
-      <section class="panel ticket replay-only">
-        <h3>Order <span class="faint" id="orderHint"></span></h3>
-        <div class="sides">
-          <button class="sell" id="sideSell"><b>SELL</b><span id="bidPx">-</span></button>
-          <button class="buy on" id="sideBuy"><b>BUY</b><span id="askPx">-</span></button>
+    <!-- One side panel at a time, opened and hidden from the buttons in the
+         top bar; it slides in from the right and the chart makes room. -->
+    <aside class="drawer" id="drawer" aria-label="Side panel">
+
+      <section class="dpanel hidden" data-panel="trade" aria-label="Trade">
+        <div class="phead"><h2>Trade</h2><button type="button" class="ghost pclose" title="Hide" aria-label="Hide">×</button></div>
+        <label class="check octoggle"><input type="checkbox" id="ocToggle"> Show one-click trading on the chart</label>
+        <section class="panel ticket">
+          <h3>Order <span class="faint" id="orderHint"></span></h3>
+          <div class="sides">
+            <button class="sell" id="sideSell"><b>SELL</b><span id="bidPx">-</span></button>
+            <button class="buy on" id="sideBuy"><b>BUY</b><span id="askPx">-</span></button>
+          </div>
+          <div class="spreadline">spread <span id="spreadPx" class="mono">-</span> pips · <span id="lotInfo"></span></div>
+          <div class="seg" id="typeSeg">
+            <button data-type="market" class="on">Market</button>
+            <button data-type="limit">Limit</button>
+            <button data-type="stop">Stop</button>
+          </div>
+          <div class="seg" id="sizeSeg">
+            <button data-size="lots" class="on">Lots</button>
+            <button data-size="risk">Risk %</button>
+          </div>
+          <div class="fields">
+            <label for="sizeIn" id="sizeLabel">Lots</label><input id="sizeIn" type="number" step="0.01" min="0.01" value="0.10">
+            <label for="priceIn">Price</label><input id="priceIn" type="number" step="0.00001" placeholder="at market" disabled>
+            <label for="slIn">Stop loss</label><input id="slIn" type="number" step="0.00001" placeholder="optional">
+            <label for="tpIn">Take profit</label><input id="tpIn" type="number" step="0.00001" placeholder="optional">
+          </div>
+          <button class="place buy" id="placeBtn">Buy 0.10 at market</button>
+          <p class="hint" id="ticketHint">Fills on the next tick, never the one on screen.</p>
+        </section>
+
+        <section class="panel">
+          <h3>Account</h3>
+          <dl class="kv" id="account"></dl>
+        </section>
+
+        <section class="panel">
+          <h3>Positions <span class="faint" id="posCount"></span></h3>
+          <div class="list" id="positions"><div class="empty">No open positions.</div></div>
+        </section>
+
+        <section class="panel">
+          <h3>Pending orders <span class="faint" id="ordCount"></span></h3>
+          <div class="list" id="pending"><div class="empty">No pending orders.</div></div>
+        </section>
+
+        <section class="panel hidden" id="lastTradePanel">
+          <h3>Last closed trade</h3>
+          <div id="lastTrade"></div>
+          <div class="tag-chips" id="tagChips"></div>
+          <input id="tagsIn" placeholder="tags, comma separated" style="width:100%">
+          <textarea id="noteIn" placeholder="What did you see? Was it the plan?" style="margin-top:6px"></textarea>
+          <button id="saveNote" style="margin-top:6px">Save to journal</button>
+        </section>
+
+        <section class="panel">
+          <h3>Session</h3>
+          <div class="tiny muted" id="sessionInfo"></div>
+          <textarea id="sessionNote" placeholder="Session note, stamped with the replay time" style="margin-top:6px"></textarea>
+          <div style="display:flex; gap:6px; margin-top:6px">
+            <button id="addNote">Add note</button>
+            <span class="spacer"></span>
+            <button id="endSession" title="Close everything at the last price and end">End session</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="dpanel hidden" data-panel="review" aria-label="Trade review">
+        <section class="panel">
+          <h3>Trade</h3>
+          <dl class="kv" id="reviewTrade"></dl>
+          <p class="tiny muted" id="reviewNote" style="margin-top:10px"></p>
+        </section>
+      </section>
+
+      <section class="dpanel hidden" data-panel="analysis" aria-label="Analysis">
+        <div class="phead"><h2>Analysis</h2><button type="button" class="ghost pclose" title="Hide" aria-label="Hide">×</button></div>
+        <p class="tiny muted anwhen" id="anWhen">Loading…</p>
+        <section class="panel">
+          <h3>Currency strength <span class="faint">won · average move</span></h3>
+          <div class="strength" id="anRank"></div>
+        </section>
+        <section class="panel">
+          <h3>Who beats whom <span class="faint">row against column</span></h3>
+          <table class="t matrix" id="anMatrix"></table>
+        </section>
+        <section class="panel">
+          <h3>Pairs</h3>
+          <table class="t antable" id="anPairs"></table>
+        </section>
+        <section class="panel">
+          <h3>On their own <span class="faint">not in the matches</span></h3>
+          <table class="t antable" id="anOthers"></table>
+        </section>
+        <p class="tiny muted anhow">Each pair is a match between its two currencies: EUR/USD up means EUR beat USD today; USD/JPY down
+          means JPY beat USD. A currency's score is how many of its three matches it won, and equal scores go to the bigger
+          average move (each pair's move taken from that currency's side). The day opens at 17:00 New York, like the daily
+          candle of a broker on New York + 7 h; a move is the Bid now against the day's first Bid. A replay is measured at its
+          own clock, never later.</p>
+      </section>
+
+      <section class="dpanel hidden" data-panel="quotes" id="quotesPanel" aria-label="Live quotes">
+        <div class="phead"><h2>Live quotes <span class="faint" id="qSource"></span></h2><button type="button" class="ghost pclose" title="Hide (Esc)" aria-label="Hide">×</button></div>
+        <div class="tablewrap"><table class="t qt">
+          <thead><tr><th>Instrument</th><th class="n">Bid</th><th class="n">Ask</th><th class="n">Spread</th><th class="n" title="Since the broker stamped the latest tick, by this computer's clock">Last tick</th><th class="n">Today</th><th></th></tr></thead>
+          <tbody id="qBody"></tbody>
+        </table></div>
+        <p class="tiny muted" id="qNote"></p>
+      </section>
+
+      <section class="dpanel hidden" data-panel="sessions" aria-label="Sessions">
+        <form class="dlg" id="sessionForm">
+          <div class="phead"><h2>Sessions</h2><button type="button" class="ghost pclose" title="Hide (Esc)" aria-label="Hide">×</button></div>
+          <p class="lead">Resume one, or set one up by hand: a start date or a random one, hidden dates, your own balance and costs. Nothing after the clock is ever sent to this page.</p>
+          <div id="dataNotice"></div>
+          <div id="resumeBox" class="hidden">
+            <label>Resume</label>
+            <div class="resume-list" id="resumeList"></div>
+          </div>
+          <div class="form">
+            <div class="seg full" id="modeSeg" role="group" aria-label="Mode">
+              <button type="button" data-mode="replay" class="on">Replay history</button>
+              <button type="button" data-mode="live">Live market</button>
+            </div>
+            <label class="full">Instrument<select id="newSymbol"></select></label>
+            <label class="full">Data<select id="newFeed"></select></label>
+            <div class="full live-only-field tiny muted" id="liveNote"></div>
+            <label class="full replay-field">Start (UTC)
+              <input type="datetime-local" id="newStart" step="60">
+            </label>
+            <label class="check full replay-field"><input type="checkbox" id="newRandom"> Random weekday, 06:00 UTC (helps against remembering the day)</label>
+            <label class="check full replay-field"><input type="checkbox" id="newHide"> Hide dates on the chart and clock</label>
+            <label>Balance (USD)<input type="number" id="newBalance" value="10000" min="100" step="100"></label>
+            <label>Leverage<input type="number" id="newLeverage" value="30" min="1" step="1"></label>
+            <label>Commission (USD per lot, round turn)<input type="number" id="newCommission" value="0" min="0" step="0.5"></label>
+            <label>Slippage (pips, market and stop fills)<input type="number" id="newSlippage" value="0" min="0" step="0.1"></label>
+            <label>Timeframe<select id="newTf"></select></label>
+            <label>Name (optional)<input id="newName" maxlength="120" placeholder="e.g. London breakouts"></label>
+          </div>
+          <div class="actions">
+            <button type="button" id="sessionData" class="ghost" style="margin-right:auto">Market data…</button>
+            <button type="button" id="sessionCancel" class="pclose">Close</button>
+            <button type="submit" class="primary" id="sessionStart">Start replay</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="dpanel hidden" data-panel="data" aria-label="Market data">
+        <div class="dlg">
+          <div class="phead"><h2>Market data</h2><button type="button" class="ghost pclose" title="Hide (Esc)" aria-label="Hide">×</button></div>
+          <p class="lead">Everything here runs on its own; this is where you watch it and choose the live source.</p>
+
+          <section class="dsec">
+            <h3>Replay history <span class="faint">Dukascopy · ticks, Bid and Ask</span></h3>
+            <div class="progress" aria-hidden="true"><div id="jobBar"></div></div>
+            <p class="tiny" id="jobMsg"></p>
+            <div class="row">
+              <button type="button" id="updateNow">Update now</button>
+              <button type="button" id="stopJob" class="hidden">Stop</button>
+              <span class="tiny muted">Downloads run whenever the simulator is open: newest days first, a few weeks of each instrument in turn, so every one becomes playable early. Stopping is safe; it resumes next time.</span>
+            </div>
+            <div class="tablewrap"><table class="t insttable" id="instTable"></table></div>
+            <p class="tiny muted" id="diskInfo"></p>
+          </section>
+
+          <section class="dsec">
+            <h3>Economic calendar <span class="faint">USD, EUR, GBP, JPY</span></h3>
+            <p class="tiny" id="calInfo"></p>
+          </section>
+
+          <section class="dsec">
+            <h3>Live market <span class="faint">MetaTrader 5</span></h3>
+            <p class="tiny muted">The recorder reads prices from a terminal you have open: every new tick of the ten instruments the broker offers, and their tick history back to each instrument's <b>From</b> day, newest first. That history becomes a second data choice next to Dukascopy (broker prices and spreads). It never opens a terminal and never trades: opening one can switch on an Expert Advisor, so you open it yourself. A demo account is the safe choice.</p>
+            <div class="termlist" id="termList"><div class="empty">Looking for MT5 terminals…</div></div>
+            <div class="row">
+              <button type="button" class="primary" id="recStart">Record from this terminal</button>
+              <button type="button" id="recStop" class="hidden">Stop recording</button>
+            </div>
+            <div id="recStatus" class="recstatus"></div>
+            <div id="feedList"></div>
+          </section>
+
+          <div class="actions"><button type="button" id="dataClose" class="pclose">Close</button></div>
         </div>
-        <div class="spreadline">spread <span id="spreadPx" class="mono">-</span> pips · <span id="lotInfo"></span></div>
-        <div class="seg" id="typeSeg">
-          <button data-type="market" class="on">Market</button>
-          <button data-type="limit">Limit</button>
-          <button data-type="stop">Stop</button>
-        </div>
-        <div class="seg" id="sizeSeg">
-          <button data-size="lots" class="on">Lots</button>
-          <button data-size="risk">Risk %</button>
-        </div>
-        <div class="fields">
-          <label for="sizeIn" id="sizeLabel">Lots</label><input id="sizeIn" type="number" step="0.01" min="0.01" value="0.10">
-          <label for="priceIn">Price</label><input id="priceIn" type="number" step="0.00001" placeholder="at market" disabled>
-          <label for="slIn">Stop loss</label><input id="slIn" type="number" step="0.00001" placeholder="optional">
-          <label for="tpIn">Take profit</label><input id="tpIn" type="number" step="0.00001" placeholder="optional">
-        </div>
-        <button class="place buy" id="placeBtn">Buy 0.10 at market</button>
-        <p class="hint" id="ticketHint">Fills on the next tick, never the one on screen.</p>
-      </section>
-
-      <section class="panel replay-only">
-        <h3>Account</h3>
-        <dl class="kv" id="account"></dl>
-      </section>
-
-      <section class="panel replay-only">
-        <h3>Positions <span class="faint" id="posCount"></span></h3>
-        <div class="list" id="positions"><div class="empty">No open positions.</div></div>
-      </section>
-
-      <section class="panel replay-only">
-        <h3>Pending orders <span class="faint" id="ordCount"></span></h3>
-        <div class="list" id="pending"><div class="empty">No pending orders.</div></div>
-      </section>
-
-      <section class="panel hidden replay-only" id="lastTradePanel">
-        <h3>Last closed trade</h3>
-        <div id="lastTrade"></div>
-        <div class="tag-chips" id="tagChips"></div>
-        <input id="tagsIn" placeholder="tags, comma separated" style="width:100%">
-        <textarea id="noteIn" placeholder="What did you see? Was it the plan?" style="margin-top:6px"></textarea>
-        <button id="saveNote" style="margin-top:6px">Save to journal</button>
-      </section>
-
-      <section class="panel replay-only">
-        <h3>Session</h3>
-        <div class="tiny muted" id="sessionInfo"></div>
-        <textarea id="sessionNote" placeholder="Session note, stamped with the replay time" style="margin-top:6px"></textarea>
-        <div style="display:flex; gap:6px; margin-top:6px">
-          <button id="addNote">Add note</button>
-          <span class="spacer"></span>
-          <button id="endSession" title="Close everything at the last price and end">End session</button>
-        </div>
-      </section>
-
-      <section class="panel review-only">
-        <h3>Trade</h3>
-        <dl class="kv" id="reviewTrade"></dl>
-        <p class="tiny muted" id="reviewNote" style="margin-top:10px"></p>
       </section>
     </aside>
   </div>
 </div>
-
-<dialog id="sessionDlg">
-  <form method="dialog" class="dlg" id="sessionForm">
-    <h2>Replay session</h2>
-    <p class="lead">Pick a start, and the market plays forward from there. Nothing after the clock is ever sent to this page.</p>
-    <div id="dataNotice"></div>
-    <div id="resumeBox" class="hidden">
-      <label>Resume</label>
-      <div class="resume-list" id="resumeList"></div>
-    </div>
-    <div class="form">
-      <div class="seg full" id="modeSeg" role="group" aria-label="Mode">
-        <button type="button" data-mode="replay" class="on">Replay history</button>
-        <button type="button" data-mode="live">Live market</button>
-      </div>
-      <label class="full">Instrument<select id="newSymbol"></select></label>
-      <label class="full">Data<select id="newFeed"></select></label>
-      <div class="full live-only-field tiny muted" id="liveNote"></div>
-      <label class="full replay-field">Start (UTC)
-        <input type="datetime-local" id="newStart" step="60">
-      </label>
-      <label class="check full replay-field"><input type="checkbox" id="newRandom"> Random weekday, 06:00 UTC (helps against remembering the day)</label>
-      <label class="check full replay-field"><input type="checkbox" id="newHide"> Hide dates on the chart and clock</label>
-      <label>Balance (USD)<input type="number" id="newBalance" value="10000" min="100" step="100"></label>
-      <label>Leverage<input type="number" id="newLeverage" value="30" min="1" step="1"></label>
-      <label>Commission (USD per lot, round turn)<input type="number" id="newCommission" value="0" min="0" step="0.5"></label>
-      <label>Slippage (pips, market and stop fills)<input type="number" id="newSlippage" value="0" min="0" step="0.1"></label>
-      <label>Timeframe<select id="newTf"></select></label>
-      <label>Name (optional)<input id="newName" maxlength="120" placeholder="e.g. London breakouts"></label>
-    </div>
-    <div class="actions">
-      <button type="button" id="sessionData" class="ghost" style="margin-right:auto">Market data…</button>
-      <button value="cancel" id="sessionCancel" formnovalidate>Cancel</button>
-      <button class="primary" id="sessionStart" value="start">Start replay</button>
-    </div>
-  </form>
-</dialog>
-
-<dialog id="dataDlg">
-  <div class="dlg">
-    <h2>Market data</h2>
-    <p class="lead">Everything here runs on its own; this is where you watch it and choose the live source.</p>
-
-    <section class="dsec">
-      <h3>Replay history <span class="faint">Dukascopy · ticks, Bid and Ask</span></h3>
-      <div class="progress" aria-hidden="true"><div id="jobBar"></div></div>
-      <p class="tiny" id="jobMsg"></p>
-      <div class="row">
-        <button type="button" id="updateNow">Update now</button>
-        <button type="button" id="stopJob" class="hidden">Stop</button>
-        <span class="tiny muted">Downloads run whenever the simulator is open: newest days first, a few weeks of each instrument in turn, so every one becomes playable early. Stopping is safe; it resumes next time.</span>
-      </div>
-      <div class="tablewrap"><table class="t insttable" id="instTable"></table></div>
-      <p class="tiny muted" id="diskInfo"></p>
-    </section>
-
-    <section class="dsec">
-      <h3>Economic calendar <span class="faint">USD, EUR, GBP, JPY</span></h3>
-      <p class="tiny" id="calInfo"></p>
-    </section>
-
-    <section class="dsec">
-      <h3>Live market <span class="faint">MetaTrader 5</span></h3>
-      <p class="tiny muted">The recorder reads prices from a terminal you have open: every new tick of the nine instruments the broker offers, and their tick history back to each instrument's <b>From</b> day, newest first. That history becomes a second data choice next to Dukascopy (broker prices and spreads). It never opens a terminal and never trades: opening one can switch on an Expert Advisor, so you open it yourself. A demo account is the safe choice.</p>
-      <div class="termlist" id="termList"><div class="empty">Looking for MT5 terminals…</div></div>
-      <div class="row">
-        <button type="button" class="primary" id="recStart">Record from this terminal</button>
-        <button type="button" id="recStop" class="hidden">Stop recording</button>
-      </div>
-      <div id="recStatus" class="recstatus"></div>
-      <div id="feedList"></div>
-    </section>
-
-    <div class="actions"><button type="button" id="dataClose">Close</button></div>
-  </div>
-</dialog>
 
 <div class="toasts" id="toasts"></div>
 

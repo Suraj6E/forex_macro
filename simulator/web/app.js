@@ -26,11 +26,14 @@
   };
 
   function pad(n) { return n < 10 ? "0" + n : "" + n; }
-  function fmtClock(ms) {
+  // The clock in the top bar, UTC (its tooltip says so). Live it is always
+  // today, so the time alone.
+  function fmtClock(ms, live) {
     var d = new Date(ms);
     var t = pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds());
+    if (live) return t + " UTC";
     if (S.session && S.session.hide_dates) return DAYS[d.getUTCDay()] + " " + t;
-    return DAYS[d.getUTCDay()] + " " + d.toISOString().slice(0, 10) + " " + t + " UTC";
+    return DAYS[d.getUTCDay()] + " " + d.toISOString().slice(0, 10) + " " + t;
   }
   function fmtTime(ms) {
     var d = new Date(ms);
@@ -54,6 +57,67 @@
     setTimeout(function () { el.remove(); }, kind === "err" ? 7000 : 3500);
     while ($("toasts").children.length > 5) $("toasts").firstChild.remove();
   }
+
+  // ---------------------------------------------------------------- side panel
+
+  // One panel at a time slides in from the right; its button in the top bar
+  // shows and hides it. Trade, Analysis and Quotes are where you work and
+  // the one open is remembered. Sessions and Market data are visits: closing
+  // them goes back to the panel that was open before.
+  var LS_PANEL = "sim-panel";
+  var PANEL_WIDTH = { trade: 320, analysis: 400, quotes: 580, sessions: 520, data: 880, review: 320 };
+  var VISITS = { sessions: true, data: true };
+  var PANEL = { open: null, base: null, dataBack: null, hooks: {} };
+
+  function showPanel(name) {
+    var was = PANEL.open;
+    if (name === was) return;
+    PANEL.open = name || null;
+    if (name) {
+      document.querySelectorAll("#drawer .dpanel").forEach(function (p) { p.classList.toggle("hidden", p.dataset.panel !== name); });
+      $("drawer").style.setProperty("--dw", PANEL_WIDTH[name] + "px");
+      if (!VISITS[name] && name !== "review") {
+        PANEL.base = name;
+        store("localStorage", LS_PANEL, name);
+      }
+    } else if (!VISITS[was]) {
+      PANEL.base = null;
+      store("localStorage", LS_PANEL, "none");
+    }
+    // Closing leaves the panel's content in place while the drawer slides shut.
+    $("drawer").classList.toggle("open", !!name);
+    document.querySelectorAll("[data-panel-btn]").forEach(function (b) {
+      var on = b.dataset.panelBtn === name;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-expanded", on ? "true" : "false");
+    });
+    if (was && PANEL.hooks[was]) PANEL.hooks[was](false);
+    if (name && PANEL.hooks[name]) PANEL.hooks[name](true);
+  }
+
+  function closePanel() {
+    var cur = PANEL.open;
+    if (cur === "data" && PANEL.dataBack === "sessions") { PANEL.dataBack = null; openSessionDialog({}); return; }
+    PANEL.dataBack = null;
+    showPanel(VISITS[cur] ? PANEL.base : null);
+  }
+
+  document.querySelectorAll("[data-panel-btn]").forEach(function (b) {
+    b.onclick = function () {
+      var name = b.dataset.panelBtn;
+      if (PANEL.open === name) { closePanel(); return; }
+      if (name === "sessions") openSessionDialog({});
+      else if (name === "data") openDataDialog();
+      else showPanel(name);
+    };
+  });
+  $("drawer").addEventListener("click", function (e) {
+    if (e.target.closest(".pclose")) closePanel();
+  });
+  document.addEventListener("keydown", function (e) {
+    // Esc closes the panels that used to be pop-ups; Trade and Analysis stay.
+    if (e.key === "Escape" && (VISITS[PANEL.open] || PANEL.open === "quotes")) closePanel();
+  });
 
   // ---------------------------------------------------------------- chart
 
@@ -168,6 +232,7 @@
         store("sessionStorage", TAB_SESSION, m.session.id);
         store("localStorage", LS_SYMBOL, m.session.instrument.symbol);
         showMode(m.session.mode);
+        AN.lastFetch = 0; AN.lastAt = null;
         if (new URLSearchParams(location.search).get("session")) history.replaceState(null, "", "/");
         C.setHideDates(m.session.hide_dates);
         document.body.classList.toggle("live-session", m.session.mode === "live");
@@ -175,7 +240,7 @@
         buildSpeeds(m.session.speeds);
         $("sessionInfo").textContent = (m.session.mode === "live" ? "Live · " : "Replay · ") + m.session.feed_label + " · " +
           (m.session.name ? m.session.name + " · " : "") + "started " + fmtTime(m.session.start_ms) + " · id " + m.session.id;
-        if ($("sessionDlg").open) $("sessionDlg").close();
+        if (PANEL.open === "sessions") showPanel(PANEL.base);
         loadTrades();
         break;
       case "history":
@@ -244,7 +309,7 @@
 
   function onStatus(st) {
     S.status = st;
-    if (st.live) $("clock").innerHTML = "<span class='livetag'>LIVE</span>" + esc(fmtClock(st.sim_ms)) +
+    if (st.live) $("clock").innerHTML = "<span class='livetag'>LIVE</span>" + esc(fmtClock(st.now_ms || st.sim_ms, true)) +
       "<span class='tickage' id='tickAge' title='Since the broker stamped the last tick, by this computer&#39;s clock'></span>";
     else $("clock").textContent = fmtClock(st.sim_ms) + (st.finished ? "  (end of data)" : "");
     $("clock").classList.toggle("playing", st.playing);
@@ -261,6 +326,9 @@
     $("bidPx").textContent = px(q.bid);
     $("askPx").textContent = px(q.ask);
     $("spreadPx").textContent = ((q.ask - q.bid) / PIP).toFixed(1);
+    $("ocBid").textContent = px(q.bid);
+    $("ocAsk").textContent = px(q.ask);
+    $("ocSpread").textContent = ((q.ask - q.bid) / PIP).toFixed(1);
     if (S.status && S.status.live && $("tickAge")) $("tickAge").textContent = "tick " + age(Date.now() - q.time_ms) + " ago";
     lotInfo();
     updateTicket();
@@ -281,21 +349,12 @@
   // the recorder has new ticks, and once a second without.
   var QS = { ws: null, cells: {}, last: {}, delays: [], open: false };
 
-  function openQuotes() {
-    QS.open = true;
-    $("quotesPanel").classList.remove("hidden");
-    $("quotesBtn").classList.add("on");
-    $("quotesBtn").setAttribute("aria-expanded", "true");
-    if (!QS.ws) connectQuotes();
-  }
-
-  function closeQuotes() {
-    QS.open = false;
-    $("quotesPanel").classList.add("hidden");
-    $("quotesBtn").classList.remove("on");
-    $("quotesBtn").setAttribute("aria-expanded", "false");
-    if (QS.ws) { var ws = QS.ws; QS.ws = null; ws.close(); }
-  }
+  // Streams only while the Quotes panel is open.
+  PANEL.hooks.quotes = function (open) {
+    QS.open = open;
+    if (open) { if (!QS.ws) connectQuotes(); }
+    else if (QS.ws) { var ws = QS.ws; QS.ws = null; ws.close(); }
+  };
 
   function connectQuotes() {
     var ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/quotes");
@@ -325,7 +384,7 @@
       QS.cells[tr.dataset.sym] = c;
     });
     $("qBody").querySelectorAll("[data-watch]").forEach(function (b) {
-      b.onclick = function () { closeQuotes(); openView({ mode: "live", symbol: b.dataset.watch }); };
+      b.onclick = function () { openView({ mode: "live", symbol: b.dataset.watch }); };
     });
   }
 
@@ -381,9 +440,112 @@
       "Quiet market: no new ticks yet.";
   }
 
-  $("quotesBtn").onclick = function () { if (QS.open) closeQuotes(); else openQuotes(); };
-  $("quotesClose").onclick = closeQuotes;
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && QS.open) closeQuotes(); });
+  // ---------------------------------------------------------------- one-click trading
+
+  // SELL / lots / BUY on the chart: a market order at once, no ticket. Shown
+  // when ticked in the Trade panel; both settings are remembered.
+  var LS_ONECLICK = "sim-oneclick", LS_OC_LOTS = "sim-oc-lots";
+  function setOneClick(on) {
+    $("ocToggle").checked = on;
+    $("oneClick").classList.toggle("hidden", !on);
+    store("localStorage", LS_ONECLICK, on ? "1" : null);
+  }
+  setOneClick(stored("localStorage", LS_ONECLICK) === "1");
+  $("ocToggle").onchange = function () { setOneClick(this.checked); };
+  (function () {
+    var lots = parseFloat(stored("localStorage", LS_OC_LOTS));
+    if (lots > 0) $("ocLots").value = lots.toFixed(2);
+  })();
+  $("ocLots").onchange = function () {
+    var lots = parseFloat(this.value);
+    if (lots > 0) { this.value = lots.toFixed(2); store("localStorage", LS_OC_LOTS, this.value); }
+  };
+  function oneClick(side) {
+    var lots = parseFloat($("ocLots").value);
+    if (!(lots > 0)) { toast("Set the lots for one-click trading first.", "err"); $("ocLots").focus(); return; }
+    send({ type: "order", side: side, order_type: "market", lots: lots });
+  }
+  $("ocSell").onclick = function () { oneClick("sell"); };
+  $("ocBuy").onclick = function () { oneClick("buy"); };
+
+  // ---------------------------------------------------------------- analysis
+
+  // Currency strength from /api/analysis, at the session's clock. Asked for
+  // while the panel is open: every 2 s live, and in a replay whenever its
+  // clock has moved (at most once a second).
+  var AN = { busy: false, lastAt: null, lastFetch: 0 };
+  PANEL.hooks.analysis = function (open) { if (open) { AN.lastFetch = 0; analysisTick(); } };
+
+  function analysisTick() {
+    if (PANEL.open !== "analysis" || AN.busy || !S.session || !S.attached) return;
+    var live = S.session.mode === "live";
+    var at = S.status ? S.status.sim_ms : null;
+    var now = Date.now();
+    if (now - AN.lastFetch < (live ? 2000 : 1000)) return;
+    if (!live && AN.lastFetch && at === AN.lastAt) return;
+    AN.busy = true; AN.lastFetch = now; AN.lastAt = at;
+    fetch("/api/analysis?session=" + encodeURIComponent(S.session.id))
+      .then(function (r) { if (!r.ok) throw new Error(r.statusText); return r.json(); })
+      .then(function (d) { AN.busy = false; renderAnalysis(d); })
+      .catch(function () { AN.busy = false; });
+  }
+  setInterval(analysisTick, 500);
+
+  function pct2(v) { return (Math.abs(v) < 0.005 ? "" : v > 0 ? "+" : "−") + Math.abs(v).toFixed(2) + "%"; }
+  function arrow(v) { return v > 0 ? "<span class='arr up' aria-hidden='true'>▲</span>" : v < 0 ? "<span class='arr down' aria-hidden='true'>▼</span>" : ""; }
+
+  function renderAnalysis(d) {
+    if (d.day_open_ms === null) {
+      $("anWhen").textContent = "No currency pair has any ticks yet.";
+    } else if (d.live) {
+      $("anWhen").textContent = "Today since 17:00 New York (" + fmtTime(d.day_open_ms) + " UTC), live · updated " +
+        new Date().toISOString().slice(11, 19) + " UTC";
+    } else {
+      $("anWhen").textContent = "At the replay's clock, " + fmtClock(d.at_ms) + (d.hide_dates ? "" : " UTC") + " · day opened " + fmtTime(d.day_open_ms) +
+        (d.hide_dates ? "" : " UTC");
+    }
+    var ranks = d.currencies || [];
+    var scale = Math.max(0.05, Math.max.apply(null, ranks.map(function (r) { return Math.abs(r.avg_pct || 0); })));
+    $("anRank").innerHTML = ranks.map(function (r) {
+      var avg = r.avg_pct;
+      var wins = "";
+      for (var i = 0; i < r.played; i++) wins += "<i class='" + (i < r.wins ? "w" : "") + "'></i>";
+      var tip = r.currency + (r.beats.length ? " beat " + r.beats.join(", ") : " beat no one") +
+        (r.loses_to.length ? "; lost to " + r.loses_to.join(", ") : "; lost to no one") + " today";
+      var bar = avg === null ? "" : "<i class='" + (avg >= 0 ? "pos" : "neg") + "' style='width:" + (50 * Math.abs(avg) / scale).toFixed(1) + "%'></i>";
+      return "<div class='srow' title='" + esc(tip) + "'><span class='rk'>" + r.rank + "</span>" +
+        "<span class='who'><b>" + r.currency + "</b><span class='wins' aria-hidden='true'>" + wins + "</span>" +
+        "<small>" + esc(r.label) + (r.played ? " · " + r.wins + " of " + r.played : "") + "</small></span>" +
+        "<span class='sbar'>" + bar + "</span><span class='val'>" + (avg === null ? "-" : pct2(avg)) + "</span></div>";
+    }).join("");
+
+    var order = ranks.map(function (r) { return r.currency; });
+    var M = d.matrix || {};
+    $("anMatrix").innerHTML = "<thead><tr><th></th>" + order.map(function (c) { return "<th>" + c + "</th>"; }).join("") + "</tr></thead><tbody>" +
+      order.map(function (row) {
+        return "<tr><th>" + row + "</th>" + order.map(function (col) {
+          if (row === col) return "<td class='self'>—</td>";
+          var v = (M[row] || {})[col];
+          if (v === undefined) return "<td class='self' title='No ticks today'>·</td>";
+          return "<td title='" + row + " against " + col + ": " + pct2(v) + " today'>" + arrow(v) + Math.abs(v).toFixed(2) + "</td>";
+        }).join("") + "</tr>";
+      }).join("") + "</tbody>";
+
+    function rows(list, last) {
+      return list.map(function (p) {
+        if (p.state !== "ok") {
+          return "<tr><td><b>" + esc(p.label) + "</b></td><td colspan='3' class='faint'>" +
+            (p.state === "no data" ? "no data yet" : "no ticks today" + (p.last_ms ? " · last " + fmtTime(p.last_ms) : "")) + "</td></tr>";
+        }
+        return "<tr><td><b>" + esc(p.label) + "</b></td><td class='n'>" + p.last.toFixed(p.digits) + "</td>" +
+          "<td class='n'>" + arrow(p.change_pct) + pct2(p.change_pct) + "</td><td class='n'>" + last(p) + "</td></tr>";
+      }).join("");
+    }
+    $("anPairs").innerHTML = "<thead><tr><th>Pair</th><th class='n'>Bid</th><th class='n'>Today</th><th class='n'>Pips</th></tr></thead><tbody>" +
+      rows(d.pairs || [], function (p) { return signed(p.pips, 1); }) + "</tbody>";
+    $("anOthers").innerHTML = "<thead><tr><th></th><th class='n'>Bid</th><th class='n'>Today</th><th class='n'>Change</th></tr></thead><tbody>" +
+      rows(d.others || [], function (p) { return signed(p.change, p.digits >= 3 ? 2 : p.digits); }) + "</tbody>";
+  }
 
   // What a lot is and what a pip is worth: they differ a lot between
   // EUR/USD, a yen cross, silver and oil.
@@ -694,7 +856,7 @@
 
   document.addEventListener("keydown", function (e) {
     var tag = (e.target && e.target.tagName) || "";
-    if (S.review || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || $("sessionDlg").open || $("dataDlg").open) return;
+    if (S.review || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (e.target.closest && e.target.closest("#drawer, #oneClick"))) return;
     if (document.body.classList.contains("live-session")) return; // the market has its own clock
     if (e.code === "Space") { e.preventDefault(); $("playBtn").click(); }
     else if (e.key === "ArrowRight" && e.shiftKey) { e.preventDefault(); send({ type: "step", kind: "tick" }); }
@@ -813,7 +975,6 @@
 
   function openSessionDialog(opts) {
     opts = opts || {};
-    var dlg = $("sessionDlg");
     $("dataNotice").innerHTML = "";
     $("sessionStart").disabled = !!opts.preparing;
     if (opts.preparing) $("dataNotice").innerHTML = "<div class='notice' id='prepNotice'>Preparing the market data…</div>";
@@ -845,7 +1006,7 @@
       }).join("");
     });
     $("sessionCancel").classList.toggle("hidden", !S.attached);
-    if (!dlg.open) dlg.showModal();
+    showPanel("sessions");
   }
 
   function setMode(mode) {
@@ -868,7 +1029,7 @@
         $("liveNote").innerHTML = "No live " + esc(inst ? inst.label : "") + " data yet. Start the recorder in <a href='#' id='openDataFromDlg'>Market data</a>: " +
           "open your MT5 terminal, pick it there, and come back.";
         $("sessionStart").disabled = true;
-        $("openDataFromDlg").onclick = function (e) { e.preventDefault(); openDataDialog(); };
+        $("openDataFromDlg").onclick = function (e) { e.preventDefault(); openDataDialog({ back: "sessions" }); };
       } else {
         $("liveNote").textContent = "The clock is the real clock: candles form as ticks arrive, orders fill on the next live tick, " +
           "and the chart's history is what the recorder has saved from this broker.";
@@ -914,11 +1075,7 @@
     if (!b) return;
     send({ type: "hello", session: b.dataset.resume });
   };
-  $("sessionBtn").onclick = function () { openSessionDialog({}); };
-  $("sessionDlg").addEventListener("cancel", function (e) { if (!S.attached) e.preventDefault(); });
   $("sessionForm").addEventListener("submit", function (e) {
-    var which = e.submitter ? e.submitter.value : "start";
-    if (which !== "start") return;
     e.preventDefault();
     var live = DLG.mode === "live";
     send({
@@ -977,7 +1134,7 @@
   function pct(job) { return job.total ? Math.floor(100 * job.done / job.total) : 0; }
 
   function pollData() {
-    var open = $("dataDlg").open;
+    var open = PANEL.open === "data";
     fetch("/api/data" + (open ? "?terminals=1" : "")).then(function (r) { return r.json(); }).then(function (d) {
       renderChip(d);
       if (open) renderDataDialog(d);
@@ -998,7 +1155,7 @@
         if (d.ready) {
           clearInterval(timer);
           S.reconnect = true;
-          if ($("sessionDlg").open) $("sessionDlg").close();
+          if (PANEL.open === "sessions") showPanel(PANEL.base);
           connect();
         }
       }).catch(function () {});
@@ -1129,27 +1286,19 @@
       .catch(function (err) { toast(String(err.message || err), "err"); pollData(); });
   });
 
-  function openDataDialog() {
+  // Opened from Sessions, closing it goes back there with the form read
+  // again, so a feed the recorder just started appears in Live mode.
+  function openDataDialog(opts) {
     selectedTerminal = null;
-    if (!$("dataDlg").open) $("dataDlg").showModal();
+    PANEL.dataBack = (opts && opts.back) || null;
+    showPanel("data");
     pollData();
   }
 
   $("termList").addEventListener("change", function (e) {
     if (e.target.name === "term") { selectedTerminal = e.target.value; $("recStart").disabled = false; }
   });
-  $("dataBtn").onclick = openDataDialog;
-  $("sessionData").onclick = openDataDialog;
-  // Closing the panel refreshes the session form, so a feed the recorder
-  // just started appears in Live mode without reopening anything.
-  $("dataDlg").addEventListener("close", function () {
-    if ($("sessionDlg").open && DLG.meta) {
-      fetch("/api/meta").then(function (r) { return r.json(); }).then(function (meta) {
-        if (meta.ready) { DLG.meta = meta; setMode(DLG.mode); }
-      });
-    }
-  });
-  $("dataClose").onclick = function () { $("dataDlg").close(); };
+  $("sessionData").onclick = function () { openDataDialog({ back: "sessions" }); };
   $("updateNow").onclick = function () {
     fetch("/api/data/update", { method: "POST" }).then(function (r) { return r.json(); }).then(function (r) {
       if (!r.started) toast("An update is already running.");
@@ -1258,8 +1407,12 @@
   var params = new URLSearchParams(location.search);
   if (params.get("review")) {
     var parts = params.get("review").split(":");
+    showPanel("review");
     startReview(parts[0], parts[1], params.get("tf"));
   } else {
+    // The panel open last time; Trade the first time.
+    var lastPanel = stored("localStorage", LS_PANEL);
+    if (lastPanel !== "none") showPanel(PANEL_WIDTH[lastPanel] && !VISITS[lastPanel] && lastPanel !== "review" ? lastPanel : "trade");
     connect();
   }
   updateTicket();

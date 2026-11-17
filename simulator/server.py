@@ -36,7 +36,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from simulator import config, instruments
+from simulator import analysis, config, instruments
 from simulator.data import dukascopy
 from simulator.data.bars import TIMEFRAMES, BarStore, tf_seconds
 from simulator.data.calendar import Calendar
@@ -103,7 +103,7 @@ class Market:
 
     Candles are loaded into memory only while something uses them (a
     session on this instrument, or one that converts its profit through
-    it): nine instruments over years would otherwise hold close to a
+    it): ten instruments over years would otherwise hold over a
     gigabyte. Downloads update the stored candles either way.
     """
 
@@ -792,10 +792,9 @@ class Live:
             dt, last = now - last, now
             s = self.session
             if s.live:
-                # The clock is the wall clock. A tick stamped a moment ahead
-                # of this machine's clock still exists, so it is shown.
-                latest = s.source.latest_ns() or 0
-                s.advance(max(now_ns(), latest))
+                # Every tick recorded since the last frame, however its stamp
+                # compares with this machine's clock (see ReplaySession.follow).
+                s.follow(now_ns())
                 if self.ws is not None:
                     await self.send_frame()
                 if now - self.last_save > SAVE_EVERY_SECONDS:
@@ -1227,7 +1226,7 @@ async def _handle(ws: WebSocket, live: Live | None, msg: dict) -> Live | None:
         await live.send({"type": "older", "timeframe": msg.get("timeframe") or s.timeframe, "bars": bars})
     elif kind == "order":
         s.broker.place(
-            msg["side"], msg.get("order_type", "market"), s.sim_ns,
+            msg["side"], msg.get("order_type", "market"), s.order_ns,
             lots=_num(msg, "lots"), risk_pct=_num(msg, "risk_pct"),
             price=_num(msg, "price"), sl=_num(msg, "sl"), tp=_num(msg, "tp"),
         )
@@ -1247,7 +1246,7 @@ async def _handle(ws: WebSocket, live: Live | None, msg: dict) -> Live | None:
             )
         await live.flush_events()
     elif kind == "close":
-        s.broker.close(int(msg["id"]), s.sim_ns)
+        s.broker.close(int(msg["id"]), s.order_ns)
         await live.flush_events()
     elif kind == "end_session":
         s.clock.playing = False
@@ -1553,6 +1552,47 @@ def _session_clock(sid: str, row: dict | None) -> int | None:
     if row is None or row["status"] != "active":
         return None
     return hub.live[sid].session.sim_ns if sid in hub.live else row["sim_ns"]
+
+
+# -- analysis --------------------------------------------------------------------
+
+
+#: Live, ticks stamped up to this far ahead of this computer's clock count:
+#: the broker's clock may be ahead of it.
+ANALYSIS_LIVE_AHEAD_NS = 60 * NS_PER_SECOND
+
+
+@app.get("/api/analysis")
+def analysis_now(session: str | None = None) -> dict:
+    """Currency strength at a session's clock: now for a live session, the
+    replay's time for a replay (nothing later is read). Each instrument is
+    read from the session's own feed when it has that day, else from the
+    most current other feed."""
+    row = hub.journal.get_session(session) if session else None
+    live = hub.live.get(session) if session else None
+    is_live = (row or {}).get("mode", "live") == "live"
+    feed_key = (row or {}).get("feed")
+    if is_live:
+        at = now_ns() + ANALYSIS_LIVE_AHEAD_NS
+    else:
+        clock = _session_clock(session, row)
+        at = clock if clock is not None else (live.session.sim_ns if live is not None else row["sim_ns"])
+    sources = {}
+    for symbol in analysis.PAIRS + analysis.ON_THEIR_OWN:
+        if symbol not in INSTRUMENTS:
+            continue
+        feeds = hub.feeds(symbol)
+        prefer = [hub.live_feed(symbol)] if is_live else [feeds.get(feed_key), hub.replay_feed(symbol)]
+        seen, order = set(), []
+        for f in [*prefer, *feeds.values()]:
+            if f is not None and f.key not in seen:
+                seen.add(f.key)
+                order.append(f.source)
+        sources[symbol] = order
+    out = analysis.measure(sources, at)
+    out.update(live=is_live, at_ms=None if is_live else at // 1_000_000,
+               hide_dates=bool((row or {}).get("hide_dates")))
+    return out
 
 
 # -- economic calendar -----------------------------------------------------------

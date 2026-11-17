@@ -95,7 +95,10 @@ label { color: var(--muted); font-size: 12px; }
   padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface);
 }
 .brand { font-weight: 650; letter-spacing: .01em; margin-right: 4px; }
-.symsel { font-weight: 600; width: 140px; }
+/* Below this width the name gives its room to the controls, so the bar
+   stays one row on a 1536 px screen (1920 at 125 %). */
+@media (max-width: 1699px) { .brand { display: none; } }
+.symsel { font-weight: 600; width: 126px; }
 .modebar { margin-bottom: 0; }
 .modebar button { padding-left: 10px; padding-right: 10px; }
 .modebar button[data-m="live"].on { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); }
@@ -122,7 +125,7 @@ label { color: var(--muted); font-size: 12px; }
 .spacer { flex: 1; }
 #playBtn { min-width: 70px; }
 
-.main { display: grid; grid-template-columns: 44px 1fr 320px; min-height: 0; }
+.main { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; min-height: 0; }
 .tools {
   display: flex; flex-direction: column; gap: 4px; padding: 8px 4px;
   border-right: 1px solid var(--border); background: var(--surface);
@@ -142,10 +145,27 @@ label { color: var(--muted); font-size: 12px; }
   padding: 4px 6px; box-shadow: var(--shadow);
 }
 
-.side {
-  border-left: 1px solid var(--border); background: var(--surface);
-  overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 14px;
+/* The side panel: one at a time, slid in from the right by the buttons in
+   the top bar. The chart gives up the room rather than being covered, so
+   the newest candles stay in view. */
+.drawer {
+  width: 0; min-height: 0; overflow: hidden; background: var(--surface);
+  border-left: 1px solid transparent; transition: width .2s ease, border-color .2s;
 }
+.drawer.open { width: min(var(--dw, 320px), calc(100vw - 140px)); border-left-color: var(--border); }
+.dpanel {
+  width: min(var(--dw, 320px), calc(100vw - 140px)); height: 100%; overflow-y: auto;
+  padding: 12px; display: flex; flex-direction: column; gap: 14px;
+}
+.dpanel > .dlg { padding: 0; }
+@media (prefers-reduced-motion: reduce) { .drawer { transition: none; } }
+.phead { display: flex; align-items: center; gap: 8px; }
+.phead h2 { margin: 0; font-size: 14px; font-weight: 650; flex: 1; }
+.phead h2 .faint { font-weight: 400; font-size: 12px; margin-left: 4px; }
+.phead .pclose { padding: 0 8px; font-size: 18px; line-height: 24px; }
+.dlg .phead { margin-bottom: 6px; }
+.check { display: flex; align-items: center; gap: 8px; }
+.octoggle { color: var(--text); font-size: 12px; margin: -4px 0 -2px; }
 .panel h3 {
   margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
   color: var(--muted); font-weight: 600; display: flex; justify-content: space-between;
@@ -233,7 +253,6 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
 .dot.wait { background: var(--warn); }
 .dot.err { background: var(--err); }
-#dataDlg { width: min(720px, calc(100vw - 32px)); }
 .dsec { border-top: 1px solid var(--border); padding: 14px 0 6px; }
 .dsec h3 { margin: 0 0 8px; font-size: 13px; }
 .dsec h3 .faint { font-weight: 400; margin-left: 6px; }
@@ -264,27 +283,19 @@ body.live-session .live-hide { display: none !important; }
 .clock .tickage { color: var(--muted); font-size: 11px; margin-left: 8px; }
 
 /* Live quotes: streamed from the recorder, one row per instrument. */
-.quotes {
-  position: fixed; top: 52px; right: 12px; z-index: 40; width: min(660px, calc(100vw - 24px));
-  background: var(--surface); border: 1px solid var(--border-2); border-radius: var(--radius);
-  box-shadow: var(--shadow); padding: 10px 12px;
-}
-.quotes .qhead { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
-.quotes .qhead button { margin-left: auto; padding: 0 8px; font-size: 16px; line-height: 22px; }
-.quotes table.qt td { vertical-align: middle; }
-.quotes table.qt td.px { font-weight: 600; transition: color .6s; }
-.quotes table.qt td.px.up { color: var(--pos); transition: none; }
-.quotes table.qt td.px.down { color: var(--neg); transition: none; }
-.quotes table.qt td.stale { color: var(--faint); }
-.quotes table.qt button { padding: 2px 8px; font-size: 11px; }
-.quotes p { margin: 8px 0 0; }
-#quotesBtn.on { border-color: var(--accent); }
+table.qt td { vertical-align: middle; }
+table.qt td.px { font-weight: 600; transition: color .6s; }
+table.qt td.px.up { color: var(--pos); transition: none; }
+table.qt td.px.down { color: var(--neg); transition: none; }
+table.qt td.stale { color: var(--faint); }
+table.qt button { padding: 2px 8px; font-size: 11px; }
+#qNote { margin: 0; }
 .form .seg { margin-bottom: 0; }
 .form .live-only-field:empty { display: none; }
 
 /* ---------- review mode ---------- */
 body.review .replay-only { display: none !important; }
-body.review .main { grid-template-columns: 1fr 320px; }
+body.review .main { grid-template-columns: minmax(0, 1fr) auto; }
 body:not(.review) .review-only { display: none !important; }
 
 /* ---------- journal ---------- */
@@ -317,10 +328,13 @@ table.t textarea.note { min-height: 28px; width: 200px; padding: 3px 6px; font-s
 svg.curve { width: 100%; height: 220px; display: block; }
 
 @media (max-width: 900px) {
-  .main, body.review .main { grid-template-columns: 44px 1fr; grid-template-rows: 60vh auto; }
-  body.review .main { grid-template-columns: 1fr; }
+  .app { height: auto; min-height: 100vh; }
+  .main, body.review .main { grid-template-columns: 44px minmax(0, 1fr); grid-template-rows: 60vh auto; }
+  body.review .main { grid-template-columns: minmax(0, 1fr); }
   .grid2 { grid-template-columns: 1fr; }
-  .side { grid-column: 1 / -1; border-left: none; border-top: 1px solid var(--border); }
+  .drawer, .drawer.open { grid-column: 1 / -1; width: auto; border-left: none; border-top: 1px solid var(--border); transition: none; }
+  .drawer:not(.open) { display: none; }
+  .dpanel { width: auto; height: auto; }
 }
 
 /* ---------- economic calendar on the chart ---------- */
@@ -330,10 +344,62 @@ svg.curve { width: 100%; height: 220px; display: block; }
 .imp2 { background: #f2b705; }
 .imp1 { background: #ececec; border-color: #ffffff; }
 :root[data-theme="light"] .imp1 { background: #ffffff; border-color: #8a8a8a; }
-.newsfilter {
-  position: absolute; left: 12px; top: 32px; z-index: 5; display: flex; gap: 4px; align-items: center;
-  font-size: 11px;
+/* Top left of the chart, under the symbol line: one-click trading when it
+   is on, and the calendar filter below it. */
+.chartstack {
+  position: absolute; left: 12px; top: 32px; z-index: 5; pointer-events: none;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
 }
+.chartstack > * { pointer-events: auto; }
+.newsfilter { display: flex; gap: 4px; align-items: center; font-size: 11px; }
+.oneclick {
+  display: flex; align-items: stretch; background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow); overflow: hidden;
+}
+.oneclick button {
+  border: none; border-radius: 0; padding: 4px 10px; min-width: 86px; color: #fff;
+  display: flex; flex-direction: column; align-items: center; line-height: 1.15;
+}
+.oneclick button span { font-size: 10px; letter-spacing: .08em; font-weight: 650; }
+.oneclick button b { font-family: var(--mono); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.oneclick .ocsell, .oneclick .ocsell:hover:not(:disabled) { background: var(--neg); }
+.oneclick .ocbuy, .oneclick .ocbuy:hover:not(:disabled) { background: var(--pos); }
+.oneclick button:hover:not(:disabled) { filter: brightness(1.12); }
+.oneclick button:active:not(:disabled) { filter: brightness(.92); }
+.oclots { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 3px 6px; }
+.oclots input { width: 66px; text-align: center; padding: 2px 4px; }
+.ocspread { font-size: 10px; color: var(--faint); font-family: var(--mono); min-height: 12px; }
+
+/* ---------- analysis: currency strength ---------- */
+
+.anwhen { margin: -8px 0 0; }
+.strength { display: flex; flex-direction: column; gap: 4px; }
+.srow { display: grid; grid-template-columns: 14px 132px minmax(0, 1fr) 62px; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0; }
+.srow .rk { color: var(--faint); font-family: var(--mono); }
+.srow .who b { font-size: 13px; }
+.srow .who small { display: block; color: var(--muted); font-size: 11px; }
+.srow .val { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.wins { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: 1px; }
+.wins i { width: 7px; height: 7px; border-radius: 2px; border: 1px solid var(--muted); }
+.wins i.w { background: var(--text); border-color: var(--text); }
+/* Diverging bar from a zero line: blue to the right when the currency gained
+   on average, red to the left when it lost. The number beside it says the
+   same, so colour is never alone. */
+.sbar { position: relative; height: 18px; }
+.sbar::before { content: ""; position: absolute; left: 50%; top: 1px; bottom: 1px; width: 1px; background: var(--border-2); }
+.sbar i { position: absolute; top: 5px; height: 8px; }
+.sbar i.pos { left: 50%; background: var(--pos); border-radius: 0 4px 4px 0; }
+.sbar i.neg { right: 50%; background: var(--neg); border-radius: 4px 0 0 4px; }
+table.matrix { table-layout: fixed; }
+table.matrix th, table.matrix td { text-align: center; padding: 5px 4px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+table.matrix th:first-child { text-align: left; }
+table.matrix td.self { color: var(--faint); }
+.arr { font-size: 10px; margin-right: 3px; }
+.arr.up { color: var(--pos); }
+.arr.down { color: var(--neg); }
+table.antable td { vertical-align: middle; }
+table.antable td.n { white-space: nowrap; }
+.anhow { margin: 0; }
 .newsfilter > span { margin-right: 2px; }
 .newsfilter button { padding: 1px 7px; font-size: 11px; border-radius: 999px; display: inline-flex; align-items: center; opacity: .55; }
 .newsfilter button.on { opacity: 1; background: var(--surface-2); border-color: var(--border-2); }
@@ -370,7 +436,6 @@ svg.curve { width: 100%; height: 220px; display: block; }
 
 /* ---------- instruments in the data panel ---------- */
 
-#dataDlg { width: min(860px, calc(100vw - 32px)); }
 .insttable td { vertical-align: middle; }
 .insttable input[type="date"] { padding: 2px 6px; font-size: 12px; }
 .insttable .pend { color: var(--muted); font-size: 11px; }
