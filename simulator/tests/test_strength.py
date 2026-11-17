@@ -1,7 +1,7 @@
-"""Currency strength as an indicator: the same numbers as the Analysis panel
-at every minute, carried within the FX day only, the source chosen per day,
-months built again only when their candles change, and nothing after the
-clock given to a candle."""
+"""Currency strength as an indicator: the panel's method over a rolling day
+at every minute, running on through each day's open and weekends, the
+source chosen per day, months built again only when their candles change,
+and nothing after the clock given to a candle."""
 
 import tempfile
 import unittest
@@ -11,7 +11,8 @@ from pathlib import Path
 import numpy as np
 
 from simulator import analysis, strength
-from simulator.data.ticks import NS_PER_SECOND, MemoryTickSource
+from simulator.data.ticks import NS_PER_SECOND
+from simulator.instruments import INSTRUMENTS
 
 START = {"EURUSD": 1.1, "GBPUSD": 1.3, "USDJPY": 150.0, "EURJPY": 165.0, "GBPJPY": 195.0, "EURGBP": 0.85,
          "XAUUSD": 2650.0, "XAGUSD": 31.0, "WTI": 70.0, "BRENT": 74.0}
@@ -23,15 +24,16 @@ def s_(text: str) -> int:
 
 def market(a: int, b: int, seed: int = 7, holes=None):
     """Random-walk 1-minute candles for every instrument over [a, b). `holes`
-    maps a symbol to a (from, to) range with no candles."""
+    maps a symbol (or "*" for all) to a (from, to) range with no candles."""
     rng = np.random.default_rng(seed)
     out = {}
     for sym, p0 in START.items():
         t = np.arange(a, b, 60, dtype=np.int64)
         t = t[rng.random(len(t)) > 0.15]  # minutes without a tick
-        if holes and sym in holes:
-            h0, h1 = holes[sym]
-            t = t[(t < h0) | (t >= h1)]
+        for key in (sym, "*"):
+            if holes and key in holes:
+                h0, h1 = holes[key]
+                t = t[(t < h0) | (t >= h1)]
         steps = rng.normal(0, 0.0004, len(t))
         close = p0 * np.exp(np.cumsum(steps))
         open_ = close * np.exp(rng.normal(0, 0.0001, len(t)))
@@ -39,51 +41,77 @@ def market(a: int, b: int, seed: int = 7, holes=None):
     return out
 
 
-def tick_sources(bars):
-    """The same market as ticks: the open at the minute's start, the close
-    50 s in, as the Analysis panel reads it."""
-    out = {}
-    for sym, (t, o, c) in bars.items():
-        ts = np.r_[t, t + 50] * NS_PER_SECOND
-        bid = np.r_[o, c]
-        out[sym] = [MemoryTickSource(ts, bid, bid * 1.00001)]
-    return out
+def by_hand(bars, g):
+    """One minute worked out plainly: each instrument's last close by the
+    minute's close against its last close a day before, scored with the
+    panel's own ranking."""
+    rows = []
+    for sym in analysis.PAIRS + analysis.ON_THEIR_OWN:
+        t, _o, c = bars[sym]
+        k = np.flatnonzero(t <= g)
+        j = np.flatnonzero(t <= g - 86_400)
+        inst = INSTRUMENTS[sym]
+        row = {"symbol": sym, "base": inst.base, "quote": inst.quote, "state": "no data"}
+        if len(k) and len(j):
+            row.update(state="ok", change_pct=(c[k[-1]] / c[j[-1]] - 1) * 100)
+        rows.append(row)
+    ranking, _ = analysis.rank(rows[:6])
+    return {r["currency"]: r for r in ranking}, {r["symbol"]: r for r in rows}
 
 
-class SameAsThePanel(unittest.TestCase):
-    def test_every_minute_matches_the_analysis_panel(self):
-        a, b = s_("2026-11-16T19:00"), s_("2026-11-17T03:00")  # the FX day turns at 22:00 UTC
-        bars = market(a - 86_400, b, holes={"GBPJPY": (s_("2026-11-16T22:00"), s_("2026-11-16T22:40"))})
-        rows = strength.compute(bars, a, b)
-        ticks = tick_sources(bars)
-        pair_minutes = np.unique(np.concatenate([bars[p][0] for p in analysis.PAIRS]))
+# Thursday 12 Nov 2026 to Tuesday 17 Nov, the market shut from Friday 22:00
+# to Sunday 22:00 UTC.
+WEEKEND = (s_("2026-11-13T22:00"), s_("2026-11-15T22:00"))
+
+
+class RollingDay(unittest.TestCase):
+    def setUp(self):
+        self.bars = market(s_("2026-11-12T00:00"), s_("2026-11-17T06:00"), holes={"*": WEEKEND})
+        self.a, self.b = s_("2026-11-13T00:00"), s_("2026-11-17T06:00")
+        self.rows = strength.compute(self.bars, self.a, self.b)
+
+    def row(self, g):
+        i = int(np.searchsorted(self.rows["time"], g))
+        self.assertEqual(int(self.rows["time"][i]), g)
+        return i
+
+    def test_every_minute_matches_working_it_out_by_hand(self):
         checked = 0
-        for i in range(0, len(rows["time"]), 7):
-            g = int(rows["time"][i])
-            if g not in pair_minutes:
-                continue
-            panel = analysis.measure(ticks, (g + 59) * NS_PER_SECOND)
-            for r in panel["currencies"]:
-                c = r["currency"]
-                self.assertEqual((int(rows[c + "_won"][i]), int(rows[c + "_played"][i])), (r["wins"], r["played"]), (g, c))
+        for i in range(0, len(self.rows["time"]), 53):
+            g = int(self.rows["time"][i])
+            cur, inst = by_hand(self.bars, g)
+            for c, r in cur.items():
+                self.assertEqual((int(self.rows[c + "_won"][i]), int(self.rows[c + "_played"][i])), (r["wins"], r["played"]), (g, c))
                 if r["avg_pct"] is not None:
-                    self.assertAlmostEqual(float(rows[c][i]), r["avg_pct"], places=4)
-            for r in panel["others"]:
+                    self.assertAlmostEqual(float(self.rows[c][i]), r["avg_pct"], places=4)
+            for sym, r in inst.items():
                 if r["state"] == "ok":
-                    self.assertAlmostEqual(float(rows[r["symbol"]][i]), r["change_pct"], places=4)
+                    self.assertAlmostEqual(float(self.rows[sym][i]), r["change_pct"], places=4)
             checked += 1
         self.assertGreater(checked, 40)
 
-    def test_a_pair_carries_its_move_within_the_day_only(self):
-        a, b = s_("2026-11-16T21:00"), s_("2026-11-16T23:00")
-        bars = market(a - 86_400, b, holes={"GBPJPY": (s_("2026-11-16T21:50"), s_("2026-11-16T22:30"))})
-        rows = strength.compute(bars, a, b)
-        t = rows["time"]
-        before = (t >= s_("2026-11-16T21:51")) & (t < s_("2026-11-16T22:00"))
-        after = (t >= s_("2026-11-16T22:00")) & (t < s_("2026-11-16T22:30"))
-        self.assertFalse(np.isnan(rows["GBPJPY"][before]).any())   # carried from 21:49, same FX day
-        self.assertTrue(np.isnan(rows["GBPJPY"][after]).all())     # a new day: no move yet
-        self.assertTrue((rows["JPY_played"][after] == 2).all())
+    def test_it_runs_on_through_the_days_open(self):
+        # Monday's FX day opens at 22:00 UTC. The day-so-far measure dropped
+        # to zero there; a rolling day moves on by about a minute's change.
+        t = self.rows["time"]
+        before = t[t < s_("2026-11-16T22:00")][-1]
+        after = t[t >= s_("2026-11-16T22:00")][0]
+        i, j = self.row(int(before)), self.row(int(after))
+        for c in strength.CURRENCIES:
+            self.assertGreater(abs(float(self.rows[c][j])) + abs(float(self.rows[c][i])), 0.02)
+            self.assertLess(abs(float(self.rows[c][j]) - float(self.rows[c][i])), 0.15, c)
+
+    def test_after_the_weekend_a_day_before_is_fridays_close(self):
+        g = int(self.rows["time"][self.rows["time"] >= s_("2026-11-15T22:30")][0])
+        t, _o, c = self.bars["EURUSD"]
+        friday_close = c[t < WEEKEND[0]][-1]
+        now = c[t <= g][-1]
+        self.assertAlmostEqual(float(self.rows["EURUSD"][self.row(g)]), (now / friday_close - 1) * 100, places=4)
+
+    def test_no_value_without_a_day_before(self):
+        rows = strength.compute(self.bars, s_("2026-11-12T00:00"), s_("2026-11-12T06:00"))
+        self.assertTrue(np.isnan(rows["EURUSD"]).all())
+        self.assertTrue((rows["USD_played"] == 0).all())
 
 
 class FakePart:
@@ -107,7 +135,7 @@ class FakePart:
 class Store(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.bars = market(s_("2026-10-29T00:00"), s_("2026-11-03T00:00"))
+        self.bars = market(s_("2026-10-27T00:00"), s_("2026-11-03T00:00"))
         self.parts = {sym: FakePart(b) for sym, b in self.bars.items()}
         self.store = strength.StrengthStore(Path(self.tmp.name),
                                             lambda sym: [strength.Source("dukascopy", [self.parts[sym]])])

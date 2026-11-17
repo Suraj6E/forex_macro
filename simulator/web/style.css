@@ -140,6 +140,8 @@ label { color: var(--muted); font-size: 12px; }
 }
 .tools button { width: 36px; height: 34px; padding: 0; display: grid; place-items: center; }
 .tools svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+.toolsep { height: 1px; background: var(--border); margin: 4px 3px; }
+.tools .toggle[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 22%, transparent); border-color: var(--accent); }
 .chartwrap { position: relative; min-width: 0; min-height: 0; }
 /* The strength indicator takes the bottom of the chart area when shown. */
 .chartwrap { --ind-h: 0px; }

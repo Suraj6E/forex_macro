@@ -69,6 +69,8 @@
       <button data-tool="rect" title="Rectangle"><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12"/></svg></button>
       <button data-tool="position" title="Position box: click entry, then stop"><svg viewBox="0 0 24 24"><path d="M4 12h16M4 5h16v14H4z"/></svg></button>
       <button id="delDrawing" title="Delete selected drawing (Delete)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13"/></svg></button>
+      <div class="toolsep" aria-hidden="true"></div>
+      <button type="button" id="indToolBtn" class="toggle" aria-pressed="true" title="Strength indicator under the chart: show or hide" aria-label="Strength indicator"><svg viewBox="0 0 24 24"><path d="M3 14c2.5 0 3-6 5.5-6s3 9 6 9 3-6 6.5-6"/><path d="M3 20.5h18" opacity=".5"/></svg></button>
     </nav>
 
     <div class="chartwrap">
@@ -181,7 +183,7 @@
         <div class="phead"><h2>Analysis</h2><button type="button" class="ghost pclose" title="Hide" aria-label="Hide">×</button></div>
         <p class="tiny muted anwhen" id="anWhen">Loading…</p>
         <div class="toggles">
-          <label class="check" title="The strength below, worked out for every candle: each currency's average move since 17:00 New York, at the candle's close"><input type="checkbox" id="indToggle" checked> Show the strength indicator under the chart</label>
+          <label class="check" title="The strength below, worked out for every candle over a rolling day: each currency's average move over the 24 hours to the candle's close"><input type="checkbox" id="indToggle" checked> Show the strength indicator under the chart</label>
           <span class="tiny muted" id="indStatus"></span>
         </div>
         <section class="panel">

@@ -125,7 +125,7 @@
     var strengths = [];  // {s, w} or null per candle, same order as `data`
     var ind = null, indZero = null, indLines = [], indShown = false;
     function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
-    function pct(v) { return (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(2) + "%"; }
+    function pct(v) { return (Math.abs(v) < 0.005 ? "" : v > 0 ? "+" : "−") + Math.abs(v).toFixed(2) + "%"; }
     if (options.indicatorEl) {
       ind = LWC.createChart(options.indicatorEl, {
         autoSize: true,

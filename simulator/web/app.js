@@ -537,7 +537,7 @@
 
   var indLegendHtml = "";
   function renderIndLegend(st, hovering) {
-    var html = "<span class='indtitle' title='Each currency&#39;s average move since 17:00 New York at the candle&#39;s close, and its matches won of those played'>Strength</span>" +
+    var html = "<span class='indtitle' title='Each currency&#39;s average move over the 24 hours to the candle&#39;s close, and its matches won of those played'>Strength 24 h</span>" +
       IND_KEYS.map(function (k, i) {
         var v = st && st.s ? st.s[i] : null;
         var won = i < 4 && st && st.w && st.w.length ? " <small>" + st.w[2 * i] + "/" + st.w[2 * i + 1] + "</small>" : "";
@@ -558,14 +558,17 @@
     store("localStorage", LS_IND_KEYS, keys.length ? keys.join(",") : "none");
     renderIndLegend(C.lastStrength(), false);
   });
+  // Shown or hidden from the left toolbar or the Analysis panel; remembered.
   function setIndicator(on) {
     $("indToggle").checked = on;
+    $("indToolBtn").setAttribute("aria-pressed", on ? "true" : "false");
     document.body.classList.toggle("show-ind", on);
     store("localStorage", LS_IND, on ? null : "0");
     C.showIndicator(on);
   }
   setIndicator(stored("localStorage", LS_IND) !== "0");
   $("indToggle").onchange = function () { setIndicator(this.checked); };
+  $("indToolBtn").onclick = function () { setIndicator(!$("indToggle").checked); };
   function arrow(v) { return v > 0 ? "<span class='arr up' aria-hidden='true'>▲</span>" : v < 0 ? "<span class='arr down' aria-hidden='true'>▼</span>" : ""; }
 
   function renderAnalysis(d) {

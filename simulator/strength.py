@@ -1,14 +1,15 @@
-"""Currency strength as an indicator: the Analysis panel's numbers at every
-minute, worked out in the background, saved, and sent with each candle so a
-replay shows them as well as live.
+"""Currency strength as an indicator: the Analysis panel's method at every
+minute over a rolling day, worked out in the background, saved, and sent
+with each candle so a replay shows it as well as live.
 
-A minute's value is what the Analysis panel would have shown at that
-minute's close, from 1-minute Bid candles instead of ticks: each pair's
-close against the open of its first candle of the FX day (17:00 New York),
-carried forward within the day when a pair has no candle in a minute; USD,
-EUR, GBP and JPY scored on the six matches (matches won, average move); and
-gold, silver and the two oils on their own (their move since the day
-opened). See analysis.py for the method.
+A minute's value, from 1-minute Bid candles: each pair's close at that
+minute against its close 24 hours before (the last candle at or before
+each, so across a weekend the day before is Friday's close); USD, EUR, GBP
+and JPY scored on the six matches as in analysis.py (matches won, average
+move); and gold, silver and the two oils on their own. The window rolls with
+the clock, so the lines run on through every 17:00 New York instead of
+starting again from zero, as the panel's "today" does. (Until 18 Nov 2026
+the indicator used the panel's day and dropped to zero at each day's open.)
 
 A candle of any timeframe gets the value at its last complete minute. The
 candle still forming gets the value at the last minute the clock has
@@ -53,10 +54,9 @@ from simulator.analysis import CURRENCIES, ON_THEIR_OWN, PAIRS
 from simulator.data.bars import bars_from_ticks
 from simulator.data.ticks import NS_PER_SECOND
 from simulator.instruments import INSTRUMENTS
-from simulator.live.mt5rec import us_dst
 
 #: Bumped when the calculation or the files change: every month is built again.
-VERSION = 2
+VERSION = 3
 DAY = 86_400
 HOUR = 3_600
 MINUTE = 60
@@ -64,6 +64,13 @@ SYMBOLS = PAIRS + ON_THEIR_OWN
 #: What each candle carries, in this order: the currencies' average move,
 #: then gold, silver, WTI and Brent's move, all in percent.
 KEYS = CURRENCIES + ON_THEIR_OWN
+#: The window a move is measured over.
+WINDOW_S = DAY
+#: A price older than this is not used: a gap in the data, not a weekend.
+STALE_S = 4 * DAY
+#: Days of candles read before a month, for its first minutes' prices a day
+#: earlier across a weekend or holiday.
+LEAD_DAYS = 5
 #: A source whose day ends at least this much later wins the day.
 LATER_BY_S = 5 * MINUTE
 #: How often changed months are looked for (today's minutes, new days).
@@ -105,48 +112,32 @@ def _read(path: Path, columns: list[str] | None = None, a: int | None = None, b:
     return ds.dataset(path, format="parquet").to_table(columns=columns, filter=where, memory_pool=_POOL)
 
 
-def fx_open_s(times_s) -> np.ndarray:
-    """For each time (epoch seconds), when its FX day opened: the latest
-    17:00 New York at or before it."""
-    times_s = np.asarray(times_s, np.int64)
-    if not len(times_s):
-        return times_s
-    day = times_s // DAY
-    lo, hi = int(day.min()) - 1, int(day.max())
-    opens = np.array([d * DAY + (21 if us_dst((d * DAY + 21 * HOUR) * 1000) else 22) * HOUR
-                      for d in range(lo, hi + 1)], np.int64)
-    today = opens[day - lo]
-    return np.where(times_s >= today, today, opens[day - lo - 1])
-
-
 def compute(bars: dict, a: int, b: int) -> dict[str, np.ndarray]:
     """Rows for the minutes in [a, b) (epoch seconds, minute starts).
 
     `bars` maps a symbol to its 1-minute candles (time, open, close), sorted,
-    from at least the UTC day before `a`, so every FX day under [a, b) is
-    there from its open."""
+    from at least LEAD_DAYS before `a`. A minute's row is as of its close:
+    each instrument's last close then, against its last close at or before
+    the same minute a day earlier."""
     per, grid_parts = {}, []
     for s in SYMBOLS:
-        t, o, c = bars.get(s, (np.empty(0, np.int64), np.empty(0), np.empty(0)))
+        t, _o, c = bars.get(s, (np.empty(0, np.int64), np.empty(0), np.empty(0)))
         if not len(t):
             continue
-        fx = fx_open_s(t)
-        starts = np.flatnonzero(np.r_[True, fx[1:] != fx[:-1]])
-        day_open = np.repeat(o[starts], np.diff(np.r_[starts, len(t)]))
-        per[s] = (t, fx, (c / day_open - 1.0) * 100.0)
+        per[s] = (t, c)
         grid_parts.append(t[(t >= a) & (t < b)])
     grid = np.unique(np.concatenate(grid_parts)) if grid_parts else np.empty(0, np.int64)
-    grid_fx = fx_open_s(grid)
     moves = {}
     for s in SYMBOLS:
         if s not in per or not len(grid):
             moves[s] = np.full(len(grid), np.nan)
             continue
-        t, fx, chg = per[s]
-        k = np.searchsorted(t, grid, side="right") - 1
-        kk = np.maximum(k, 0)
-        same_day = (k >= 0) & (fx[kk] == grid_fx)  # never yesterday's move
-        moves[s] = np.where(same_day, chg[kk], np.nan)
+        t, c = per[s]
+        k = np.searchsorted(t, grid, side="right") - 1             # now
+        j = np.searchsorted(t, grid - WINDOW_S, side="right") - 1  # a day before
+        kk, jj = np.maximum(k, 0), np.maximum(j, 0)
+        ok = (k >= 0) & (j >= 0) & (grid - t[kk] <= STALE_S) & (grid - WINDOW_S - t[jj] <= STALE_S)
+        moves[s] = np.where(ok, (c[kk] / c[jj] - 1.0) * 100.0, np.nan)
     cols: dict[str, np.ndarray] = {"time": grid.astype(np.int64)}
     for cur in CURRENCIES:
         sides = []
@@ -375,7 +366,7 @@ class StrengthStore:
             first, nxt = _month_bounds(key)
             h = hashlib.sha1(str(VERSION).encode())
             for s in sorted(chosen):
-                for d in range(first - 1, nxt):
+                for d in range(first - LEAD_DAYS, nxt):
                     pick = chosen[s].get(d)
                     if pick is not None:
                         h.update(f"{s}|{d}|{pick[0].key}|{pick[1]}|{pick[2]}".encode())
@@ -413,15 +404,15 @@ class StrengthStore:
         a, b = first * DAY, nxt * DAY
         bars = {}
         for s, picks in chosen.items():
-            # The day before the month too, for the FX day that opened then.
+            # LEAD_DAYS before the month too, for prices a day earlier.
             by_part: dict[tuple, set] = {}
-            for d in range(first - 1, nxt):
+            for d in range(first - LEAD_DAYS, nxt):
                 pick = picks.get(d)
                 if pick is not None:
                     by_part.setdefault((id(pick[0]), pick[1]), (pick[0].parts[pick[1]], set()))[1].add(d)
             parts = []
             for part, wanted in by_part.values():
-                t, o, c = part.read(a - DAY, b)
+                t, o, c = part.read(a - LEAD_DAYS * DAY, b)
                 keep = np.isin(t // DAY, np.fromiter(wanted, np.int64))
                 parts.append((t[keep], o[keep], c[keep]))
             if parts:
