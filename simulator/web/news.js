@@ -34,6 +34,9 @@
     var events = [];          // [{id, ms, ccy, impact, name, released}]
     var range = null;         // {start, end} ms fetched
     var nextPending = null;   // ms of the first unreleased event
+    var fetchedAt = 0;        // wall clock of the last fetch
+    var AHEAD = 7 * 86400000; // the schedule shown ahead of the clock (the server's limit)
+    var STALE = 120000;       // fetched again this often: the calendar is updated in the background
     var spots = [];           // drawn dots, for hit testing: {x, y, group}
     var shown = loadImpacts();
     var loading = false, queued = false;
@@ -60,7 +63,8 @@
       if (loading) { queued = true; return; }
       loading = true;
       var clock = opts.getClockMs() || Date.now();
-      var start = first * 1000, end = clock + 3 * 86400000;
+      var start = first * 1000, end = clock + AHEAD;
+      fetchedAt = Date.now();
       fetch("/api/calendar?session=" + encodeURIComponent(s.id) + "&start=" + start + "&end=" + end)
         .then(function (r) { return r.ok ? r.json() : { events: [] }; })
         .then(function (d) {
@@ -82,7 +86,8 @@
     // the clock nears the end of what was fetched.
     function onClock(ms) {
       if (!range) return;
-      if ((nextPending !== null && ms >= nextPending) || ms > range.end - 86400000 || ms < (range.clock || 0) - 60000) reload();
+      if ((nextPending !== null && ms >= nextPending) || ms > range.end - 86400000 || ms < (range.clock || 0) - 60000 ||
+          Date.now() - fetchedAt > STALE) reload();
     }
 
     function clear() { events = []; range = null; nextPending = null; overlay.request(); hidePopup(); }
@@ -250,9 +255,13 @@
         (d.period ? " · for <span class='mono'>" + esc(d.period) + "</span>" : "") +
         (d.released ? " · released" : " · <b>" + esc(untilText(d.ms) || "due") + "</b>") + "</p>";
       var actual = d.released ? d.actual : null;
+      // Just released and not collected yet: the calendar is updated a few
+      // minutes after each medium or high impact release.
+      var clock = opts.getClockMs();
+      if (d.released && actual == null && d.forecast != null && clock && clock - d.ms < 1800000) actual = "coming in";
       var surprise = d.surprise ? "<span class='nsurp'>" + esc(d.surprise) + "</span>" : "";
       var values = "<div class='ngrid'>" +
-        cell("Actual", d.released ? actual : "not out yet", d.released ? "" : "faint") +
+        cell("Actual", d.released ? actual : "not out yet", d.released && actual !== "coming in" ? "" : "faint") +
         cell("Forecast", d.forecast) +
         cell("Previous", d.previous + (d.revised_previous && d.revised_previous !== d.previous ? " → " + d.revised_previous : "")) +
         "</div>" + surprise;

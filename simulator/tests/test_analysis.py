@@ -97,7 +97,7 @@ class Strength(unittest.TestCase):
         m["GBPJPY"] = [source([(OPEN - 30 * MIN, 190.0)])]  # nothing since the day opened
         out = analysis.measure(m, AT)
         gbpjpy = [p for p in out["pairs"] if p["symbol"] == "GBPJPY"][0]
-        self.assertEqual(gbpjpy["state"], "no ticks today")
+        self.assertEqual(gbpjpy["state"], "no ticks in period")
         jpy = [r for r in out["currencies"] if r["currency"] == "JPY"][0]
         self.assertEqual((jpy["played"], jpy["wins"]), (2, 0))
 
@@ -108,6 +108,42 @@ class Strength(unittest.TestCase):
         out = analysis.measure(m, ns("2026-11-14T12:00"))
         self.assertEqual(out["day_open_ms"], friday_open // 1_000_000)
         self.assertEqual(out["currencies"][0]["currency"], "USD")
+
+    def test_the_other_periods_start_where_the_indicators_do(self):
+        # Tuesday 10:00 UTC: the London session opened at 07:00, the week on
+        # Sunday 22:00 UTC (17:00 New York), the rolling day 24 hours ago.
+        starts = {"day": OPEN, "session": ns("2026-11-17T07:00"), "week": ns("2026-11-15T22:00"),
+                  "rolling": AT - MIN - 24 * 60 * MIN}
+        for period, start in starts.items():
+            out = analysis.measure(market(), AT, period)
+            self.assertEqual((out["period"], out["start_ms"]), (period, start // 1_000_000), period)
+        self.assertEqual(analysis.measure(market(), AT, "session")["session"], "London")
+        with self.assertRaises(ValueError):
+            analysis.measure(market(), AT, "month")
+
+    def test_a_session_measures_from_its_own_first_tick(self):
+        m = {}
+        for s, pct in MOVES.items():
+            p0 = START[s]  # the day's first tick, then London's first at 1 % higher
+            m[s] = [source([(OPEN + 5 * MIN, p0), (ns("2026-11-17T07:01"), p0 * 1.01), (AT - MIN, p0 * 1.01 * (1 + pct / 100))])]
+        out = analysis.measure(m, AT, "session")
+        own = {r["symbol"]: round(r["change_pct"], 6) for r in out["others"]}
+        self.assertEqual(own, {"XAUUSD": 1.2, "XAGUSD": -0.4, "WTI": -2.0, "BRENT": -1.5})
+        self.assertEqual([r["currency"] for r in out["currencies"]], ["USD", "EUR", "GBP", "JPY"])
+
+    def test_24_hours_is_against_the_bid_a_day_earlier(self):
+        m = {}
+        for s, pct in MOVES.items():
+            p0 = START[s]
+            m[s] = [source([(AT - 25 * 60 * MIN, p0 * 0.5), (AT - 24 * 60 * MIN - 2 * MIN, p0), (OPEN + 5 * MIN, p0 * 3),
+                            (AT - MIN, p0 * (1 + pct / 100))])]
+        out = analysis.measure(m, AT, "rolling")
+        own = {r["symbol"]: round(r["change_pct"], 6) for r in out["others"]}
+        self.assertEqual(own, {"XAUUSD": 1.2, "XAGUSD": -0.4, "WTI": -2.0, "BRENT": -1.5})
+        # Nothing 24 hours earlier (a new instrument): no move, not a guess.
+        m["GBPJPY"] = [source([(OPEN + 5 * MIN, 195.0), (AT - MIN, 196.0)])]
+        gbpjpy = [p for p in analysis.measure(m, AT, "rolling")["pairs"] if p["symbol"] == "GBPJPY"][0]
+        self.assertEqual(gbpjpy["state"], "no ticks in period")
 
     def test_a_more_current_feed_wins_over_a_stale_one(self):
         stale = source([(OPEN - 26 * 60 * MIN, 1.0)])  # Dukascopy a day behind

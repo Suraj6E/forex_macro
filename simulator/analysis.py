@@ -19,6 +19,19 @@ everyone, and EUR beating everyone but USD, puts USD first and EUR second.
 Gold, silver and oil are not part of the matches. Each is shown on its own,
 up or down on the day.
 
+The same matches can be scored over other periods, the four the strength
+indicator under the chart saves (strength.py), with the same starts:
+
+  * day: since 17:00 New York, as above;
+  * session: since the current session opened (Asia 22:00, London 07:00,
+    London/New York overlap 12:00, New York 16:00 UTC, the journal's);
+  * week: since Sunday 17:00 New York;
+  * rolling: the last 24 hours, the Bid now against the last Bid 24 hours
+    earlier (Friday's across a weekend), never starting again.
+
+The period is placed at the newest pair tick, so on a Saturday it is still
+Friday's day, session and week.
+
 Nothing after `at_ns` is read, so a replay sees the strength as it was at
 its clock and never later.
 """
@@ -47,6 +60,13 @@ LOOK_BACK_DAYS = 7
 SAME_TIME_NS = 5 * 60 * NS_PER_SECOND
 
 LABELS = {3: "Strong", 2: "Leaning strong", 1: "Leaning weak", 0: "Weak"}
+
+PERIODS = ("day", "session", "week", "rolling")
+SESSION_NAMES = {7: "London", 12: "London/New York overlap", 16: "New York", 22: "Asia"}
+DAY_NS = 86_400 * NS_PER_SECOND
+#: Rolling: a Bid this much older than the instant it stands for is no
+#: reference (the indicator's STALE_S).
+STALE_NS = 4 * DAY_NS
 
 
 def fx_day_open_ns(at_ns: int) -> int:
@@ -106,20 +126,40 @@ def _latest(sources: list, at_ns: int):
     return best
 
 
-def _move(symbol: str, found, day_open: int | None) -> dict:
-    """An instrument's move on the day, from `found` = (source, last tick)."""
+def period_start_ns(period: str, at_ns: int) -> int:
+    """When the period holding `at_ns` started: for the rolling period, the
+    instant 24 hours earlier."""
+    if period == "rolling":
+        return at_ns - DAY_NS
+    if period == "day":
+        return fx_day_open_ns(at_ns)
+    from simulator.strength import PERIOD_START  # strength imports this module
+
+    return int(PERIOD_START[period](np.array([at_ns // NS_PER_SECOND]))[0]) * NS_PER_SECOND
+
+
+def _move(symbol: str, found, start: int | None, period: str = "day") -> dict:
+    """An instrument's move over the period, from `found` = (source, last
+    tick): against its first Bid since `start`, or for the rolling period
+    against its last Bid at or before `start`."""
     inst = INSTRUMENTS[symbol]
     row = {"symbol": symbol, "label": inst.label, "digits": inst.digits, "pip": inst.pip,
            "base": inst.base, "quote": inst.quote}
     if found is None:
         return {**row, "state": "no data"}
     src, (now_ts, now_bid) = found
-    opened = day_open if day_open is not None else fx_day_open_ns(now_ts)
-    if now_ts < opened:
-        return {**row, "state": "no ticks today", "last_ms": now_ts // 1_000_000, "last": now_bid}
-    first = first_tick(src, opened, now_ts)
-    if first is None:
-        return {**row, "state": "no ticks today", "last_ms": now_ts // 1_000_000, "last": now_bid}
+    opened = start if start is not None else period_start_ns(period, now_ts)
+    quiet = {**row, "state": "no ticks in period", "last_ms": now_ts // 1_000_000, "last": now_bid}
+    if period == "rolling":
+        first = last_tick(src, opened)
+        if first is None or opened - first[0] > STALE_NS or (opened + DAY_NS) - now_ts > STALE_NS:
+            return quiet
+    else:
+        if now_ts < opened:
+            return quiet
+        first = first_tick(src, opened, now_ts)
+        if first is None:
+            return quiet
     open_bid = first[1]
     change = now_bid - open_bid
     return {
@@ -162,20 +202,29 @@ def rank(pairs: list[dict]) -> tuple[list[dict], dict]:
     return out, matches
 
 
-def measure(sources: dict[str, list], at_ns: int) -> dict:
-    """Strength at `at_ns`. `sources` maps each symbol to its tick sources,
-    the preferred first (the session's own feed)."""
-    # The FX day is the one holding the newest pair tick; a pair with no
-    # tick since it opened is left out of the matches, not compared with
-    # another day.
+def measure(sources: dict[str, list], at_ns: int, period: str = "day") -> dict:
+    """Strength at `at_ns` over `period` (PERIODS). `sources` maps each
+    symbol to its tick sources, the preferred first (the session's own feed)."""
+    if period not in PERIODS:
+        raise ValueError(f"period must be one of {PERIODS}")
+    # The period is the one holding the newest pair tick; a pair with no
+    # tick since it started is left out of the matches, not compared with
+    # another period.
     found = {s: _latest(sources.get(s, []), at_ns) for s in PAIRS + ON_THEIR_OWN if s in INSTRUMENTS}
     newest = [found[s][1][0] for s in PAIRS if found.get(s) is not None]
-    day_open = fx_day_open_ns(max(newest)) if newest else None
-    pairs = [_move(s, found[s], day_open) for s in PAIRS]
-    others = [_move(s, found[s], day_open) for s in ON_THEIR_OWN if s in INSTRUMENTS]
+    anchor = max(newest) if newest else None
+    start = period_start_ns(period, anchor) if anchor is not None else None
+    pairs = [_move(s, found[s], start, period) for s in PAIRS]
+    others = [_move(s, found[s], start, period) for s in ON_THEIR_OWN if s in INSTRUMENTS]
     currencies, matches = rank(pairs)
+    session = None
+    if period == "session" and start is not None:
+        session = SESSION_NAMES.get(start // (3600 * NS_PER_SECOND) % 24)
     return {
-        "day_open_ms": day_open // 1_000_000 if day_open is not None else None,
+        "period": period,
+        "start_ms": start // 1_000_000 if start is not None else None,
+        "session": session,
+        "day_open_ms": fx_day_open_ns(anchor) // 1_000_000 if anchor is not None else None,
         "currencies": currencies,
         "matrix": matches,
         "pairs": pairs,

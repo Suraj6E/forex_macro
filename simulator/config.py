@@ -79,6 +79,10 @@ JOURNAL_DB = Path(os.environ.get("SIM_JOURNAL_DB", SIM_DIR / "journal.sqlite3"))
 #: Fetch new Dukascopy hours in the background whenever the server starts.
 AUTO_UPDATE = os.environ.get("SIM_AUTO_UPDATE", "1") != "0"
 
+#: Keep the economic calendar current while the server runs, by running
+#: fxmacro's `manage.py refresh_calendar` (data/calendar_update.py).
+CALENDAR_UPDATE = os.environ.get("SIM_CALENDAR_UPDATE", "1") != "0"
+
 #: Quality flags, the same in every feed (Layer 0's definitions):
 #: 0 clean, 1 spread > 10x the day's median, 2 bad price, 3 first quote after
 #: a > 5 s pause, 4 > 5 sigma from the rolling median.

@@ -9,7 +9,7 @@ model, the job runner, the full screen set, six collectors, the Parquet price
 store, the event study across the horizon ladder, and — new — the check that
 asks price whether our release timestamps are where we think they are.
 
-**The calendar is loaded: 86,564 releases, Jan 2007 → 22 Sep 2026.** 66,273 carry an
+**The calendar is loaded: Jan 2007 onward, kept current by `refresh_calendar`** (below; the replay simulator runs it while it is open). It held 86,564 releases up to 22 Sep 2026, when it was last fetched by hand and went stale until 18 Nov 2026. 66,273 carry an
 exact release time and an actual; 56,111 a forecast, 26,090 a revised previous.
 The other 20,264 are bank holidays, bond auctions, speeches and other all-day or
 tentative entries that carry a scheduled time but no instant — they can be read,
@@ -69,7 +69,7 @@ forced:
 
 | Source | How it collects | State |
 |---|---|---|
-| **ForexFactory pages** | HTTP, one request per month | **The calendar.** 86,564 events loaded, Jan 2007 → 22 Sep 2026. Nothing exists before Jan 2007 — months back to 2000 return a valid page with zero events. |
+| **ForexFactory pages** | HTTP, one request per month | **The calendar.** Jan 2007 → next month, kept current by `refresh_calendar`. Nothing exists before Jan 2007 — months back to 2000 return a valid page with zero events. |
 | **ForexFactory weekly** | HTTP, weekly cadence | Working. The *only* point-in-time forecast channel (§7.3) — the pages source cannot be, because it shows today's forecast. Rate-limits hard; cooldown enforced from the DB. |
 | **DBnomics** | HTTP API, series list configurable per source | Working, **deliberately not loaded**. Previewed 22 Sep 2026: 889 observations parse cleanly, but they key on reference period (`2007-01`) where ForexFactory keys on `release:<UTC minute>`, so nothing joins — and it serves the CPI *index level* (203.437) where ForexFactory serves CPI *m/m* (0.4%), so even joined the values are not comparable. Importing it as-is would add 889 orphan rows. It becomes a real cross-check once the m/m transform and §4.4 re-keying exist. |
 | **MT5 calendar** | MQL5 script → UTF-8 CSV → upload or watched folder | Working. Run `mql5/CalendarExport.mq5` in the terminal. Handles the ×1,000,000 scaling and the `LONG_MIN` null sentinel. |
@@ -188,6 +188,7 @@ and for the Task Scheduler entry, not because you are expected to use it.
 |---|---|
 | `seed_reference` | Sources → **Re-seed reference data** |
 | `capture_forward` | Sources → **Fetch** on the ForexFactory row |
+| `refresh_calendar` | — fetch what is due: the weekly feed once a day, the month pages in full once a day and otherwise only the events around today (run by the replay simulator; `--json` for a summary) |
 | `reparse <source>` | Sources → **Re-parse latest** |
 | `run_job <id> --force` | Job detail → **Run again** (the CLI variant prints the traceback inline instead of storing it) |
 | `prune_history` | Activity → **Clear history** (add `--dry-run` to see what would go) |
@@ -244,6 +245,41 @@ Environment: FXMACRO_WORKER=0
 ```
 
 Suggested cadence: Sunday before the week opens.
+
+## Keeping the calendar current
+
+`manage.py refresh_calendar` (sources/calendar_refresh.py) fetches what is
+due and nothing more, through the ordinary `fetch_source` job, so each fetch
+is a FetchRun with snapshots like pressing Fetch:
+
+- **the weekly feed** whenever its policy allows (24 h): this week's
+  schedule and point-in-time forecasts;
+- **the month pages in full** at most once a day: every month from two days
+  before the last full fetch to next month, so a gap of any length is filled
+  and next month's schedule is known;
+- **in between, only the events around today** (a day back, eight ahead) from
+  the pages that hold them: actuals as they come out, the schedule moving.
+  A month page is ~400 events and every event folded in is an observation
+  row, so whole months every few hours would add gigabytes a year.
+- never the pages twice in ten minutes (`--force` skips that; the weekly
+  feed's limit always holds). A page the refresh fetches again replaces its
+  own earlier snapshot of that page; snapshots of fetches made by hand are
+  never touched.
+
+The replay simulator runs it while it is open: shortly after it starts,
+every three hours, three minutes after each medium or high impact USD, EUR,
+GBP or JPY release, and from **Update the calendar now** in its Data panel.
+Task Scheduler can run it as well; it is safe to run at any time.
+
+**The weekly feed and the pages are one calendar.** The feed keys an event
+by its title, the pages by ForexFactory's series id; until 18 Nov 2026 a
+title seen by one made a second indicator beside the other's, so every week
+fetched from both was stored twice (20–26 Sep and 15–20 Nov, 171 releases).
+A new title is now filed under the same-named series of the other source
+(`consolidation.merge.SAME_TITLES`), and each refresh folds any such
+duplicate into its pages series, release by release, each field to the
+higher-priority source: the pages' actual and the feed's point-in-time
+forecast end up on one row.
 
 ## Engine es-3 (September 2026)
 

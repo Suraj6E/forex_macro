@@ -19,8 +19,6 @@
       <button type="button" data-m="live" title="The market now, streamed from your MT5 terminal">Live</button>
       <button type="button" data-m="replay" title="Replay: the latest date, or pick one on the right">Replay</button>
     </div>
-    <button type="button" id="analysisBtn" class="replay-only" data-panel-btn="analysis" aria-controls="drawer" aria-expanded="false"
-      title="Currency strength today: USD, EUR, GBP and JPY against each other; gold, silver and oil on their own">Analysis</button>
     <div class="sep"></div>
 
     <div class="group tf" id="tfGroup" role="group" aria-label="Timeframe"></div>
@@ -50,6 +48,8 @@
 
     <div class="spacer"></div>
     <div class="group">
+      <button type="button" id="analysisBtn" class="replay-only" data-panel-btn="analysis" aria-controls="drawer" aria-expanded="false"
+        title="Currency strength over the day, the session, the week or 24 hours: USD, EUR, GBP and JPY against each other; gold, silver and oil on their own">Analysis</button>
       <button type="button" id="tradeBtn" class="replay-only" data-panel-btn="trade" aria-controls="drawer" aria-expanded="false" title="Order ticket, account, positions and orders">Trade</button>
       <button type="button" id="quotesBtn" class="replay-only" data-panel-btn="quotes" aria-controls="drawer" aria-expanded="false" title="Live quotes from your MT5 terminal, tick by tick">Quotes</button>
       <button type="button" id="dataBtn" class="replay-only datachip" data-panel-btn="data" aria-controls="drawer" aria-expanded="false" title="Market data: history updates and live recording">
@@ -189,6 +189,12 @@
 
       <section class="dpanel hidden" data-panel="analysis" aria-label="Analysis">
         <div class="phead"><h2>Analysis</h2><button type="button" class="ghost pclose" title="Hide" aria-label="Hide">×</button></div>
+        <div class="seg anperiods" id="anPeriods" role="group" aria-label="Strength measured over">
+          <button type="button" data-period="day" title="Since 17:00 New York, the FX day's open">Day</button>
+          <button type="button" data-period="session" title="Since the current session opened: Asia 22-07 UTC, London 07-12, London/NY overlap 12-16, New York 16-22 (the journal's sessions)">Session</button>
+          <button type="button" data-period="week" title="Since Sunday 17:00 New York, the FX week's open">Week</button>
+          <button type="button" data-period="rolling" title="Over the last 24 hours: the Bid now against the Bid 24 hours earlier">24 h</button>
+        </div>
         <p class="tiny muted anwhen" id="anWhen">Loading…</p>
         <div class="toggles">
           <label class="check" title="The strength below, worked out for every candle: each currency's matches won and average move at the candle's close, over the day, the session, the week or a rolling 24 hours (chosen in the pane)"><input type="checkbox" id="indToggle" checked> Show the strength indicator under the chart</label>
@@ -210,11 +216,13 @@
           <h3>On their own <span class="faint">not in the matches</span></h3>
           <table class="t antable" id="anOthers"></table>
         </section>
-        <p class="tiny muted anhow">Each pair is a match between its two currencies: EUR/USD up means EUR beat USD today; USD/JPY down
-          means JPY beat USD. A currency's score is how many of its three matches it won, and equal scores go to the bigger
-          average move (each pair's move taken from that currency's side). The day opens at 17:00 New York, like the daily
-          candle of a broker on New York + 7 h; a move is the Bid now against the day's first Bid. A replay is measured at its
-          own clock, never later.</p>
+        <p class="tiny muted anhow">Each pair is a match between its two currencies: EUR/USD up means EUR beat USD over the
+          period; USD/JPY down means JPY beat USD. A currency's score is how many of its three matches it won, and equal scores
+          go to the bigger average move (each pair's move taken from that currency's side). A move is the Bid now against the
+          period's first Bid: the day opens at 17:00 New York, like the daily candle of a broker on New York + 7 h; a session at
+          22:00, 07:00, 12:00 or 16:00 UTC; the week on Sunday at 17:00 New York. Over 24 h it is the Bid now against the Bid
+          24 hours earlier (Friday's across a weekend). The indicator under the chart has the same four. A replay is measured
+          at its own clock, never later.</p>
       </section>
 
       <section class="dpanel hidden" data-panel="quotes" id="quotesPanel" aria-label="Live quotes">
@@ -284,6 +292,8 @@
           <section class="dsec">
             <h3>Economic calendar <span class="faint">USD, EUR, GBP, JPY</span></h3>
             <p class="tiny" id="calInfo"></p>
+            <p class="tiny" id="calUpdate"></p>
+            <div class="row"><button type="button" id="calUpdateNow" class="ghost">Update the calendar now</button></div>
           </section>
 
           <section class="dsec">

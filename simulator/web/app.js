@@ -500,8 +500,29 @@
   // Currency strength from /api/analysis, at the session's clock. Asked for
   // while the panel is open: every 2 s live, and in a replay whenever its
   // clock has moved (at most once a second).
-  var AN = { busy: false, lastAt: null, lastFetch: 0 };
+  // Over the day, the session, the week or 24 hours (remembered).
+  var AN_PERIODS = { day: "Today", session: "Session", week: "Week", rolling: "24 h" };
+  var AN_WORD = { day: "today", session: "this session", week: "this week", rolling: "over 24 h" };
+  var AN = { busy: false, lastAt: null, lastFetch: 0, period: stored("localStorage", "sim-an-period") };
+  if (!AN_PERIODS[AN.period]) AN.period = "day";
   PANEL.hooks.analysis = function (open) { if (open) { AN.lastFetch = 0; analysisTick(); } };
+  function showAnPeriod() {
+    document.querySelectorAll("#anPeriods [data-period]").forEach(function (b) {
+      b.classList.toggle("on", b.dataset.period === AN.period);
+      b.setAttribute("aria-pressed", b.dataset.period === AN.period ? "true" : "false");
+    });
+  }
+  showAnPeriod();
+  $("anPeriods").onclick = function (e) {
+    var b = e.target.closest("[data-period]");
+    if (!b || b.dataset.period === AN.period) return;
+    AN.period = b.dataset.period;
+    store("localStorage", "sim-an-period", AN.period);
+    showAnPeriod();
+    $("anWhen").textContent = "Loading…";
+    AN.lastFetch = 0; AN.lastAt = null;
+    analysisTick();
+  };
 
   function analysisTick() {
     if (PANEL.open !== "analysis" || AN.busy || !S.session || !S.attached) return;
@@ -511,9 +532,14 @@
     if (now - AN.lastFetch < (live ? 2000 : 1000)) return;
     if (!live && AN.lastFetch && at === AN.lastAt) return;
     AN.busy = true; AN.lastFetch = now; AN.lastAt = at;
-    fetch("/api/analysis?session=" + encodeURIComponent(S.session.id))
+    var period = AN.period;
+    fetch("/api/analysis?session=" + encodeURIComponent(S.session.id) + "&period=" + period)
       .then(function (r) { if (!r.ok) throw new Error(r.statusText); return r.json(); })
-      .then(function (d) { AN.busy = false; renderAnalysis(d); })
+      .then(function (d) {
+        AN.busy = false;
+        if (period === AN.period) renderAnalysis(d);
+        else { AN.lastFetch = 0; analysisTick(); }  // switched meanwhile
+      })
       .catch(function () { AN.busy = false; });
   }
   setInterval(analysisTick, 500);
@@ -595,16 +621,24 @@
   };
   function arrow(v) { return v > 0 ? "<span class='arr up' aria-hidden='true'>▲</span>" : v < 0 ? "<span class='arr down' aria-hidden='true'>▼</span>" : ""; }
 
+  // What the period is, in words: "This week, since Sunday 17:00 New York (…)".
+  function anSince(d) {
+    var t = fmtTime(d.start_ms) + (d.hide_dates ? "" : " UTC");
+    if (d.period === "session") return "This session" + (d.session ? ", " + d.session : "") + ", since " + t;
+    if (d.period === "week") return "This week, since Sunday 17:00 New York (" + t + ")";
+    if (d.period === "rolling") return "The last 24 hours, against the Bid at " + t;
+    return "Today, since 17:00 New York (" + t + ")";
+  }
+
   function renderAnalysis(d) {
     onStrengthStatus(d.indicator);
-    if (d.day_open_ms === null) {
+    var word = AN_WORD[d.period] || "today";
+    if (d.start_ms === null) {
       $("anWhen").textContent = "No currency pair has any ticks yet.";
     } else if (d.live) {
-      $("anWhen").textContent = "Today since 17:00 New York (" + fmtTime(d.day_open_ms) + " UTC), live · updated " +
-        new Date().toISOString().slice(11, 19) + " UTC";
+      $("anWhen").textContent = anSince(d) + ", live · updated " + new Date().toISOString().slice(11, 19) + " UTC";
     } else {
-      $("anWhen").textContent = "At the replay's clock, " + fmtClock(d.at_ms) + (d.hide_dates ? "" : " UTC") + " · day opened " + fmtTime(d.day_open_ms) +
-        (d.hide_dates ? "" : " UTC");
+      $("anWhen").textContent = anSince(d) + " · at the replay's clock, " + fmtClock(d.at_ms) + (d.hide_dates ? "" : " UTC");
     }
     var ranks = d.currencies || [];
     var scale = Math.max(0.05, Math.max.apply(null, ranks.map(function (r) { return Math.abs(r.avg_pct || 0); })));
@@ -613,7 +647,7 @@
       var wins = "";
       for (var i = 0; i < r.played; i++) wins += "<i class='" + (i < r.wins ? "w" : "") + "'></i>";
       var tip = r.currency + (r.beats.length ? " beat " + r.beats.join(", ") : " beat no one") +
-        (r.loses_to.length ? "; lost to " + r.loses_to.join(", ") : "; lost to no one") + " today";
+        (r.loses_to.length ? "; lost to " + r.loses_to.join(", ") : "; lost to no one") + " " + word;
       var bar = avg === null ? "" : "<i class='" + (avg >= 0 ? "pos" : "neg") + "' style='width:" + (50 * Math.abs(avg) / scale).toFixed(1) + "%'></i>";
       return "<div class='srow' title='" + esc(tip) + "'><span class='rk'>" + r.rank + "</span>" +
         "<span class='who'><b>" + r.currency + "</b><span class='wins' aria-hidden='true'>" + wins + "</span>" +
@@ -628,8 +662,8 @@
         return "<tr><th>" + row + "</th>" + order.map(function (col) {
           if (row === col) return "<td class='self'>—</td>";
           var v = (M[row] || {})[col];
-          if (v === undefined) return "<td class='self' title='No ticks today'>·</td>";
-          return "<td title='" + row + " against " + col + ": " + pct2(v) + " today'>" + arrow(v) + Math.abs(v).toFixed(2) + "</td>";
+          if (v === undefined) return "<td class='self' title='No ticks " + word + "'>·</td>";
+          return "<td title='" + row + " against " + col + ": " + pct2(v) + " " + word + "'>" + arrow(v) + Math.abs(v).toFixed(2) + "</td>";
         }).join("") + "</tr>";
       }).join("") + "</tbody>";
 
@@ -637,15 +671,17 @@
       return list.map(function (p) {
         if (p.state !== "ok") {
           return "<tr><td><b>" + esc(p.label) + "</b></td><td colspan='3' class='faint'>" +
-            (p.state === "no data" ? "no data yet" : "no ticks today" + (p.last_ms ? " · last " + fmtTime(p.last_ms) : "")) + "</td></tr>";
+            (p.state === "no data" ? "no data yet" : (d.period === "rolling" ? "no Bid 24 hours earlier" : "no ticks " + word) +
+              (p.last_ms ? " · last " + fmtTime(p.last_ms) : "")) + "</td></tr>";
         }
         return "<tr><td><b>" + esc(p.label) + "</b></td><td class='n'>" + p.last.toFixed(p.digits) + "</td>" +
           "<td class='n'>" + arrow(p.change_pct) + pct2(p.change_pct) + "</td><td class='n'>" + last(p) + "</td></tr>";
       }).join("");
     }
-    $("anPairs").innerHTML = "<thead><tr><th>Pair</th><th class='n'>Bid</th><th class='n'>Today</th><th class='n'>Pips</th></tr></thead><tbody>" +
+    var col = AN_PERIODS[d.period] || "Today";
+    $("anPairs").innerHTML = "<thead><tr><th>Pair</th><th class='n'>Bid</th><th class='n'>" + col + "</th><th class='n'>Pips</th></tr></thead><tbody>" +
       rows(d.pairs || [], function (p) { return signed(p.pips, 1); }) + "</tbody>";
-    $("anOthers").innerHTML = "<thead><tr><th></th><th class='n'>Bid</th><th class='n'>Today</th><th class='n'>Change</th></tr></thead><tbody>" +
+    $("anOthers").innerHTML = "<thead><tr><th></th><th class='n'>Bid</th><th class='n'>" + col + "</th><th class='n'>Change</th></tr></thead><tbody>" +
       rows(d.others || [], function (p) { return signed(p.change, p.digits >= 3 ? 2 : p.digits); }) + "</tbody>";
   }
 
@@ -1383,8 +1419,20 @@
     var cal = d.calendar || {};
     $("calInfo").innerHTML = cal.ok ? num(cal.events) + " events with a time, " + utc(cal.first_ms).slice(0, 10) + " → " + utc(cal.last_ms).slice(0, 10) +
       ", rated high, medium or low, read from the fxmacro database (<span class='mono'>" + esc(cal.path) + "</span>). " +
-      "It grows when fxmacro collects the calendar; the simulator only reads it. Each instrument shows its own currencies' events." :
+      "Each instrument shows its own currencies' events, the schedule up to " + Math.round((cal.ahead_ms || 0) / 86400000) + " days ahead of the clock." :
       "<span class='down'>" + esc(cal.error || "The calendar is not available.") + "</span>";
+    var up = cal.update || {};
+    var line;
+    if (up.state === "off") line = esc(up.message || "Updating is off.");
+    else if (up.state === "running") line = "<b>Updating now</b> from ForexFactory…";
+    else {
+      line = (up.state === "error" ? "<span class='down'>" + esc(up.message) + "</span> " :
+        up.last_ms ? "Updated " + ago(up.last_ms) + ": " + esc(up.message) + ". " : "") +
+        (up.next_ms ? "Next update " + (up.next_ms <= Date.now() ? "now" : "at " + utc(up.next_ms).slice(11)) + ". " : "");
+    }
+    $("calUpdate").innerHTML = line + " <span class='faint'>Kept current while the simulator runs: every 3 hours and 3 minutes after each " +
+      "medium or high impact release, from ForexFactory (the month pages for actuals and the schedule ahead, the weekly feed for this week's forecasts).</span>";
+    $("calUpdateNow").disabled = up.state === "off" || up.state === "running";
   }
 
   $("instTable").addEventListener("focusin", function (e) { if (e.target.dataset.from) editingFrom = e.target.dataset.from; });
@@ -1420,6 +1468,12 @@
       if (!r.started) toast("An update is already running.");
       pollData();
     });
+  };
+  $("calUpdateNow").onclick = function () {
+    fetch("/api/calendar/update", { method: "POST" })
+      .then(function (r) { if (!r.ok) return r.json().then(function (j) { throw new Error(j.detail || r.statusText); }); })
+      .then(function () { toast("Updating the calendar. New events show on the chart within a minute or two."); pollData(); })
+      .catch(function (e) { toast(e.message); });
   };
   $("stopJob").onclick = function () { fetch("/api/data/stop", { method: "POST" }).then(pollData); };
   $("recStart").onclick = function () {

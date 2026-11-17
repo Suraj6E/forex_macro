@@ -128,25 +128,35 @@ class Periods(unittest.TestCase):
                 checked += 1
             self.assertGreater(checked, 60, mode)
 
-    def test_the_day_is_the_analysis_panel_minute_by_minute(self):
+    def test_every_period_is_the_analysis_panel_minute_by_minute(self):
+        """The panel works from ticks, the indicator from minute candles; at
+        every minute and over every period they must say the same."""
         ticks = {}
         for sym, (t, o, c) in self.bars.items():  # the open at the minute's start, the close 50 s in
-            ticks[sym] = [MemoryTickSource(np.r_[t, t + 50] * NS_PER_SECOND, np.r_[o, c], np.r_[o, c] * 1.00001)]
+            order = np.argsort(np.r_[t, t + 50], kind="stable")
+            ticks[sym] = [MemoryTickSource(np.r_[t, t + 50][order] * NS_PER_SECOND, np.r_[o, c][order], np.r_[o, c][order] * 1.00001)]
         pair_minutes = np.unique(np.concatenate([self.bars[p][0] for p in analysis.PAIRS]))
-        checked = 0
-        for i in range(0, len(self.rows["time"]), 89):
-            g = int(self.rows["time"][i])
-            if g not in pair_minutes:
-                continue
-            panel = analysis.measure(ticks, (g + 59) * NS_PER_SECOND)
-            for r in panel["currencies"]:
-                c = r["currency"]
-                self.assertEqual((int(self.rows[f"day_{c}_won"][i]), int(self.rows[f"day_{c}_played"][i])),
-                                 (r["wins"], r["played"]), (g, c))
-                if r["avg_pct"] is not None:
-                    self.assertAlmostEqual(float(self.rows[f"day_{c}"][i]), r["avg_pct"], places=4)
-            checked += 1
-        self.assertGreater(checked, 40)
+        for mode in strength.MODES:
+            checked = 0
+            for i in range(0, len(self.rows["time"]), 89):
+                g = int(self.rows["time"][i])
+                if g not in pair_minutes:
+                    continue
+                panel = analysis.measure(ticks, (g + 59) * NS_PER_SECOND, mode)
+                for r in panel["currencies"]:
+                    c = r["currency"]
+                    self.assertEqual((int(self.rows[f"{mode}_{c}_won"][i]), int(self.rows[f"{mode}_{c}_played"][i])),
+                                     (r["wins"], r["played"]), (mode, g, c))
+                    if r["avg_pct"] is not None:
+                        self.assertAlmostEqual(float(self.rows[f"{mode}_{c}"][i]), r["avg_pct"], places=4)
+                for r in panel["others"]:
+                    v = float(self.rows[f"{mode}_{r['symbol']}"][i])
+                    if r["state"] == "ok":
+                        self.assertAlmostEqual(v, r["change_pct"], places=4, msg=(mode, g, r["symbol"]))
+                    else:
+                        self.assertTrue(np.isnan(v), (mode, g, r["symbol"], r["state"]))
+                checked += 1
+            self.assertGreater(checked, 40, mode)
 
     def test_sessions_are_the_journals(self):
         label = [next(name for name, test in stats.SESSIONS if test(h)) for h in range(24)]

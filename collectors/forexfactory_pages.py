@@ -13,7 +13,7 @@ changes the fix must be a re-parse, not a re-crawl of nineteen years.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from collectors.base import (
     CollectorError,
@@ -57,6 +57,26 @@ def month_range(start: date, end: date) -> list[date]:
     return out
 
 
+def _instant(value) -> datetime | None:
+    if value is None or value == "":
+        return None
+    t = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+
+
+def in_window(row, rows_from: datetime | None, rows_to: datetime | None) -> bool:
+    """Whether an event falls in [rows_from, rows_to]. The calendar refresh
+    (sources/calendar_refresh.py) folds in only the events that can have
+    changed since it last ran: a month page is ~400 events, and each one
+    folded in is an observation row kept as provenance."""
+    if rows_from is None and rows_to is None:
+        return True
+    t = row.release_time_utc or row.scheduled_time_utc
+    if t is None:
+        return False
+    return (rows_from is None or t >= rows_from) and (rows_to is None or t <= rows_to)
+
+
 def _get_month(ctx: FetchContext, month: date, retries: int):
     url = PAGE_URL.format(month=month_token(month))
     for attempt in range(retries + 1):
@@ -95,6 +115,11 @@ def fetch(ctx: FetchContext) -> FetchResult:
 
     delay = float(ctx.config.get("delay_seconds", DEFAULT_DELAY_SECONDS))
     retries = int(ctx.config.get("max_retries", DEFAULT_RETRIES))
+    # Optional: fold in only the events between these instants. The page is
+    # still snapshotted whole.
+    rows_from = _instant(ctx.params.get("rows_from"))
+    rows_to = _instant(ctx.params.get("rows_to"))
+    left_out = 0
 
     snapshots = []
     rows = []
@@ -122,8 +147,13 @@ def fetch(ctx: FetchContext) -> FetchResult:
 
         if not month_rows:
             empty_months.append(f"{month:%Y-%m}")
-        rows.extend(month_rows)
-        ctx.log(f"{month:%Y-%m}: {len(month_rows)} in-scope events")
+        kept = [r for r in month_rows if in_window(r, rows_from, rows_to)]
+        left_out += len(month_rows) - len(kept)
+        rows.extend(kept)
+        ctx.log(
+            f"{month:%Y-%m}: {len(month_rows)} in-scope events"
+            + (f", {len(kept)} in the window" if len(kept) != len(month_rows) else "")
+        )
 
         if delay and index < len(months):
             time.sleep(delay)
@@ -142,6 +172,9 @@ def fetch(ctx: FetchContext) -> FetchResult:
         f"date-only. Forecasts are vendor-stored, never point-in-time: this is "
         f"a historical scrape, and calendar sites revise displayed forecasts."
     )
+    if left_out:
+        window = " → ".join(f"{t:%Y-%m-%d %H:%M}" if t else "…" for t in (rows_from, rows_to))
+        notes += f" {left_out:,} event(s) outside {window} UTC were left out."
     if empty_months:
         notes += f" No events parsed for: {', '.join(empty_months[:6])}"
     ctx.log(notes)

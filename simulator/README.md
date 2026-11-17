@@ -47,9 +47,9 @@ One-time install, if the venv predates the simulator:
 |---|---|
 | One screen | Opening the page shows the market: **live** when the recorder is streaming the instrument, else a **replay at the latest date** (00:00 UTC of the last weekday with data). The instrument picker (● streaming now) and **Live / Replay** in the top bar switch in place. Switching instruments keeps the mode, and in replay the date when the other instrument has data then. The calendar button (or a click on the clock) picks a date: in replay it jumps there, live it opens a replay from there. A reload keeps the tab where it was; a new tab opens on the market again. |
 | Sessions | Behind the screen, each instrument and mode is a session with its own account. Live resumes the instrument's live session; replay resumes one with open positions or orders, else starts at the date. A session the screen opened in which nothing was done (no order, note or drawing) is removed on leaving it, so switching does not fill the journal. **Sessions** sets one up by hand: **Data** (Dukascopy or your broker's), a start time or **Random**, **Hide dates**, balance, leverage, commission, slippage; those are never removed. |
-| Side panel | **Trade**, **Quotes**, **Data** and **Sessions** (top right) and **Analysis** (top left) slide a panel in from the right and hide it again; the chart makes room rather than being covered. One at a time. Trade, Analysis and Quotes are remembered across visits (Trade the first time); Sessions and Market data close back to the panel you had open, and Esc closes them. |
+| Side panel | **Analysis**, **Trade**, **Quotes**, **Data** and **Sessions** (top right) slide a panel in from the right and hide it again; the chart makes room rather than being covered. One at a time. Trade, Analysis and Quotes are remembered across visits (Trade the first time); Sessions and Market data close back to the panel you had open, and Esc closes them. |
 | Trade | The order ticket, account, positions, pending orders, last closed trade and session notes. **Show one-click trading on the chart** puts **SELL** / lots / **BUY** at the chart's top left (the calendar filter moves below it): one click is a market order, no ticket. The setting and the lots are remembered. **Show trade history on the chart** (on unless switched off) shows this session's closed trades: entry arrows and exits with their reason and pips. Open positions always show. |
-| Analysis | Currency strength today. USD, EUR, GBP and JPY play each other through the six pairs: EUR/USD up means EUR beat USD, USD/JPY down means JPY beat USD. Each currency's score is the matches it won (3 of 3 strong against all, 0 of 3 weak against all); equal scores go to the bigger average move, each pair's move taken from that currency's side. A row-against-column table shows every match, then each pair's move in % and pips. Gold, silver, WTI and Brent are shown on their own, outside the matches. The day opens at 17:00 New York (a New York + 7 broker's daily candle); a move is the Bid now against the day's first Bid. Live it updates every 2 s; in a replay it is measured at the replay's clock and never later. |
+| Analysis | Currency strength over **Day / Session / Week / 24 h** (the choice is remembered): since 17:00 New York, since the current session opened (Asia 22:00, London 07:00, London/NY overlap 12:00, New York 16:00 UTC), since Sunday 17:00 New York, or over the last 24 hours, the same four as the indicator under the chart. USD, EUR, GBP and JPY play each other through the six pairs: EUR/USD up means EUR beat USD, USD/JPY down means JPY beat USD. Each currency's score is the matches it won (3 of 3 strong against all, 0 of 3 weak against all); equal scores go to the bigger average move, each pair's move taken from that currency's side. A row-against-column table shows every match, then each pair's move in % and pips. Gold, silver, WTI and Brent are shown on their own, outside the matches. The day opens at 17:00 New York (a New York + 7 broker's daily candle); a move is the Bid now against the period's first Bid, or over 24 h against the Bid 24 hours earlier (Friday's across a weekend). Live it updates every 2 s; in a replay it is measured at the replay's clock and never later. |
 | Strength indicator | The same method for every candle, in a pane under the chart, shown or hidden by the wave button at the bottom of the left toolbar (or **Show the strength indicator under the chart** in Analysis). **Day / Session / Week / 24 h** at the pane's top left choose the period: since 17:00 New York, since the current session opened (the journal's sessions), since Sunday 17:00 New York, or a rolling 24 hours that never starts again; all four are saved and the choice is remembered. A line per currency, its average move over the period at the candle's close; the legend gives each value with matches won (`2/3`) for the candle under the crosshair, else the latest, and a name hides or shows its line (gold, silver, WTI and Brent are there too, off at first). A candle carries the value at its last complete minute; the one still forming, at the last minute the clock has completed, so a replay never sees past its clock. Worked out in the background from every instrument's 1-minute candles and saved (see *The strength indicator*). |
 | Replay | **Play**/**Pause** (Space), speeds 1x to max (a market day in ~3 s), **+1 candle** (Right), **+1 tick** (Shift+Right), **Jump** to a time. |
 | Live | The clock is the real clock; candles form as ticks arrive, and the clock shows how old the last tick is. No play or step: the market has its own clock. Every recorded tick reaches the quote and the broker in the order it was recorded, whatever its stamp says about this computer's clock (see *Live market data*). |
@@ -88,7 +88,8 @@ matches rather than carried over from the period before. Each period is
 worked out on its own from the 1-minute Bid candles; a week is not added up
 from days. `tests/test_strength.py` checks every period minute by minute
 against the same thing worked out by hand (finding each period's start
-independently), the day against the Analysis panel itself, the sessions
+independently), every period against the Analysis panel itself (ticks there,
+minute candles here), the sessions
 against the journal's, and that each period starts again where it should
 and nowhere else. (The first version, 17 Nov 2026, had only the day, which
 dropped to zero at every open; the rolling day came next.)
@@ -122,8 +123,8 @@ dropped to zero at every open; the rolling day came next.)
 Events come from fxmacro's own calendar (`db.sqlite3` in this repository,
 `SIM_CALENDAR_DB` to point elsewhere), opened read only: about 62,000
 releases of USD, EUR, GBP and JPY data with a time of day, 2007 onward, rated
-high, medium or low by the calendar sites. It is as current as fxmacro's
-collection; the simulator never collects. Each instrument shows its own
+high, medium or low by the calendar sites, and the schedule to the end of
+next month. Each instrument shows its own
 currencies (EUR/JPY: EUR and JPY; silver and oil: USD). Events without a
 rating (bank holidays) or without a time of day are left out.
 
@@ -133,6 +134,26 @@ revised previous appear only once the clock passes the release. The actual
 is the first print: the database may also hold a later revision, which at
 that point in the replay has not happened. An indicator's earlier releases
 stop at the clock. In **Hide dates** sessions the period label is hidden too.
+The chart shows the schedule up to seven days ahead of the clock, as rings
+right of the last candle.
+
+**Kept current.** The simulator never writes the calendar, but while it is
+open it runs fxmacro's `manage.py refresh_calendar` in a child process
+(data/calendar_update.py): 20 s after it starts, every three hours, three
+minutes after each medium or high impact release of the four currencies (so
+a live session has the actual within minutes; until then its popup says
+*coming in*), and from **Update the calendar now** in Data. fxmacro decides
+what is due (its README, *Keeping the calendar current*): ForexFactory's
+weekly feed once a day for this week's forecasts, the month pages for
+actuals and the schedule ahead. The Data panel shows the last run and the
+next. `SIM_CALENDAR_UPDATE=0` turns it off; it is off by itself when
+`SIM_CALENDAR_DB` points at another database. The calendar file is looked at
+every 30 s, its write-ahead log included, so a write shows without waiting
+for SQLite to fold the log into the file.
+
+Until 18 Nov 2026 nothing did this: the calendar was collected only by
+pressing Fetch in fxmacro, last on 22 Sep, so there were no events after
+30 Sep on any chart.
 
 ## Live market data and broker history
 
@@ -332,11 +353,12 @@ only. Both default to zero and are printed with every session's results.
 .\.venv\Scripts\python.exe -m unittest discover -s simulator/tests -t .
 ```
 
-112 tests: no look-ahead, fill rules, profit in USD for each kind of
+126 tests: no look-ahead, fill rules, profit in USD for each kind of
 instrument, journal and statistics, the Dukascopy decoder, cleaning and
 resumable updater (against a fake datafeed), compact tick files and their
 migration, candles kept in step with their ticks, the calendar's clock rule
-(against a small copy of fxmacro's tables), and the MT5 recorder and its
+(against a small copy of fxmacro's tables) and its updater (when it runs, what it
+reports, a write still in the write-ahead log seen), and the MT5 recorder and its
 history (against a fake terminal on New York + 7 h, across summer and
 winter, with the market open and shut; live ticks reaching listeners
 within a poll or two while history is fetched), and reading a broker's clock from
@@ -345,8 +367,8 @@ its clock); live sessions with this computer's clock ahead of the broker's,
 and resuming one; currency strength (the FX day across New York's clock
 changes, the matches and their order, a weekend, a pair with no ticks, a
 stale feed, and nothing read after the clock); the strength indicator
-(each period minute by minute against working it out by hand, the day
-against the panel, the sessions against the journal's, each period starting
+(each period minute by minute against working it out by hand and against
+the panel, the sessions against the journal's, each period starting
 again where it should and nowhere else, Friday's close after the weekend,
 the source per day, months built again only when changed, and no candle
 given a minute that had not closed by the clock).
@@ -369,6 +391,7 @@ simulator/
   data/dukascopy.py   decoder and resumable, rate-aware updater
   data/bars.py        Bid candles with tick volume, rebuilt per day
   data/calendar.py    fxmacro's economic calendar, read only, on the clock
+  data/calendar_update.py  runs fxmacro's refresh_calendar in the background
   live/mt5rec.py      MT5 recorder: attach-only, read-only, UTC, history
   live/feed.py        reading a recorded feed; its stored and live candles
   live/winproc.py     installed and running terminals; a writer lock

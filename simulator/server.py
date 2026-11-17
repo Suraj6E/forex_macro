@@ -40,6 +40,7 @@ from simulator import analysis, config, instruments, strength
 from simulator.data import dukascopy
 from simulator.data.bars import TIMEFRAMES, BarStore, tf_seconds
 from simulator.data.calendar import Calendar
+from simulator.data.calendar_update import CalendarUpdater
 from simulator.data.ticks import (
     NS_PER_SECOND,
     FeedStore,
@@ -82,8 +83,9 @@ SECONDS_PER_HOUR_FILE = 1.05
 #: Bytes per stored tick in the compact layout, for estimates before an
 #: instrument has any data of its own.
 BYTES_PER_DAY_GUESS = 250_000
-#: How far ahead the chart is told about scheduled events.
-CALENDAR_AHEAD_NS = 3 * 86_400 * NS_PER_SECOND
+#: How far ahead the chart is told about scheduled events: a trader knows
+#: the week's schedule.
+CALENDAR_AHEAD_NS = 7 * 86_400 * NS_PER_SECOND
 
 
 class Feed:
@@ -231,6 +233,7 @@ class Hub:
         self.journal = Journal()
         self.markets: dict[str, Market] = {s: Market(i) for s, i in INSTRUMENTS.items()}
         self.calendar = Calendar()
+        self.calendar_updater = CalendarUpdater(self.calendar)
         self.problem: str | None = None
         self.live: dict[str, Live] = {}
         self._mt5_feeds: dict[str, Feed] = {}
@@ -680,6 +683,7 @@ async def lifespan(app: FastAPI):
     maintenance = asyncio.create_task(_keep_recorded_candles_current())
     hub.start()
     hub.strength.start(lambda: hub.prepared)
+    hub.calendar_updater.start()
     settings = hub.live_settings()
     if settings.get("autostart") and settings.get("terminal"):
         # Waits harmlessly until the trader opens that terminal.
@@ -688,6 +692,7 @@ async def lifespan(app: FastAPI):
     yield
     maintenance.cancel()
     hub.strength.stop()
+    hub.calendar_updater.stop()
     for live in list(hub.live.values()):
         live.save()
     hub.stop_job()
@@ -1418,7 +1423,7 @@ def _meta() -> dict:
         "keep_flags": list(config.KEEP_FLAGS),
         "instruments": [dict(inst.to_json(), feeds=_feed_list(symbol), streaming=hub.streaming_feed(symbol) is not None)
                         for symbol, inst in INSTRUMENTS.items()],
-        "calendar": hub.calendar.status(),
+        "calendar": _calendar_status(),
     }
 
 
@@ -1462,7 +1467,7 @@ def data_status(terminals: int = 0) -> dict:
         "instruments": [dict(m.info(settings[s], now), broker=[f for f in _feed_list(s) if f["live"]])
                         for s, m in hub.markets.items()] if hub.prepared else [],
         "disk": hub.disk(),
-        "calendar": hub.calendar.status(),
+        "calendar": _calendar_status(),
         "strength": hub.strength.status,
         "live": live,
     }
@@ -1658,11 +1663,14 @@ ANALYSIS_LIVE_AHEAD_NS = 60 * NS_PER_SECOND
 
 
 @app.get("/api/analysis")
-def analysis_now(session: str | None = None) -> dict:
-    """Currency strength at a session's clock: now for a live session, the
-    replay's time for a replay (nothing later is read). Each instrument is
-    read from the session's own feed when it has that day, else from the
-    most current other feed."""
+def analysis_now(session: str | None = None, period: str = "day") -> dict:
+    """Currency strength at a session's clock over a period (day, session,
+    week or rolling 24 hours): now for a live session, the replay's time for
+    a replay (nothing later is read). Each instrument is read from the
+    session's own feed when it has that day, else from the most current
+    other feed."""
+    if period not in analysis.PERIODS:
+        raise HTTPException(400, f"period must be one of {', '.join(analysis.PERIODS)}")
     row = hub.journal.get_session(session) if session else None
     live = hub.live.get(session) if session else None
     is_live = (row or {}).get("mode", "live") == "live"
@@ -1684,13 +1692,26 @@ def analysis_now(session: str | None = None) -> dict:
                 seen.add(f.key)
                 order.append(f.source)
         sources[symbol] = order
-    out = analysis.measure(sources, at)
+    out = analysis.measure(sources, at, period)
     out.update(live=is_live, at_ms=None if is_live else at // 1_000_000,
                hide_dates=bool((row or {}).get("hide_dates")), indicator=hub.strength.status)
     return out
 
 
 # -- economic calendar -----------------------------------------------------------
+
+
+def _calendar_status() -> dict:
+    return dict(hub.calendar.status(), update=dict(hub.calendar_updater.status),
+                ahead_ms=CALENDAR_AHEAD_NS // 1_000_000)
+
+
+@app.post("/api/calendar/update")
+def calendar_update() -> dict:
+    """Update the calendar now (Data panel). Runs in the background."""
+    if not hub.calendar_updater.run_now():
+        raise HTTPException(409, hub.calendar_updater.status.get("message") or "The calendar update is off.")
+    return {"ok": True, "update": dict(hub.calendar_updater.status)}
 
 
 @app.get("/api/calendar")
@@ -1709,7 +1730,7 @@ def calendar_window(session: str, start: int, end: int) -> dict:
         b = min(b, clock + CALENDAR_AHEAD_NS)
     events = hub.calendar.window(a, b, inst.currencies, clock) if b >= a else []
     return {"events": events, "clock_ms": clock // 1_000_000 if clock is not None else None,
-            "currencies": list(inst.currencies), "status": hub.calendar.status()}
+            "currencies": list(inst.currencies), "status": _calendar_status()}
 
 
 @app.get("/api/calendar/event/{event_id}")

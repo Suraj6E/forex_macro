@@ -14,6 +14,12 @@ The replay's clock decides what is known, as with prices:
     future, and is never shown;
   * an indicator's history lists only releases before the clock.
 
+The database is kept current by fxmacro's `refresh_calendar`, which the
+simulator runs in the background (calendar_update.py). The file is checked
+for changes every 30 seconds, the write-ahead log included: the database runs
+in WAL mode, so a write lands in `db.sqlite3-wal` and reaches the main file
+only at a checkpoint.
+
 Impact is the calendar's own rating (3 high, 2 medium, 1 low). Events with
 no rating (bank holidays) and events with no time of day are left out: a
 dot needs a time.
@@ -102,13 +108,28 @@ class Calendar:
 
     # -- loading -------------------------------------------------------------
 
+    def _file_version(self) -> tuple:
+        """The database file and its write-ahead log, as they stand."""
+        st = self.path.stat()
+        try:
+            wal = self.path.with_name(self.path.name + "-wal").stat()
+            wal_v = (wal.st_mtime_ns, wal.st_size)
+        except FileNotFoundError:
+            wal_v = None
+        return st.st_mtime_ns, st.st_size, wal_v
+
+    def invalidate(self) -> None:
+        """Read the database again at the next look (after a refresh wrote it)."""
+        self._version = None
+        self._checked = 0.0
+
     def refresh(self) -> None:
         now = time.monotonic()
         if now - self._checked < RECHECK_SECONDS and self._version is not None:
             return
         self._checked = now
         try:
-            version = self.path.stat().st_mtime_ns
+            version = self._file_version()
         except FileNotFoundError:
             self.error = f"The fxmacro database was not found at {self.path}"
             return
@@ -156,6 +177,17 @@ class Calendar:
             "last_ms": self.times[-1] // 1_000_000 if self.times else None,
             "currencies": list(CURRENCIES),
         }
+
+    def next_after(self, after_ns: int, min_impact: int = 1) -> int | None:
+        """The time of the first event after `after_ns` rated at least
+        `min_impact`, or None."""
+        self.refresh()
+        with self._lock:
+            i = bisect_right(self.times, after_ns)
+            for r in self.rows[i:]:
+                if r["importance"] >= min_impact:
+                    return r["ns"]
+        return None
 
     def window(self, a_ns: int, b_ns: int, currencies, clock_ns: int | None) -> list[dict]:
         """Events in [a_ns, b_ns] for these currencies, as chart dots.
