@@ -17,7 +17,9 @@ counts +0.2 % for USD). Together the matches rank all four. USD beating
 everyone, and EUR beating everyone but USD, puts USD first and EUR second.
 
 Gold, silver and oil are not part of the matches. Each is shown on its own,
-up or down on the day.
+up or down on the day. So is each currency's main stock market: the S&P 500
+(USD), the DAX 40 (EUR), the FTSE 100 (GBP) and the Nikkei 225 (JPY), its
+move in its own currency.
 
 The same matches can be scored over other periods, the four the strength
 indicator under the chart saves (strength.py), with the same starts:
@@ -50,6 +52,10 @@ from simulator.live.mt5rec import us_dst
 CURRENCIES = ("USD", "EUR", "GBP", "JPY")
 PAIRS = ("EURUSD", "GBPUSD", "USDJPY", "EURJPY", "GBPJPY", "EURGBP")
 ON_THEIR_OWN = ("XAUUSD", "XAGUSD", "WTI", "BRENT")
+#: Each currency's main stock index, in the order of CURRENCIES.
+INDICES = ("US500", "GER40", "UK100", "JP225")
+#: Everything measured.
+SYMBOLS = PAIRS + ON_THEIR_OWN + INDICES
 
 HOUR_NS = 3600 * NS_PER_SECOND
 #: How far back the last tick before a time is looked for (a long weekend,
@@ -210,12 +216,14 @@ def measure(sources: dict[str, list], at_ns: int, period: str = "day") -> dict:
     # The period is the one holding the newest pair tick; a pair with no
     # tick since it started is left out of the matches, not compared with
     # another period.
-    found = {s: _latest(sources.get(s, []), at_ns) for s in PAIRS + ON_THEIR_OWN if s in INSTRUMENTS}
+    found = {s: _latest(sources.get(s, []), at_ns) for s in SYMBOLS if s in INSTRUMENTS}
     newest = [found[s][1][0] for s in PAIRS if found.get(s) is not None]
     anchor = max(newest) if newest else None
     start = period_start_ns(period, anchor) if anchor is not None else None
     pairs = [_move(s, found[s], start, period) for s in PAIRS]
     others = [_move(s, found[s], start, period) for s in ON_THEIR_OWN if s in INSTRUMENTS]
+    indices = [dict(_move(s, found[s], start, period), currency=INSTRUMENTS[s].quote)
+               for s in INDICES if s in INSTRUMENTS]
     currencies, matches = rank(pairs)
     session = None
     if period == "session" and start is not None:
@@ -229,4 +237,5 @@ def measure(sources: dict[str, list], at_ns: int, period: str = "day") -> dict:
         "matrix": matches,
         "pairs": pairs,
         "others": others,
+        "indices": indices,
     }

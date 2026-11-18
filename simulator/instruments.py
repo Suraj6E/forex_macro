@@ -8,12 +8,20 @@ Dukascopy names the oils differently from most brokers: WTI is
 `LIGHTCMDUSD` (US light sweet crude) and Brent `BRENTCMDUSD`. Its price
 files are scaled by 10**digits for every instrument here.
 
+Each currency's main stock market is here too, as an index CFD in that
+currency: the S&P 500 (USD), the DAX 40 (EUR), the FTSE 100 (GBP) and the
+Nikkei 225 (JPY). Dukascopy's codes are USA500IDXUSD, DEUIDXEUR, GBRIDXGBP
+and JPNIDXJPY, prices scaled by 1,000 like gold's; brokers call them US500,
+GER40, UK100 and JP225 (FTMO: US500.cash and so on).
+
 Contract sizes follow the common CFD convention: 100,000 units for the
 currency pairs, 100 ounces for gold, 5,000 ounces for silver and 1,000
 barrels for oil. A pip of gold is 0.10 USD, the usual retail convention,
-so a pip of a lot is worth 10 USD, as on EUR/USD. Brokers
-differ (some sell oil in lots of 100 barrels), so the ticket always says
-what one lot is.
+so a pip of a lot is worth 10 USD, as on EUR/USD. An index's pip is one
+point, and a lot is one unit of its currency a point (1 USD a point on the
+S&P 500), except the Nikkei at 100 yen a point, so its lot is not a few
+cents a point. Brokers differ (some sell oil in lots of 100 barrels, some
+indices in tens), so the ticket always says what one lot is.
 """
 
 from __future__ import annotations
@@ -65,6 +73,16 @@ INSTRUMENTS: dict[str, Instrument] = {
                    "energy", ("USOIL", "XTIUSD", "WTI", "USOUSD", "CL", "OIL.WTI", "WTIUSD")),
         Instrument("BRENT", "Brent crude oil (Europe)", "BRENTCMDUSD", 3, 0.01, 1_000, "BRENT", "USD", ("USD",),
                    "barrels", "energy", ("UKOIL", "XBRUSD", "BRENT", "UKOUSD", "OIL.BRENT", "BRENTUSD")),
+        # Each currency's main stock index. Aliases are whole index names
+        # only: a bare "FTSE" or "DAX" would also find FTSEMIB or DAX futures.
+        Instrument("US500", "S&P 500 (US)", "USA500IDXUSD", 3, 1.0, 1, "US500", "USD", ("USD",), "index",
+                   "index", ("US500", "SPX500", "SP500", "USA500", "US500USD", "SPX500USD")),
+        Instrument("GER40", "DAX 40 (Germany)", "DEUIDXEUR", 3, 1.0, 1, "GER40", "EUR", ("EUR",), "index",
+                   "index", ("GER40", "DE40", "DAX40", "GER30", "DE30", "DAX30", "GER40EUR", "DE40EUR")),
+        Instrument("UK100", "FTSE 100 (UK)", "GBRIDXGBP", 3, 1.0, 1, "UK100", "GBP", ("GBP",), "index",
+                   "index", ("UK100", "FTSE100", "UK100GBP")),
+        Instrument("JP225", "Nikkei 225 (Japan)", "JPNIDXJPY", 3, 1.0, 100, "JP225", "JPY", ("JPY",), "index",
+                   "index", ("JP225", "JPN225", "NIKKEI225", "NI225", "JP225JPY")),
     )
 }
 
@@ -72,7 +90,7 @@ DEFAULT_SYMBOL = "EURUSD"
 
 #: Which instrument converts a profit currency into USD, and whether its
 #: price is USD per unit (GBPUSD) or units per USD (USDJPY).
-CONVERSION = {"JPY": ("USDJPY", True), "GBP": ("GBPUSD", False)}
+CONVERSION = {"JPY": ("USDJPY", True), "GBP": ("GBPUSD", False), "EUR": ("EURUSD", False)}
 
 
 def get(symbol: str | None) -> Instrument:

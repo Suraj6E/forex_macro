@@ -1681,7 +1681,7 @@ def analysis_now(session: str | None = None, period: str = "day") -> dict:
         clock = _session_clock(session, row)
         at = clock if clock is not None else (live.session.sim_ns if live is not None else row["sim_ns"])
     sources = {}
-    for symbol in analysis.PAIRS + analysis.ON_THEIR_OWN:
+    for symbol in analysis.SYMBOLS:
         if symbol not in INSTRUMENTS:
             continue
         feeds = hub.feeds(symbol)

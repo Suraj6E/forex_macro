@@ -164,7 +164,9 @@ body.show-ind:not(.review) .indpane { display: block; }
 }
 .indlegend button:hover:not(:disabled) { background: var(--surface-2); }
 .indlegend button.off { opacity: .45; }
-.indlegend button i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+.indlegend button i { width: 12px; height: 3px; border-radius: 2px; display: inline-block; background: var(--c); }
+/* A stock index: dashed, in its currency's colour, as its line is. */
+.indlegend button i.dash { background: repeating-linear-gradient(90deg, var(--c) 0 4px, transparent 4px 6px); }
 .indlegend button b { font-family: var(--mono); font-weight: 500; font-variant-numeric: tabular-nums; }
 .indlegend button small { color: var(--muted); font-family: var(--mono); }
 .chart-overlay {

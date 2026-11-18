@@ -173,6 +173,32 @@ class Money(unittest.TestCase):
         self.assertEqual(t["gross_usd"], round(0.5 * 50_000 / 150.0, 2))
         rate.assert_called()
 
+    def test_stock_indices_are_money_a_point_in_their_own_currency(self):
+        sp = Broker.for_instrument(instruments.get("US500"), balance=100_000.0)
+        self.fill(sp, 6700.00, 6700.40)
+        self.assertEqual(sp.pip_value, 1.0)                       # 1 USD a point a lot
+        self.assertEqual(round(sp._margin(1, 6700.0), 2), round(6700.0 / 30.0, 2))
+        # The DAX in euros, through EUR/USD at 1.08.
+        dax = Broker.for_instrument(instruments.get("GER40"), balance=100_000.0, rate_fn=lambda ns: 1.08)
+        self.fill(dax, 24000.0, 24001.0)
+        self.assertAlmostEqual(dax.pip_value, 1.08)
+        dax.place("buy", "market", 1 * S, lots=2)
+        self.fill(dax, 24000.0, 24001.0, 2)                       # long 2 lots at 24,001
+        dax.close(1, 2 * S)
+        self.fill(dax, 24051.0, 24052.0, 3)                       # out at the Bid, +50 points
+        self.assertEqual(dax.drain_events()[-1]["trade"]["gross_usd"], round(50 * 2 * 1.08, 2))
+        # The Nikkei: 100 yen a point, through USD/JPY at 155.
+        nk = Broker.for_instrument(instruments.get("JP225"), balance=100_000.0, rate_fn=lambda ns: 1 / 155.0)
+        self.fill(nk, 50000.0, 50010.0)
+        self.assertAlmostEqual(nk.pip_value, 100 / 155.0)
+
+    def test_every_instrument_can_be_valued_in_usd(self):
+        for inst in instruments.INSTRUMENTS.values():
+            self.assertTrue(inst.quote == "USD" or inst.base == "USD" or inst.quote in instruments.CONVERSION, inst.symbol)
+            conv = instruments.CONVERSION.get(inst.quote)
+            if conv and inst.base != "USD":
+                self.assertIn(conv[0], instruments.INSTRUMENTS)
+
     def test_a_cross_without_a_rate_is_refused_not_guessed(self):
         b = Broker.for_instrument(instruments.get("EURGBP"), balance=10_000.0, rate_fn=lambda ns: None)
         self.fill(b, 0.84000, 0.84010)

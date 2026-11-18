@@ -3,9 +3,15 @@
 Candle-by-candle tick replay with simulated orders, tick volume, the economic
 calendar on the chart, an automatic journal and drawing tools, plus a live
 mode and broker tick history from your MT5 terminal, one-click trading and
-a currency-strength view. Ten instruments: EUR/USD, GBP/USD, USD/JPY,
-EUR/JPY, GBP/JPY, EUR/GBP, gold (XAU/USD), silver (XAG/USD), WTI crude (US)
-and Brent crude (Europe). Built from `Replay Simulator
+a currency-strength view. Fourteen instruments: EUR/USD, GBP/USD, USD/JPY,
+EUR/JPY, GBP/JPY, EUR/GBP, gold (XAU/USD), silver (XAG/USD), WTI crude (US),
+Brent crude (Europe), and each currency's main stock index: the S&P 500
+(USD), DAX 40 (EUR), FTSE 100 (GBP) and Nikkei 225 (JPY), as index CFDs
+(Dukascopy USA500IDXUSD, DEUIDXEUR, GBRIDXGBP, JPNIDXJPY, tick history from
+2012-2013; a broker's US500, GER40, UK100, JP225, FTMO's `.cash`). An index
+pip is one point and a lot is one unit of its currency a point (1 USD a
+point on the S&P 500), the Nikkei 100 yen a point; profit is valued in USD
+through EUR/USD, GBP/USD or USD/JPY, as on the crosses. Built from `Replay Simulator
 Step-by-Step Build Guide.md`, steps 1 to 6. It is a separate app from the
 Django site: its own server, its own port, its own journal. It reads the
 trading-research tick file and fxmacro's calendar database and writes
@@ -49,8 +55,8 @@ One-time install, if the venv predates the simulator:
 | Sessions | Behind the screen, each instrument and mode is a session with its own account. Live resumes the instrument's live session; replay resumes one with open positions or orders, else starts at the date. A session the screen opened in which nothing was done (no order, note or drawing) is removed on leaving it, so switching does not fill the journal. **Sessions** sets one up by hand: **Data** (Dukascopy or your broker's), a start time or **Random**, **Hide dates**, balance, leverage, commission, slippage; those are never removed. |
 | Side panel | **Analysis**, **Trade**, **Quotes**, **Data** and **Sessions** (top right) slide a panel in from the right and hide it again; the chart makes room rather than being covered. One at a time. Trade, Analysis and Quotes are remembered across visits (Trade the first time); Sessions and Market data close back to the panel you had open, and Esc closes them. |
 | Trade | The order ticket, account, positions, pending orders, last closed trade and session notes. **Show one-click trading on the chart** puts **SELL** / lots / **BUY** at the chart's top left (the calendar filter moves below it): one click is a market order, no ticket. The setting and the lots are remembered. **Show trade history on the chart** (on unless switched off) shows this session's closed trades: entry arrows and exits with their reason and pips. Open positions always show. |
-| Analysis | Currency strength over **Day / Session / Week / 24 h** (the choice is remembered): since 17:00 New York, since the current session opened (Asia 22:00, London 07:00, London/NY overlap 12:00, New York 16:00 UTC), since Sunday 17:00 New York, or over the last 24 hours, the same four as the indicator under the chart. USD, EUR, GBP and JPY play each other through the six pairs: EUR/USD up means EUR beat USD, USD/JPY down means JPY beat USD. Each currency's score is the matches it won (3 of 3 strong against all, 0 of 3 weak against all); equal scores go to the bigger average move, each pair's move taken from that currency's side. A row-against-column table shows every match, then each pair's move in % and pips. Gold, silver, WTI and Brent are shown on their own, outside the matches. The day opens at 17:00 New York (a New York + 7 broker's daily candle); a move is the Bid now against the period's first Bid, or over 24 h against the Bid 24 hours earlier (Friday's across a weekend). Live it updates every 2 s; in a replay it is measured at the replay's clock and never later. |
-| Strength indicator | The same method for every candle, in a pane under the chart, shown or hidden by the wave button at the bottom of the left toolbar (or **Show the strength indicator under the chart** in Analysis). **Day / Session / Week / 24 h** at the pane's top left choose the period: since 17:00 New York, since the current session opened (the journal's sessions), since Sunday 17:00 New York, or a rolling 24 hours that never starts again; all four are saved and the choice is remembered. A line per currency, its average move over the period at the candle's close; the legend gives each value with matches won (`2/3`) for the candle under the crosshair, else the latest, and a name hides or shows its line (gold, silver, WTI and Brent are there too, off at first). A candle carries the value at its last complete minute; the one still forming, at the last minute the clock has completed, so a replay never sees past its clock. Worked out in the background from every instrument's 1-minute candles and saved (see *The strength indicator*). |
+| Analysis | Currency strength over **Day / Session / Week / 24 h** (the choice is remembered): since 17:00 New York, since the current session opened (Asia 22:00, London 07:00, London/NY overlap 12:00, New York 16:00 UTC), since Sunday 17:00 New York, or over the last 24 hours, the same four as the indicator under the chart. USD, EUR, GBP and JPY play each other through the six pairs: EUR/USD up means EUR beat USD, USD/JPY down means JPY beat USD. Each currency's score is the matches it won (3 of 3 strong against all, 0 of 3 weak against all); equal scores go to the bigger average move, each pair's move taken from that currency's side. A row-against-column table shows every match, then each pair's move in % and pips. Each currency's main stock market (S&P 500, DAX 40, FTSE 100, Nikkei 225) is shown on its own under **Stock markets**, its move in % and points; gold, silver, WTI and Brent under **On their own**. Neither plays in the matches. The day opens at 17:00 New York (a New York + 7 broker's daily candle); a move is the Bid now against the period's first Bid, or over 24 h against the Bid 24 hours earlier (Friday's across a weekend). Live it updates every 2 s; in a replay it is measured at the replay's clock and never later. |
+| Strength indicator | The same method for every candle, in a pane under the chart, shown or hidden by the wave button at the bottom of the left toolbar (or **Show the strength indicator under the chart** in Analysis). **Day / Session / Week / 24 h** at the pane's top left choose the period: since 17:00 New York, since the current session opened (the journal's sessions), since Sunday 17:00 New York, or a rolling 24 hours that never starts again; all four are saved and the choice is remembered. A line per currency, its average move over the period at the candle's close; the legend gives each value with matches won (`2/3`) for the candle under the crosshair, else the latest, and a name hides or shows its line (gold, silver, WTI, Brent and the four stock indices are there too, off at first; each index is dashed in its currency's colour). A candle carries the value at its last complete minute; the one still forming, at the last minute the clock has completed, so a replay never sees past its clock. Worked out in the background from every instrument's 1-minute candles and saved (see *The strength indicator*). |
 | Replay | **Play**/**Pause** (Space), speeds 1x to max (a market day in ~3 s), **+1 candle** (Right), **+1 tick** (Shift+Right), **Jump** to a time. |
 | Live | The clock is the real clock; candles form as ticks arrive, and the clock shows how old the last tick is. No play or step: the market has its own clock. Every recorded tick reaches the quote and the broker in the order it was recorded, whatever its stamp says about this computer's clock (see *Live market data*). |
 | Bid and Ask | Candles are Bid. The price scale has a **Bid** label (red, the SELL side) and an **Ask** label (blue, the BUY side), each with a dotted line and named at the chart's edge. When the two are closer than a label's height (on a raw-spread account Ask often equals Bid) they stack: Ask always above, Bid below. Before, the Bid was the candles' own last-price label, coloured by the candle's direction, and the chart library put equal-priced labels on either side depending on which half of the chart the price was in, so the two seemed to swap as the market moved. |
@@ -73,8 +79,8 @@ a replay draws it as well as live. Every period is scored on the full
 sequence: each of the six pairs between USD, EUR, GBP and JPY is a match
 (EUR/USD up: EUR beat USD; USD/JPY down: JPY beat USD), each currency plays
 its three matches from its own pair moves, and is ranked on matches won,
-then on its average move. Gold, silver, WTI and Brent are measured over the
-same period on their own. Only where a move is measured from differs:
+then on its average move. Gold, silver, WTI, Brent and the four stock
+indices are measured over the same period on their own. Only where a move is measured from differs:
 
 | Period | A move is | Starts again |
 |---|---|---|
@@ -107,7 +113,7 @@ dropped to zero at every open; the rolling day came next.)
 - **Saved** in `store/strength/` (gitignored with the rest of `store/`):
   `m1/YYYY-MM.parquet`, a row per minute with, for each of the four
   periods, the four currencies' average move and matches won and played,
-  and gold, silver, WTI and Brent's move, in whole numbers of 0.001 %; `h1.parquet`, the last row of each hour, for
+  and gold, silver, WTI, Brent and the four stock indices' move, in whole numbers of 0.001 %; `h1.parquet`, the last row of each hour, for
   1H to 1D candles; `state.json`, a fingerprint of the candles each month
   was built from. Deleting the folder builds it again.
 - **Changing the method** (a version number in `strength.py`) builds every
@@ -353,7 +359,7 @@ only. Both default to zero and are printed with every session's results.
 .\.venv\Scripts\python.exe -m unittest discover -s simulator/tests -t .
 ```
 
-126 tests: no look-ahead, fill rules, profit in USD for each kind of
+129 tests: no look-ahead, fill rules, profit in USD for each kind of
 instrument, journal and statistics, the Dukascopy decoder, cleaning and
 resumable updater (against a fake datafeed), compact tick files and their
 migration, candles kept in step with their ticks, the calendar's clock rule
@@ -381,7 +387,7 @@ given a minute that had not closed by the clock).
 ```
 simulator/
   config.py           paths, port, flags, defaults
-  instruments.py      the ten instruments: digits, pip, lot, currencies
+  instruments.py      the fourteen instruments: digits, pip, lot, currencies
   analysis.py         currency strength for the Analysis panel
   strength.py         the same per minute: built in the background, saved
   __main__.py         launcher: one port, one instance

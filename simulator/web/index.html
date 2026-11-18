@@ -49,7 +49,7 @@
     <div class="spacer"></div>
     <div class="group">
       <button type="button" id="analysisBtn" class="replay-only" data-panel-btn="analysis" aria-controls="drawer" aria-expanded="false"
-        title="Currency strength over the day, the session, the week or 24 hours: USD, EUR, GBP and JPY against each other; gold, silver and oil on their own">Analysis</button>
+        title="Currency strength over the day, the session, the week or 24 hours: USD, EUR, GBP and JPY against each other; each one's stock market, gold, silver and oil on their own">Analysis</button>
       <button type="button" id="tradeBtn" class="replay-only" data-panel-btn="trade" aria-controls="drawer" aria-expanded="false" title="Order ticket, account, positions and orders">Trade</button>
       <button type="button" id="quotesBtn" class="replay-only" data-panel-btn="quotes" aria-controls="drawer" aria-expanded="false" title="Live quotes from your MT5 terminal, tick by tick">Quotes</button>
       <button type="button" id="dataBtn" class="replay-only datachip" data-panel-btn="data" aria-controls="drawer" aria-expanded="false" title="Market data: history updates and live recording">
@@ -213,6 +213,10 @@
           <table class="t antable" id="anPairs"></table>
         </section>
         <section class="panel">
+          <h3>Stock markets <span class="faint">each currency's main index</span></h3>
+          <table class="t antable" id="anIndices"></table>
+        </section>
+        <section class="panel">
           <h3>On their own <span class="faint">not in the matches</span></h3>
           <table class="t antable" id="anOthers"></table>
         </section>
@@ -221,8 +225,9 @@
           go to the bigger average move (each pair's move taken from that currency's side). A move is the Bid now against the
           period's first Bid: the day opens at 17:00 New York, like the daily candle of a broker on New York + 7 h; a session at
           22:00, 07:00, 12:00 or 16:00 UTC; the week on Sunday at 17:00 New York. Over 24 h it is the Bid now against the Bid
-          24 hours earlier (Friday's across a weekend). The indicator under the chart has the same four. A replay is measured
-          at its own clock, never later.</p>
+          24 hours earlier (Friday's across a weekend). Each currency's main stock market (S&amp;P 500, DAX 40, FTSE 100, Nikkei
+          225), gold, silver and oil are measured the same way, each in its own price, and play no matches. The indicator
+          under the chart has the same four periods and the same lines. A replay is measured at its own clock, never later.</p>
       </section>
 
       <section class="dpanel hidden" data-panel="quotes" id="quotesPanel" aria-label="Live quotes">

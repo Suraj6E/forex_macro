@@ -122,12 +122,16 @@
   // ---------------------------------------------------------------- chart
 
   // The strength indicator's lines, in the order the server sends them
-  // (strength.KEYS); the four currencies show unless switched off.
+  // (strength.KEYS); the four currencies show unless switched off. Each
+  // stock index is drawn dashed in its currency's colour: eight hues are
+  // as many as stay apart, and the pairing says whose market it is.
   var IND_KEYS = [
     { key: "USD", label: "USD", color: "--s1" }, { key: "EUR", label: "EUR", color: "--s2" },
     { key: "GBP", label: "GBP", color: "--s3" }, { key: "JPY", label: "JPY", color: "--s4" },
     { key: "XAUUSD", label: "Gold", color: "--s5" }, { key: "XAGUSD", label: "Silver", color: "--s6" },
-    { key: "WTI", label: "WTI", color: "--s7" }, { key: "BRENT", label: "Brent", color: "--s8" }
+    { key: "WTI", label: "WTI", color: "--s7" }, { key: "BRENT", label: "Brent", color: "--s8" },
+    { key: "US500", label: "S&P 500", color: "--s1", dash: true }, { key: "GER40", label: "DAX", color: "--s2", dash: true },
+    { key: "UK100", label: "FTSE", color: "--s3", dash: true }, { key: "JP225", label: "Nikkei", color: "--s4", dash: true }
   ];
   var LS_IND = "sim-ind", LS_IND_KEYS = "sim-ind-keys", LS_IND_MODE = "sim-ind-mode";
   // The period strength is measured over (server: strength.MODES).
@@ -573,7 +577,7 @@
         var v = st && st.s ? st.s[i] : null;
         var won = i < 4 && st && st.w && st.w.length ? " <small>" + st.w[2 * i] + "/" + st.w[2 * i + 1] + "</small>" : "";
         return "<button type='button' data-ind='" + k.key + "' class='" + (k.on ? "" : "off") + "' aria-pressed='" + k.on + "'" +
-          " title='" + (k.on ? "Hide " : "Show ") + k.label + "'><i style='background:var(" + k.color + ")'></i>" + k.label +
+          " title='" + (k.on ? "Hide " : "Show ") + esc(k.label) + "'><i class='" + (k.dash ? "dash" : "") + "' style='--c:var(" + k.color + ")'></i>" + esc(k.label) +
           " <b>" + (v === null || v === undefined ? "–" : pct2(v)) + "</b>" + won + "</button>";
       }).join("") +
       (st && st.s ? "" : "<span>" + esc(hovering ? "No value for this candle." : indStatusText() || "No values here yet.") + "</span>");
@@ -669,18 +673,23 @@
 
     function rows(list, last) {
       return list.map(function (p) {
+        // A stock index names its currency; its price shows to two decimals.
+        var name = "<b>" + esc(p.label) + "</b>" + (p.currency ? " <span class='faint'>" + esc(p.currency) + "</span>" : "");
+        var dg = p.currency ? 2 : p.digits;
         if (p.state !== "ok") {
-          return "<tr><td><b>" + esc(p.label) + "</b></td><td colspan='3' class='faint'>" +
+          return "<tr><td>" + name + "</td><td colspan='3' class='faint'>" +
             (p.state === "no data" ? "no data yet" : (d.period === "rolling" ? "no Bid 24 hours earlier" : "no ticks " + word) +
               (p.last_ms ? " · last " + fmtTime(p.last_ms) : "")) + "</td></tr>";
         }
-        return "<tr><td><b>" + esc(p.label) + "</b></td><td class='n'>" + p.last.toFixed(p.digits) + "</td>" +
+        return "<tr><td>" + name + "</td><td class='n'>" + p.last.toFixed(dg) + "</td>" +
           "<td class='n'>" + arrow(p.change_pct) + pct2(p.change_pct) + "</td><td class='n'>" + last(p) + "</td></tr>";
       }).join("");
     }
     var col = AN_PERIODS[d.period] || "Today";
     $("anPairs").innerHTML = "<thead><tr><th>Pair</th><th class='n'>Bid</th><th class='n'>" + col + "</th><th class='n'>Pips</th></tr></thead><tbody>" +
       rows(d.pairs || [], function (p) { return signed(p.pips, 1); }) + "</tbody>";
+    $("anIndices").innerHTML = "<thead><tr><th></th><th class='n'>Bid</th><th class='n'>" + col + "</th><th class='n'>Points</th></tr></thead><tbody>" +
+      rows(d.indices || [], function (p) { return signed(p.change, 1); }) + "</tbody>";
     $("anOthers").innerHTML = "<thead><tr><th></th><th class='n'>Bid</th><th class='n'>" + col + "</th><th class='n'>Change</th></tr></thead><tbody>" +
       rows(d.others || [], function (p) { return signed(p.change, p.digits >= 3 ? 2 : p.digits); }) + "</tbody>";
   }
@@ -691,7 +700,8 @@
     if (!INST) return;
     var a = S.book && S.book.account;
     var pv = a && a.pip_value ? " · pip " + a.pip_value.toFixed(2) + " USD/lot" : "";
-    $("lotInfo").textContent = "1 lot = " + num(INST.contract) + " " + INST.unit + pv;
+    // An index lot is money a point: "1 lot = 1 USD a point".
+    $("lotInfo").textContent = "1 lot = " + num(INST.contract) + " " + (INST.kind === "index" ? INST.quote + " a point" : INST.unit) + pv;
     $("lotInfo").title = "One pip is " + INST.pip + " in price. Pip value in USD at the current price.";
   }
 

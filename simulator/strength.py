@@ -7,8 +7,9 @@ each of the six pairs between USD, EUR, GBP and JPY is a match between its
 two currencies (EUR/USD up: EUR beat USD; USD/JPY down: JPY beat USD), each
 currency plays its three matches from its own pair moves, and is scored on
 matches won, then on its average move (each pair's move taken from its
-side), as in analysis.py. Gold, silver and the two oils are measured over
-the same period on their own. Only where a move is measured from differs:
+side), as in analysis.py. Gold, silver, the two oils and the four stock
+indices (S&P 500, DAX, FTSE 100, Nikkei) are measured over the same period
+on their own. Only where a move is measured from differs:
 
   day      since 17:00 New York, the FX day's open (the Analysis panel's
            "today"); starts again every day
@@ -67,21 +68,22 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
-from simulator.analysis import CURRENCIES, ON_THEIR_OWN, PAIRS
+from simulator.analysis import CURRENCIES, INDICES, ON_THEIR_OWN, PAIRS
 from simulator.data.bars import bars_from_ticks
 from simulator.data.ticks import NS_PER_SECOND
 from simulator.instruments import INSTRUMENTS
 from simulator.live.mt5rec import us_dst, week_open_ms
 
 #: Bumped when the calculation or the files change: every month is built again.
-VERSION = 4
+VERSION = 5  # 5: the four stock indices
 DAY = 86_400
 HOUR = 3_600
 MINUTE = 60
-SYMBOLS = PAIRS + ON_THEIR_OWN
+SYMBOLS = PAIRS + ON_THEIR_OWN + INDICES
 #: What each candle carries, in this order: the currencies' average move,
-#: then gold, silver, WTI and Brent's move, all in percent.
-KEYS = CURRENCIES + ON_THEIR_OWN
+#: then gold, silver, WTI and Brent's move, then the S&P 500, DAX, FTSE 100
+#: and Nikkei's, all in percent.
+KEYS = CURRENCIES + ON_THEIR_OWN + INDICES
 #: The periods, in the order the page offers them.
 MODES = ("day", "session", "week", "rolling")
 DEFAULT_MODE = "rolling"

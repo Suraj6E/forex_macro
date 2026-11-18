@@ -141,6 +141,7 @@
         lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false });
       indLines = IND_KEYS.map(function (k) {
         return ind.addLineSeries({ color: cssVar(k.color), lineWidth: 2, title: k.label, visible: !!k.on,
+          lineStyle: k.dash ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
           priceLineVisible: false, crosshairMarkerVisible: false, priceFormat: { type: "custom", formatter: pct, minMove: 0.001 } });
       });
     }

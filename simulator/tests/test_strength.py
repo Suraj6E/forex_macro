@@ -19,7 +19,8 @@ from simulator.journal import stats
 from simulator.live.mt5rec import us_dst
 
 START = {"EURUSD": 1.1, "GBPUSD": 1.3, "USDJPY": 150.0, "EURJPY": 165.0, "GBPJPY": 195.0, "EURGBP": 0.85,
-         "XAUUSD": 2650.0, "XAGUSD": 31.0, "WTI": 70.0, "BRENT": 74.0}
+         "XAUUSD": 2650.0, "XAGUSD": 31.0, "WTI": 70.0, "BRENT": 74.0,
+         "US500": 6700.0, "GER40": 24000.0, "UK100": 9600.0, "JP225": 50000.0}
 DAY = 86_400
 
 
@@ -76,7 +77,7 @@ def by_hand(bars, g, mode):
     """One minute plainly: per instrument its move over the period (or the
     rolling day), then the panel's own ranking of the six matches."""
     rows = []
-    for sym in analysis.PAIRS + analysis.ON_THEIR_OWN:
+    for sym in analysis.SYMBOLS:
         t, o, c = bars[sym]
         inst = INSTRUMENTS[sym]
         row = {"symbol": sym, "base": inst.base, "quote": inst.quote, "state": "no data"}
@@ -149,7 +150,7 @@ class Periods(unittest.TestCase):
                                      (r["wins"], r["played"]), (mode, g, c))
                     if r["avg_pct"] is not None:
                         self.assertAlmostEqual(float(self.rows[f"{mode}_{c}"][i]), r["avg_pct"], places=4)
-                for r in panel["others"]:
+                for r in panel["others"] + panel["indices"]:
                     v = float(self.rows[f"{mode}_{r['symbol']}"][i])
                     if r["state"] == "ok":
                         self.assertAlmostEqual(v, r["change_pct"], places=4, msg=(mode, g, r["symbol"]))

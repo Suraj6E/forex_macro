@@ -41,9 +41,11 @@ AT = ns("2026-11-17T10:00")
 #: Day moves in percent. USD beats everyone; EUR everyone but USD; GBP
 #: beats JPY only.
 MOVES = {"EURUSD": -0.30, "GBPUSD": -0.50, "USDJPY": +0.40, "EURJPY": +0.10, "GBPJPY": +0.05, "EURGBP": +0.20,
-         "XAUUSD": +1.2, "XAGUSD": -0.4, "WTI": -2.0, "BRENT": -1.5}
+         "XAUUSD": +1.2, "XAGUSD": -0.4, "WTI": -2.0, "BRENT": -1.5,
+         "US500": +0.8, "GER40": -0.6, "UK100": +0.1, "JP225": -1.1}
 START = {"EURUSD": 1.1, "GBPUSD": 1.3, "USDJPY": 150.0, "EURJPY": 165.0, "GBPJPY": 195.0, "EURGBP": 0.85,
-         "XAUUSD": 2650.0, "XAGUSD": 31.0, "WTI": 70.0, "BRENT": 74.0}
+         "XAUUSD": 2650.0, "XAGUSD": 31.0, "WTI": 70.0, "BRENT": 74.0,
+         "US500": 6700.0, "GER40": 24000.0, "UK100": 9600.0, "JP225": 50000.0}
 
 
 def market(moves=MOVES, after=None):
@@ -80,6 +82,14 @@ class Strength(unittest.TestCase):
         own = {r["symbol"]: round(r["change_pct"], 6) for r in out["others"]}
         self.assertEqual(own, {"XAUUSD": 1.2, "XAGUSD": -0.4, "WTI": -2.0, "BRENT": -1.5})
         self.assertEqual(sum(r["played"] for r in out["currencies"]), 12)  # six pairs, two sides each
+
+    def test_each_currencys_stock_market_stands_on_its_own(self):
+        out = analysis.measure(market(), AT)
+        idx = [(r["symbol"], r["currency"], round(r["change_pct"], 6)) for r in out["indices"]]
+        self.assertEqual(idx, [("US500", "USD", 0.8), ("GER40", "EUR", -0.6), ("UK100", "GBP", 0.1), ("JP225", "JPY", -1.1)])
+        # The S&P up and the Nikkei down change nothing in the matches.
+        self.assertEqual([r["currency"] for r in out["currencies"]], ["USD", "EUR", "GBP", "JPY"])
+        self.assertAlmostEqual(out["indices"][0]["change"], 6700.0 * 0.008, places=2)  # in index points
 
     def test_nothing_after_the_clock_is_read(self):
         # A tick a minute after the clock reverses everything; it must not count.
