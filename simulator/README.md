@@ -192,6 +192,12 @@ terminal**, then open that terminal yourself.
   These include any difference between this computer's clock and the
   broker's: this PC's clock ran 0.4 s ahead (16 Nov 2026, Windows Time
   service stopped).
+- **Live chart updates** (top of Quotes): Real time, 0.5 s, 1 s or 2 s,
+  remembered. A live session's chart (candles, the Bid and Ask lines, the
+  OHLC readout) redraws at most that often; every tick still counts, the
+  newest candles waiting and drawn together, so a candle that closed in
+  between is never lost. The ticket, the one-click prices, P&L and the
+  Quotes board stay tick by tick, and a replay always draws at once.
 - **Broker history.** A terminal keeps only a small buffer of recent ticks
   on disk (FTMO's held 124 KB per symbol, plus one month of EUR/USD); older
   ones come from the broker's server when asked for. Between live polls the

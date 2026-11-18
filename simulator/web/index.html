@@ -232,6 +232,15 @@
 
       <section class="dpanel hidden" data-panel="quotes" id="quotesPanel" aria-label="Live quotes">
         <div class="phead"><h2>Live quotes <span class="faint" id="qSource"></span></h2><button type="button" class="ghost pclose" title="Hide (Esc)" aria-label="Hide">×</button></div>
+        <div class="chartrate" title="How often a live session's chart redraws: candles, the Bid and Ask lines and the OHLC readout. Every tick still counts; the ticket, the one-click prices, P&amp;L and this table stay tick by tick. A replay always draws at once.">
+          <span class="muted">Live chart updates</span>
+          <div class="seg chartrates" id="chartRates" role="group" aria-label="Live chart updates">
+            <button type="button" data-rate="0" title="Every tick, as it arrives">Real time</button>
+            <button type="button" data-rate="500" title="At most twice a second">0.5 s</button>
+            <button type="button" data-rate="1000" title="At most once a second">1 s</button>
+            <button type="button" data-rate="2000" title="At most every 2 seconds">2 s</button>
+          </div>
+        </div>
         <div class="tablewrap"><table class="t qt">
           <thead><tr><th>Instrument</th><th class="n">Bid</th><th class="n">Ask</th><th class="n">Spread</th><th class="n" title="Since the broker stamped the latest tick, by this computer's clock">Last tick</th><th class="n">Today</th><th></th></tr></thead>
           <tbody id="qBody"></tbody>

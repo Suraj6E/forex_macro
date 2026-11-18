@@ -325,6 +325,9 @@ table.qt td.px.up { color: var(--pos); transition: none; }
 table.qt td.px.down { color: var(--neg); transition: none; }
 table.qt td.stale { color: var(--faint); }
 table.qt button { padding: 2px 8px; font-size: 11px; }
+.chartrate { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.chartrate .seg { margin: 0; flex: 0 1 260px; }
+.chartrates button { padding: 3px 8px; font-size: 12px; white-space: nowrap; }
 #qNote { margin: 0; }
 .form .seg { margin-bottom: 0; }
 .form .live-only-field:empty { display: none; }

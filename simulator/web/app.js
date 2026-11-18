@@ -252,6 +252,7 @@
         toast(m.message);
         break;
       case "session":
+        dropChartFrame();
         S.session = m.session;
         S.attached = true;
         setInstrument(m.session.instrument);
@@ -272,6 +273,7 @@
         loadTrades();
         break;
       case "history":
+        dropChartFrame(); // a whole new chart, quote included, drawn at once
         S.status = m.status;
         setTimeframe(m.status.timeframe);
         C.setHistory(m.bars, S.tfSeconds);
@@ -280,6 +282,7 @@
         S.olderDone = false; S.loadingOlder = false;
         C.scrollToEnd();
         D.setAll(m.drawings);
+        C.setQuote(m.quote);
         onQuote(m.quote);
         onBook(m.book);
         onStatus(m.status);
@@ -288,16 +291,16 @@
         break;
       case "frame":
         onStatus(m.status);
-        if (m.status.timeframe === S.chartTf && m.bars.length) {
-          C.updateBars(m.bars);
-          lastBar = m.bars[m.bars.length - 1];
-          showOhlc(null);
-        }
+        chartFrame(m.status.timeframe === S.chartTf ? m.bars : null, m.quote); // candles and quote drawn together
         onQuote(m.quote);
         onBook(m.book);
         break;
       case "strength":
-        if (m.timeframe === S.chartTf && (!m.mode || m.mode === IND_MODE)) C.setStrengths(m.bars);
+        if (m.timeframe === S.chartTf && (!m.mode || m.mode === IND_MODE)) {
+          // Candles still waiting would bring back the values these correct.
+          if (CR.timer) drawChartFrame();
+          C.setStrengths(m.bars);
+        }
         break;
       case "older":
         S.loadingOlder = false;
@@ -350,10 +353,71 @@
     N.onClock(st.sim_ms);
   }
 
+  // ---------------------------------------------------------------- live chart rate
+
+  // A live session's chart (candles, Bid and Ask lines, the OHLC readout)
+  // is drawn at most this often, in ms; 0 is real time, every tick as it
+  // arrives. Chosen in the Quotes panel and remembered. Every frame is still
+  // taken in: the newest candles and quote wait and are drawn together, so a
+  // candle that closed in between is never lost. The ticket, the one-click
+  // prices, P&L and the Quotes table stay tick by tick; a replay is always
+  // drawn at once (its speed sets the pace).
+  var LS_CHART_RATE = "sim-chart-rate", CHART_RATES = [0, 500, 1000, 2000];
+  var CR = { ms: parseInt(stored("localStorage", LS_CHART_RATE), 10) || 0, bars: {}, quote: null, timer: null, drawnAt: 0 };
+  if (CHART_RATES.indexOf(CR.ms) < 0) CR.ms = 0;
+
+  function chartFrame(bars, quote) {
+    if (bars) bars.forEach(function (b) { CR.bars[b.time] = b; });
+    if (quote) CR.quote = quote;
+    if (!CR.quote && !Object.keys(CR.bars).length) return;
+    var live = S.session && S.session.mode === "live";
+    var wait = live ? CR.ms - (performance.now() - CR.drawnAt) : 0;
+    if (wait <= 0) drawChartFrame();
+    else if (!CR.timer) CR.timer = setTimeout(drawChartFrame, wait);
+  }
+  function drawChartFrame() {
+    clearTimeout(CR.timer);
+    CR.timer = null;
+    CR.drawnAt = performance.now();
+    var times = Object.keys(CR.bars);
+    if (times.length) {
+      var bars = times.map(function (t) { return CR.bars[t]; }).sort(function (a, b) { return a.time - b.time; });
+      CR.bars = {};
+      C.updateBars(bars);
+      lastBar = bars[bars.length - 1];
+      showOhlc(null);
+    }
+    if (CR.quote) { C.setQuote(CR.quote); CR.quote = null; }
+  }
+  // A new chart replaces whatever was waiting; the next frame draws at once.
+  function dropChartFrame() {
+    clearTimeout(CR.timer);
+    CR.timer = null;
+    CR.bars = {};
+    CR.quote = null;
+    CR.drawnAt = 0;
+  }
+  function showChartRate() {
+    document.querySelectorAll("#chartRates [data-rate]").forEach(function (b) {
+      var on = +b.dataset.rate === CR.ms;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+  showChartRate();
+  $("chartRates").onclick = function (e) {
+    var b = e.target.closest("[data-rate]");
+    if (!b || +b.dataset.rate === CR.ms) return;
+    CR.ms = +b.dataset.rate;
+    store("localStorage", LS_CHART_RATE, CR.ms ? String(CR.ms) : null);
+    showChartRate();
+    if (CR.timer) { clearTimeout(CR.timer); CR.timer = null; chartFrame(null, null); } // on the new rate
+  };
+
+  // Everything but the chart, tick by tick (the chart: chartFrame).
   function onQuote(q) {
     if (!q) return;
     S.quote = q;
-    C.setQuote(q);
     $("bidPx").textContent = px(q.bid);
     $("askPx").textContent = px(q.ask);
     $("spreadPx").textContent = ((q.ask - q.bid) / PIP).toFixed(1);
@@ -1531,6 +1595,7 @@
       S.reviewTrade = t;
       if (data.instrument) setInstrument(data.instrument);
       S.session = { id: r.sid, hide_dates: !!data.hide_dates };
+      dropChartFrame();
       C.setHideDates(!!data.hide_dates);
       setTimeframe(tf);
       C.setHistory(data.bars, data.seconds);
