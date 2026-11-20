@@ -50,6 +50,8 @@
     <div class="group">
       <button type="button" id="analysisBtn" class="replay-only" data-panel-btn="analysis" aria-controls="drawer" aria-expanded="false"
         title="Currency strength over the day, the session, the week or 24 hours: USD, EUR, GBP and JPY against each other; each one's stock market, gold, silver and oil on their own">Analysis</button>
+      <button type="button" id="strategiesBtn" class="replay-only" data-panel-btn="strategies" aria-controls="drawer" aria-expanded="false"
+        title="Six trading concepts on the chart, and the routine's setups: side, level and zone, room, failure, entry">Strategies</button>
       <button type="button" id="tradeBtn" class="replay-only" data-panel-btn="trade" aria-controls="drawer" aria-expanded="false" title="Order ticket, account, positions and orders">Trade</button>
       <button type="button" id="quotesBtn" class="replay-only" data-panel-btn="quotes" aria-controls="drawer" aria-expanded="false" title="Live quotes from your MT5 terminal, tick by tick">Quotes</button>
       <button type="button" id="dataBtn" class="replay-only datachip" data-panel-btn="data" aria-controls="drawer" aria-expanded="false" title="Market data: history updates and live recording">
@@ -234,6 +236,37 @@
           under the chart has the same four periods and the same lines. A replay is measured at its own clock, never later.</p>
       </section>
 
+      <section class="dpanel hidden" data-panel="strategies" aria-label="Strategies">
+        <div class="phead"><h2>Strategies <span class="faint" id="stWhen"></span></h2><button type="button" class="ghost pclose" title="Hide" aria-label="Hide">×</button></div>
+        <div class="stlist" id="stConcepts" role="group" aria-label="Concepts on the chart and in the setups"></div>
+        <div class="stopts">
+          <button type="button" id="stAll" title="Every concept on (the default)">All six</button>
+          <button type="button" id="stNone" title="No strategy: nothing drawn, no setups">None</button>
+          <label title="The fixed first target">Target <input type="number" id="stTarget" min="1" step="1"> pips</label>
+          <label title="A setup whose stop would need more is skipped">Max stop <input type="number" id="stMaxStop" min="1" step="1"> pips</label>
+          <label title="The volume profile's period">Profile <select id="stProfile">
+            <option value="session">this session and the last</option>
+            <option value="day">today (from 17:00 New York)</option>
+            <option value="rolling">the last 24 hours</option>
+          </select></label>
+        </div>
+        <section class="stsec">
+          <h3>The routine now</h3>
+          <ol class="ststeps" id="stNow"></ol>
+        </section>
+        <section class="stsec">
+          <h3>Setups <span class="faint" id="stSummary"></span></h3>
+          <label class="check tiny"><input type="checkbox" id="stSkipped"> Show skipped setups, with the check that stopped each</label>
+          <div id="stSetups"></div>
+        </section>
+        <p class="tiny muted">A setup: price reaches a level or zone (a level is swept: through it and a 15-minute close back), then a 1-minute candle
+          closes back through the last small low before the push's extreme. Entry is a limit at the level or the zone's near edge (at market
+          when price is already past it), the stop 1.5 pips behind the push or the zone, whichever is farther, the target fixed. Steps 1 and 3 check the side (daily EMA, else the range's
+          halves, from the day's open) and the room (volume profile). Results are what the recorded prices would have done: fills at Bid or Ask,
+          a limit waits an hour, a candle that reaches stop and target counts as the stop. These are rules to test, not trades or advice; only candles
+          closed by the clock are used, so a replay sees what you could have seen then.</p>
+      </section>
+
       <section class="dpanel hidden" data-panel="quotes" id="quotesPanel" aria-label="Live quotes">
         <div class="phead"><h2>Live quotes <span class="faint" id="qSource"></span></h2><button type="button" class="ghost pclose" title="Hide (Esc)" aria-label="Hide">×</button></div>
         <div class="chartrate" title="How often a live session's chart redraws: candles, the Bid and Ask lines and the OHLC readout. Every tick still counts; the ticket, the one-click prices, P&amp;L and this table stay tick by tick. A replay always draws at once.">
@@ -339,6 +372,7 @@
 <script src="/static/chart.js"></script>
 <script src="/static/drawings.js"></script>
 <script src="/static/news.js"></script>
+<script src="/static/strategies.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

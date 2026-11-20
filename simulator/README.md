@@ -53,10 +53,11 @@ One-time install, if the venv predates the simulator:
 |---|---|
 | One screen | Opening the page shows the market: **live** when the recorder is streaming the instrument, else a **replay at the latest date** (00:00 UTC of the last weekday with data). The instrument picker (● streaming now) and **Live / Replay** in the top bar switch in place. Switching instruments keeps the mode, and in replay the date when the other instrument has data then. The calendar button (or a click on the clock) picks a date: in replay it jumps there, live it opens a replay from there. A reload keeps the tab where it was; a new tab opens on the market again. |
 | Sessions | Behind the screen, each instrument and mode is a session with its own account. Live resumes the instrument's live session; replay resumes one with open positions or orders, else starts at the date. A session the screen opened in which nothing was done (no order, note or drawing) is removed on leaving it, so switching does not fill the journal. **Sessions** sets one up by hand: **Data** (Dukascopy or your broker's), a start time or **Random**, **Hide dates**, balance, leverage, commission, slippage; those are never removed. |
-| Side panel | **Analysis**, **Trade**, **Quotes**, **Data** and **Sessions** (top right) slide a panel in from the right and hide it again; the chart makes room rather than being covered. One at a time. Trade, Analysis and Quotes are remembered across visits (Trade the first time); Sessions and Market data close back to the panel you had open, and Esc closes them. |
+| Side panel | **Analysis**, **Strategies**, **Trade**, **Quotes**, **Data** and **Sessions** (top right) slide a panel in from the right and hide it again; the chart makes room rather than being covered. One at a time. Trade, Analysis, Strategies and Quotes are remembered across visits (Trade the first time); Sessions and Market data close back to the panel you had open, and Esc closes them. |
 | Trade | The order ticket, account, positions, pending orders, last closed trade and session notes. **Show one-click trading on the chart** puts **SELL** / lots / **BUY** at the chart's top left (the calendar filter moves below it): one click is a market order, no ticket. The setting and the lots are remembered. **Show trade history on the chart** (on unless switched off) shows this session's closed trades: entry arrows and exits with their reason and pips. Open positions always show. |
 | Analysis | Currency strength over **Day / Session / Week / 24 h** (the choice is remembered): since 17:00 New York, since the current session opened (Asia 22:00, London 07:00, London/NY overlap 12:00, New York 16:00 UTC), since Sunday 17:00 New York, or over the last 24 hours, the same four as the indicator under the chart. USD, EUR, GBP and JPY play each other through the six pairs: EUR/USD up means EUR beat USD, USD/JPY down means JPY beat USD. Each currency's score is the matches it won (3 of 3 strong against all, 0 of 3 weak against all); equal scores go to the bigger average move, each pair's move taken from that currency's side. A row-against-column table shows every match, then each pair's move in % and pips. Each currency's main stock market (S&P 500, DAX 40, FTSE 100, Nikkei 225) is shown on its own under **Stock markets**, its move in % and points; gold, silver, WTI and Brent under **On their own**. Neither plays in the matches. The day opens at 17:00 New York (a New York + 7 broker's daily candle); a move is the Bid now against the period's first Bid, or over 24 h against the Bid 24 hours earlier (Friday's across a weekend). Live it updates every 2 s; in a replay it is measured at the replay's clock and never later. |
 | Strength indicator | The same method for every candle, in a pane under the chart, shown or hidden by the wave button at the bottom of the left toolbar (or **Show the strength indicator under the chart** in Analysis). **Day / Session / Week / 24 h** at the pane's top left choose the period: since 17:00 New York, since the current session opened (the journal's sessions), since Sunday 17:00 New York, or a rolling 24 hours that never starts again; all four are saved and the choice is remembered. A line per currency, its average move over the period at the candle's close; the legend gives each value with matches won (`2/3`) for the candle under the crosshair, else the latest, and a name hides or shows its line (gold, silver, WTI, Brent and the four stock indices are there too, off at first; each index is dashed in its currency's colour). A candle carries the value at its last complete minute; the one still forming, at the last minute the clock has completed, so a replay never sees past its clock. Worked out in the background from every instrument's 1-minute candles and saved (see *The strength indicator*). |
+| Strategies | The six concepts of *Six Trading Concepts on Real EURUSD* on the chart, and the routine's setups (see *Strategies*). All six are on at first; each can be switched off, and **None** switches them all off. |
 | Replay | **Play**/**Pause** (Space), speeds 1x to max (a market day in ~3 s), **+1 candle** (Right), **+1 tick** (Shift+Right), **Jump** to a time. |
 | Live | The clock is the real clock; candles form as ticks arrive, and the clock shows how old the last tick is. No play or step: the market has its own clock. Every recorded tick reaches the quote and the broker in the order it was recorded, whatever its stamp says about this computer's clock (see *Live market data*). |
 | Bid and Ask | Candles are Bid. The price scale has a **Bid** label (red, the SELL side) and an **Ask** label (blue, the BUY side), each with a dotted line and named at the chart's edge. When the two are closer than a label's height (on a raw-spread account Ask often equals Bid) they stack: Ask always above, Bid below. Before, the Bid was the candles' own last-price label, coloured by the candle's direction, and the chart library put equal-priced labels on either side depending on which half of the chart the price was in, so the two seemed to swap as the market moved. |
@@ -124,6 +125,68 @@ dropped to zero at every open; the rolling day came next.)
   53 s and wrote 85 MB; a live round takes about a second. The files are read with
   the system allocator: Arrow's default one kept what it freed, and the
   build held 665 MB instead of about 140 MB.
+
+## Strategies
+
+The **Strategies** tab turns the six concepts of *Six Trading Concepts on
+Real EURUSD* (14 Nov 2026) into written rules (`strategies.py`), works them
+out at the session's clock from candles complete by then, draws them, and
+runs the PDF's routine to find setups. The same rules run in a replay and
+live: a replay asks again when its clock moves (at most once a second),
+live every 2 s; nothing is read after the clock, and everything carries
+the time it became known.
+
+| Concept | Rule | On the chart |
+|---|---|---|
+| Liquidity sweep | Yesterday's high and low (FX day, 17:00 New York), equal highs and lows on the 1-hour chart (two swings within a quarter of a 1-hour average range, nothing higher between), the 20-day range's edges. A **sweep** trades through and closes back on a 15-minute candle; a 15-minute close beyond is a **break**, and the level is gone. | Dashed amber levels; a filled triangle for a sweep, an outline for a break |
+| Smart Money Concepts | 1-hour swings (two candles each side); a close beyond the latest unbroken one is a **break of structure**, against the trend so far a **change of character**. The **order block** is the last candle the other way before the break, all of its range; a **fair value gap** is three candles whose first and third do not meet (at least 0.3 average ranges). **Premium and discount** are the halves of the 20-day range. | Violet dashed boxes, pink gap boxes, BOS and CHoCH lines |
+| Supply and demand | A strong move: one to three 1-hour candles the same way, each body at least half its range, 1.5 average ranges in all. The zone is its base, from the extreme wick to the body of the last candle before it, at most one average range tall. Returns are counted; only the first two count for a setup, and a close through breaks it. | Red supply and blue demand boxes with their visits |
+| Price action | The PDF's count over the last 10 candles (up-bodies under half the down-bodies and three up-candles with an upper wick longer than the body: sellers stronger); a **wide candle** (body 1.2 times the 20 before, closing in the last 40 % of its range); **absorption**: tick volume 1.5 times the same minute (plus or minus 2) on the 5 days before, with a body under 35 % of the range. | Orange rings on absorption candles |
+| EMA 20, daily | EMA of FX-day closes, k = 2/(N+1), started from the first 20 days' average. Falling (over 5 days) with the day opening below it: sells only; rising with the day above it: buys only. Flat (it moved less than a fifth of a day's average range in 5 days), or the open on the other side: the range's halves decide, sells in the upper half, buys in the lower. Decided once a day from the day's open, as the PDF's routine does. | Teal steps: each day's closing value drawn over the next day |
+| Volume profile | Tick volume per price from 1-minute candles over this session and the one before (or today, or 24 h), each candle's volume spread over its range, about 80 rows. The value area grows from the point of control two rows at a time on the busier side to 70 % (the Market Profile rule). | Rows on the right edge, the POC line, VAH and VAL dotted |
+
+On the chart: the three nearest active areas on each side of price, levels
+and areas that ended in the last four hours (faint), the latest four breaks
+of structure.
+
+**The routine** (the PDF's five steps) makes a setup when price reaches a
+level or zone (a level counts once it is swept, at the 15-minute close back)
+and, within the hour, a 1-minute candle closes back through the last small
+low (high, for a buy) before the push's extreme:
+
+1. **Side**: the EMA rule, else the range's halves (EMA or SMC on).
+2. **Level and zone**: what was reached; all of them when several were.
+3. **Room** (profile on): from above the value area there is room down to
+   it, inside it down to the point of control; under the point of control
+   none; below the value area it is open (price left the profile). Room
+   must reach the target.
+4. **Failure**: the close through the last small low; with price action on,
+   a wide candle closing through it. Absorption in the push is shown, not
+   required.
+5. **Entry**: a limit at the swept level or the zone's near edge (at market
+   when price is already past it), the stop 1.5 pips behind the push or the
+   zone's far edge, whichever is farther ("let the zone set the stop"), and
+   a fixed 10-pip target. A stop over 10 pips: skipped.
+
+A setup failing a check is **skipped** and says which (**Show skipped**).
+The others are followed on the recorded prices: a sell limit fills when the
+Bid reaches it and closes at the Ask (Bid plus the candle's spread); a limit
+waits an hour; a candle reaching stop and target counts as the stop, and
+the candle that fills counts no win. **Fill the ticket** puts a setup still
+open into the Trade ticket, to check and send yourself: nothing is ever
+sent by itself. The target, the largest stop and the profile's period are
+settings; they and the concepts switched on are remembered in the browser.
+With every concept off (**None**) nothing is drawn and there are no setups;
+with only EMA, price action or the profile on there are none either, since a
+setup needs a level or a zone.
+
+Six weeks of Dukascopy EUR/USD (5 Oct to 18 Nov 2026): 314 setups, 13
+passed every check: 5 won (+10 each), 4 lost, 3 expired, 1 still open, +18
+pips. Room stopped the most (240), then the side (144), the stop (122:
+1-hour zones are often taller than 10 pips) and the wide candle (116). With
+the stop behind the push only, 27 passed for +50 pips. Far too few to say
+anything: the PDF asks for at least 40 trades with the rules written down
+first, and these are those rules.
 
 ## The economic calendar
 
@@ -375,7 +438,7 @@ only. Both default to zero and are printed with every session's results.
 .\.venv\Scripts\python.exe -m unittest discover -s simulator/tests -t .
 ```
 
-129 tests: no look-ahead, fill rules, profit in USD for each kind of
+146 tests: no look-ahead, fill rules, profit in USD for each kind of
 instrument, journal and statistics, the Dukascopy decoder, cleaning and
 resumable updater (against a fake datafeed), compact tick files and their
 migration, candles kept in step with their ticks, the calendar's clock rule
@@ -393,7 +456,12 @@ stale feed, and nothing read after the clock); the strength indicator
 the panel, the sessions against the journal's, each period starting
 again where it should and nowhere else, Friday's close after the weekend,
 the source per day, months built again only when changed, and no candle
-given a minute that had not closed by the clock).
+given a minute that had not closed by the clock); the six concepts (each
+rule against the PDF's own EUR/USD numbers where it gives them: the 29 Oct
+sweep and the 11 Nov break, the 1.1103 to 1.1146 gap, the 1.1113 to 1.1158
+demand zone and its visits; the value area, room, side and the 10-candle
+count), setups from a sweep to a fill and a result, and four earlier clocks
+against a later one seeing the same levels, zones and setups.
 
 `python -m simulator check` prints the tick file's layout and day load times
 (guide step 1).
@@ -405,6 +473,7 @@ simulator/
   config.py           paths, port, flags, defaults
   instruments.py      the fourteen instruments: digits, pip, lot, currencies
   analysis.py         currency strength for the Analysis panel
+  strategies.py       the six concepts and the routine's setups at a clock
   strength.py         the same per minute: built in the background, saved
   __main__.py         launcher: one port, one instance
   server.py           FastAPI, one WebSocket per tab; background data jobs
@@ -419,7 +488,8 @@ simulator/
   live/winproc.py     installed and running terminals; a writer lock
   engine/             clock, broker, session (replay and live)
   journal/            SQLite store and statistics
-  web/                pages and scripts (news.js: calendar dots and popup)
+  web/                pages and scripts (news.js: calendar dots and popup;
+                      strategies.js: the Strategies tab and its drawings)
   tests/
   store/              market data: dukascopy/<instrument>/ and
                       mt5/<server>/<instrument>/ (gitignored)

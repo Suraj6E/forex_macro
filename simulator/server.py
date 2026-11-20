@@ -31,12 +31,12 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from simulator import analysis, config, instruments, strength
+from simulator import analysis, config, instruments, strategies, strength
 from simulator.data import dukascopy
 from simulator.data.bars import TIMEFRAMES, BarStore, tf_seconds
 from simulator.data.calendar import Calendar
@@ -1727,6 +1727,33 @@ def analysis_now(session: str | None = None, period: str = "day") -> dict:
     out = analysis.measure(sources, at, period)
     out.update(live=is_live, at_ms=None if is_live else at // 1_000_000,
                hide_dates=bool((row or {}).get("hide_dates")), indicator=hub.strength.status)
+    return out
+
+
+# -- strategies ------------------------------------------------------------------
+
+
+@app.get("/api/strategies")
+async def strategies_now(request: Request, session: str, tf: str | None = None) -> dict:
+    """The six concepts and the routine's setups at a session's clock (see
+    strategies.py), from the session's own candles: what the replay could
+    see then, or the market now. Query: on (concepts, comma separated),
+    target, max_stop, buffer, ema, range, profile."""
+    live = hub.live.get(session)
+    if live is None:
+        raise HTTPException(404, "That session is not open.")
+    s = live.session
+    inst = instruments.get(live.meta.get("symbol"))
+    cfg = strategies.settings_from(dict(request.query_params))
+    chart_tf = tf if tf in TIMEFRAMES else s.timeframe
+    # Taken here, on the server's loop: a live feed builds today's candles
+    # on demand. The snapshots are then read in a worker thread.
+    stores = {k: s.bars[k] for k in {"m1", "m15", "h1", chart_tf}}
+    q = s.quote()
+    out = await asyncio.to_thread(strategies.evaluate, stores, s.sim_ns, q and q["bid"], q and q["ask"],
+                                  inst, cfg, chart_tf)
+    out.update(symbol=inst.symbol, digits=inst.digits, pip=inst.pip, live=s.live, tf=chart_tf,
+               tf_seconds=TIMEFRAMES[chart_tf][0])
     return out
 
 

@@ -144,8 +144,9 @@ A separate app on its own port: candle-by-candle tick replay of fourteen
 instruments (EUR/USD, GBP/USD, USD/JPY, EUR/JPY, GBP/JPY, EUR/GBP, gold,
 silver, WTI, Brent, and the S&P 500, DAX 40, FTSE 100 and Nikkei 225) with
 tick volume, this project's economic calendar on the
-chart, simulated orders, an automatic journal and drawing tools, plus a live
-mode and broker tick history from your MT5 terminal.
+chart, simulated orders, an automatic journal and drawing tools, a
+Strategies tab (six trading concepts as rules on the chart, and setups), plus
+a live mode and broker tick history from your MT5 terminal.
 
 ```
 .\simulator.cmd

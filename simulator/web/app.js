@@ -67,7 +67,7 @@
   // the one open is remembered. Sessions and Market data are visits: closing
   // them goes back to the panel that was open before.
   var LS_PANEL = "sim-panel";
-  var PANEL_WIDTH = { trade: 320, analysis: 400, quotes: 580, sessions: 520, data: 880, review: 320 };
+  var PANEL_WIDTH = { trade: 320, analysis: 400, strategies: 460, quotes: 580, sessions: 520, data: 880, review: 320 };
   var VISITS = { sessions: true, data: true };
   var PANEL = { open: null, base: null, dataBack: null, hooks: {} };
 
@@ -171,6 +171,20 @@
     fmtTime: function (ms) { return fmtTime(ms); },
     hideDates: function () { return !!(S.session && S.session.hide_dates); }
   });
+
+  // The six concepts on the chart and the routine's setups (strategies.js).
+  var SG = window.SimStrategies.create(C, {
+    getSession: function () { return S.session; },
+    getStatus: function () { return S.status; },
+    getTf: function () { return S.chartTf || "m15"; },
+    getQuote: function () { return S.quote; },
+    attached: function () { return !!S.attached; },
+    review: function () { return !!S.review; },
+    fmtTime: function (ms) { return fmtTime(ms); },
+    fillTicket: function (x) { fillTicketFrom(x); },
+    goto: function (t) { gotoTime(t); }
+  });
+  PANEL.hooks.strategies = function (open) { if (open) { SG.render(); SG.refresh(); } };
 
   C.chart.subscribeCrosshairMove(function (param) {
     var bar = param && param.seriesData ? param.seriesData.get(C.series) : null;
@@ -1155,6 +1169,29 @@
     send(msg);
   };
 
+  // A setup from the Strategies panel into the ticket, to check and send
+  // yourself: side, limit (or market), stop and target.
+  function fillTicketFrom(x) {
+    setSide(x.side);
+    var b = document.querySelector("#typeSeg [data-type='" + (x.market ? "market" : "limit") + "']");
+    if (b) b.click();
+    if (!x.market) $("priceIn").value = x.entry.toFixed(DIGITS);
+    $("slIn").value = x.stop.toFixed(DIGITS);
+    $("tpIn").value = x.target.toFixed(DIGITS);
+    updateTicket();
+    showPanel("trade");
+    toast("The ticket holds the setup: check the size, then send it.");
+  }
+
+  // The chart around a time: two thirds of the view before it.
+  function gotoTime(t) {
+    var l = C.timeToLogical(t);
+    if (l === null) return;
+    var ts = C.chart.timeScale(), r = ts.getVisibleLogicalRange();
+    var w = r ? r.to - r.from : 120;
+    ts.setVisibleLogicalRange({ from: l - w * 0.65, to: l + w * 0.35 });
+  }
+
   // ---------------------------------------------------------------- order ticket
 
   function setSide(side) {
@@ -1684,7 +1721,7 @@
   // ---------------------------------------------------------------- boot
 
   // Console handle for debugging: __sim.state, __sim.chart, __sim.drawings.
-  window.__sim = { state: S, chart: C, drawings: D, news: N, send: send };
+  window.__sim = { state: S, chart: C, drawings: D, news: N, strategies: SG, send: send };
 
 
   var params = new URLSearchParams(location.search);
