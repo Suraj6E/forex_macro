@@ -60,6 +60,7 @@ One-time install, if the venv predates the simulator:
 | Replay | **Play**/**Pause** (Space), speeds 1x to max (a market day in ~3 s), **+1 candle** (Right), **+1 tick** (Shift+Right), **Jump** to a time. |
 | Live | The clock is the real clock; candles form as ticks arrive, and the clock shows how old the last tick is. No play or step: the market has its own clock. Every recorded tick reaches the quote and the broker in the order it was recorded, whatever its stamp says about this computer's clock (see *Live market data*). |
 | Bid and Ask | Candles are Bid. The price scale has a **Bid** label (red, the SELL side) and an **Ask** label (blue, the BUY side), each with a dotted line and named at the chart's edge. When the two are closer than a label's height (on a raw-spread account Ask often equals Bid) they stack: Ask always above, Bid below. Before, the Bid was the candles' own last-price label, coloured by the candle's direction, and the chart library put equal-priced labels on either side depending on which half of the chart the price was in, so the two seemed to swap as the market moved. |
+| Data source | In the legend line after Bid: a picker of the replay data (Dukascopy or a recorded broker), remembered; live, the broker's name. |
 | Volume | Tick volume under the candles, and `V` in the price line: the number of quotes in the candle. |
 | News | A dot per impact level under each candle with releases: red high, yellow medium, near-white low. Filled is released, a ring is still to come. Hover for the names, click for the details. **High / Medium / Low** in the chart corner hide a level. |
 | Orders | Market, limit or stop; size in lots or as % risk from the stop. SL/TP lines on the chart drag to edit. **Close** works per position. The ticket shows what a lot is and what a pip is worth in USD. |
@@ -208,6 +209,15 @@ terminal**, then open that terminal yourself.
   an empty or partial day is read again first (the terminal may still be
   downloading it). The result is a second **Data** choice next to
   Dukascopy, with the broker's own prices and spreads.
+- **Replay data** is picked in the chart's legend line (`EUR/USD · 1M ·
+  Bid · Dukascopy ▾`): Dukascopy or any broker recorded here, from what is
+  saved on this computer, each with its own days (hover for them). The
+  choice is remembered and followed by the **Replay** button, the
+  instrument picker, the date picker and the Sessions form; the date
+  carries over when the new data has it, else it opens at its latest date
+  and says so. An instrument a broker lacks plays Dukascopy, with a
+  notice. A replay with open trades resumes only on its own data. Live,
+  the legend names the broker instead.
 - **Times are converted to UTC.** MT5 stamps ticks in the broker's server
   time, and the offset changes with daylight saving. The FX week opens at
   17:00 New York on Sunday and closes at 17:00 on Friday whatever the

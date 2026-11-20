@@ -12,6 +12,8 @@
   // which opens on the market (live, or the latest date).
   var TAB_SESSION = "sim-tab-session";
   var LS_SYMBOL = "sim-symbol", LS_TF = "sim-tf";
+  // Replay data: "dukascopy" or a recorded broker feed ("mt5:ftmo-demo").
+  var LS_FEED = "sim-replay-feed";
   function store(kind, key, value) {
     try { if (value === null) window[kind].removeItem(key); else window[kind].setItem(key, value); } catch (e) {}
   }
@@ -261,6 +263,7 @@
         store("sessionStorage", TAB_SESSION, m.session.id);
         store("localStorage", LS_SYMBOL, m.session.instrument.symbol);
         showMode(m.session.mode);
+        showFeeds();
         AN.lastFetch = 0; AN.lastAt = null;
         if (new URLSearchParams(location.search).get("session")) history.replaceState(null, "", "/");
         C.setHideDates(m.session.hide_dates);
@@ -1018,14 +1021,44 @@
 
   // Ask the server for an instrument live or in replay. Without a mode it
   // picks: live when the recorder is streaming it, else the latest date.
+  // A replay plays the chosen replay data when it has the instrument.
   function openView(opts) {
     opts = opts || {};
     var msg = { type: "open", timeframe: S.chartTf || stored("localStorage", LS_TF) || undefined };
     msg.symbol = opts.symbol || (INST && INST.symbol) || stored("localStorage", LS_SYMBOL) || undefined;
     if (opts.mode) msg.mode = opts.mode;
     if (opts.at) msg.at = opts.at;
+    var feed = opts.feed || stored("localStorage", LS_FEED) || (S.session && S.session.mode === "replay" && S.session.feed);
+    if (feed) msg.feed = feed;
     send(msg);
   }
+
+  // The data source in the chart's legend line: in a replay a picker of
+  // every source with this instrument's ticks, on the one the session
+  // plays; live, the broker's name.
+  // Short in the top bar ("FTMO-Demo"); the full name and dates on hover.
+  function feedName(f) { return f.key === "dukascopy" ? "Dukascopy" : String(f.label).replace(/^MT5 /, ""); }
+  function showFeeds() {
+    var sel = $("feedSel"), inst = INST && SYMS[INST.symbol];
+    var feeds = inst ? inst.feeds : [];
+    var cur = S.session && S.session.feed;
+    $("feedTag").textContent = cur && S.session.mode === "live" ? feedName({ key: cur, label: S.session.feed_label }) : "";
+    if (cur && !feeds.some(function (f) { return f.key === cur; }))  // not listed yet
+      feeds = feeds.concat([{ key: cur, label: S.session.feed_label, first_day: "", last_day: "", days: 0 }]);
+    sel.innerHTML = feeds.map(function (f) {
+      var range = f.days ? f.first_day + " → " + f.last_day + " (" + f.days + " days)" : "";
+      return "<option value='" + esc(f.key) + "' title='" + esc(f.label + (range ? ": " + range : "")) + "'>" + esc(feedName(f)) + "</option>";
+    }).join("");
+    if (cur) sel.value = cur;
+    var f = feeds.filter(function (x) { return x.key === sel.value; })[0];
+    sel.title = "Replay data, from what is saved on this computer: Dukascopy's history, or a broker's ticks recorded from MT5." +
+      (f && f.days ? " This one: " + f.label + ", " + f.first_day + " to " + f.last_day + ", " + f.days + " days." : "") +
+      " Remembered; the instrument and date carry over.";
+  }
+  $("feedSel").onchange = function () {
+    store("localStorage", LS_FEED, this.value);
+    openView({ mode: "replay", feed: this.value });
+  };
 
   var SYMS = {};  // symbol -> instrument from /api/meta, with its feeds
 
@@ -1049,6 +1082,7 @@
       }).join("");
       if (cur) $("symSel").value = cur;
       if (S.session) showMode(S.session.mode);
+      showFeeds();
     }).catch(function () {});
   }
 
@@ -1243,10 +1277,13 @@
     var inst = currentInstrument();
     var feeds = (inst ? inst.feeds : []).filter(function (f) { return mode === "replay" || f.live; });
     $("newFeed").innerHTML = feeds.map(function (f) {
-      var range = f.live && f.last_tick_ms ? "recorded " + f.first_day + " → now" : f.first_day + " → " + f.last_day;
+      // Live goes on from a broker's recording; a replay plays what is saved.
+      var range = mode === "live" && f.last_tick_ms ? "recorded " + f.first_day + " → now" : f.first_day + " → " + f.last_day;
       return "<option value='" + f.key + "'>" + esc(f.label) + " (" + range + ", " + f.days + " days)</option>";
     }).join("");
     $("newFeed").closest("label").classList.toggle("hidden", !feeds.length);
+    var pref = stored("localStorage", LS_FEED);  // the replay data last chosen
+    if (mode === "replay" && pref && feeds.some(function (f) { return f.key === pref; })) $("newFeed").value = pref;
     $("liveNote").innerHTML = "";
     $("sessionStart").disabled = false;
     if (mode === "live") {
@@ -1303,6 +1340,7 @@
   $("sessionForm").addEventListener("submit", function (e) {
     e.preventDefault();
     var live = DLG.mode === "live";
+    if (!live && $("newFeed").value) store("localStorage", LS_FEED, $("newFeed").value);
     send({
       type: "new",
       mode: DLG.mode,

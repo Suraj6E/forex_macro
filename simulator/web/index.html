@@ -87,7 +87,11 @@
           <div class="indlegend" id="indLegend"></div>
         </div>
       </div>
-      <div class="chart-overlay"><span class="sym" id="symLabel">EUR/USD</span> · <span id="tfLabel">15M</span> · Bid · <span id="ohlc"></span></div>
+      <div class="chart-overlay"><span class="sym" id="symLabel">EUR/USD</span> · <span id="tfLabel">15M</span> · Bid ·
+        <span class="replay-only"><select id="feedSel" class="feedsel live-hide" aria-label="Replay data"
+          title="Replay data, from what is saved on this computer: Dukascopy's history, or a broker's ticks recorded from MT5. Remembered; the instrument and date carry over."></select><span
+          class="feedtag" id="feedTag" title="Live from this broker's terminal (Market data)"></span> ·</span>
+        <span id="ohlc"></span></div>
       <div class="chartstack">
         <div class="oneclick hidden replay-only" id="oneClick" role="group" aria-label="One-click trading">
           <button type="button" class="ocsell" id="ocSell" title="Sell at market, at once"><span>SELL</span><b id="ocBid">-</b></button>

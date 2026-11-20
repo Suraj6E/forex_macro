@@ -1012,6 +1012,29 @@ def _last_tick_ns(feed: Feed) -> int:
     return entry.get("last_ns") or (day_start_ns(days[-1]) + 86_400 * NS_PER_SECOND if days else 0)
 
 
+def _feed_label(key: str) -> str:
+    """A feed's name from any instrument that has it."""
+    for symbol in INSTRUMENTS:
+        feed = hub.feeds(symbol).get(key)
+        if feed is not None:
+            return feed.label
+    return key
+
+
+def chosen_replay_feed(inst: Instrument, wanted: str | None) -> tuple[Feed | None, str | None]:
+    """The replay data the tab asked for (Dukascopy or a broker's recorded
+    ticks) when it has this instrument's ticks, else the default replay
+    feed, with a notice saying so."""
+    if wanted:
+        feed = hub.feeds(inst.symbol).get(wanted)
+        if feed is not None and feed.source.days():
+            return feed, None
+    feed = hub.replay_feed(inst.symbol)
+    if not wanted or feed is None or feed.key == wanted:
+        return feed, None
+    return feed, f"{_feed_label(wanted)} has no {inst.label} ticks; replaying {feed.label} instead."
+
+
 def _usable_symbol(symbol: str | None) -> Instrument:
     """The instrument asked for, or the first with any data."""
     wanted = instruments.get(symbol) if symbol in INSTRUMENTS else instruments.get(config.SYMBOL)
@@ -1026,10 +1049,12 @@ async def _open(ws: WebSocket, live: Live | None, msg: dict) -> Live:
 
     Without a mode: live when the recorder is streaming the instrument now,
     else a replay at the latest date. Live resumes the instrument's live
-    session (one per feed). Replay starts at `at`, else at the time the tab
-    was replaying (switching instruments keeps the date) when that
-    instrument has data then, else at the latest date; but an instrument
-    with a replay holding open positions or orders resumes that one."""
+    session (one per feed). Replay plays the `feed` asked for (the tab's
+    choice of replay data) when it has the instrument, else Dukascopy. It
+    starts at `at`, else at the time the tab was replaying (switching
+    instruments or data keeps the date) when that feed has data then, else
+    at the latest date; but a replay of the instrument on that feed holding
+    open positions or orders resumes that one."""
     inst = _usable_symbol(msg.get("symbol") or (live.meta.get("symbol") if live is not None else None))
     mode = msg.get("mode") if msg.get("mode") in ("live", "replay") else None
     if mode is None:
@@ -1047,24 +1072,31 @@ async def _open(ws: WebSocket, live: Live | None, msg: dict) -> Live:
         target = next((r["id"] for r in sessions if r["feed"] == feed.key), None)
         start_ns = max(now_ns(), feed.source.latest_ns() or 0)
     else:
-        feed = hub.replay_feed(inst.symbol)
+        feed, fell_back = chosen_replay_feed(inst, msg.get("feed"))
         if feed is None:
             raise SessionError(f"{inst.label} has no history yet: it is downloading (see Market data)")
         at = _parse_time(msg["at"]) if msg.get("at") else None
+        kept = False  # the date the tab was replaying, carried over
         if at is None:
-            busy = [r["id"] for r in sessions if hub.journal.has_records(r["id"])
-                    and _has_open_book(r["id"])]
+            busy = [r["id"] for r in sessions if (r.get("feed") or REPLAY_FEED) == feed.key
+                    and hub.journal.has_records(r["id"]) and _has_open_book(r["id"])]
             target = busy[0] if busy else None
             if live is not None and not live.session.live:
-                at = live.session.sim_ns
+                at, kept = live.session.sim_ns, True
         days = feed.source.days()
+        notice = fell_back
         if at is not None and day_start_ns(days[0]) + 86_400 * NS_PER_SECOND <= at < _last_tick_ns(feed):
             start_ns = at
         else:
-            if msg.get("at"):
-                await ws.send_json({"type": "notice", "message": f"{inst.label} has no data then; "
-                                                                 f"showing its latest date instead."})
+            # Told when a date was asked for, or when other data was: a
+            # broker's recording may start years after Dukascopy's.
+            switched = kept and (live.meta.get("feed") or REPLAY_FEED) != feed.key
+            if msg.get("at") or switched:
+                notice = (fell_back + " It" if fell_back else feed.label) + (
+                    f" has {inst.label} from {days[0]:%d %b %Y} to {days[-1]:%d %b %Y}, not then; showing its latest date.")
             start_ns = _latest_start_ns(feed)
+        if notice:
+            await ws.send_json({"type": "notice", "message": notice})
 
     if target is not None:
         found = _restore(target)

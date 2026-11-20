@@ -281,5 +281,38 @@ class EconomicCalendar(unittest.TestCase):
         self.assertEqual(fmt_value(111.6, "Leading Indicators"), "111.6")
 
 
+class ReplayData(unittest.TestCase):
+    """The replay data a tab chose: played when it has the instrument's
+    ticks, else Dukascopy, saying so."""
+
+    @staticmethod
+    def feed(key, label, days):
+        from simulator import server
+        src = mock.Mock()
+        src.days.return_value = days
+        return server.Feed(key, label, src, None, live=key != "dukascopy")
+
+    def test_the_chosen_data_or_dukascopy_with_a_notice(self):
+        from simulator import server
+        day = [date(2025, 3, 4)]
+        duka = self.feed("dukascopy", "Dukascopy history", day)
+        ftmo = self.feed("mt5:ftmo-demo", "MT5 FTMO-Demo", day)
+        quiet = self.feed("mt5:ft-server", "MT5 FT-Server", [])  # nothing recorded yet
+        feeds = {"EURUSD": {"dukascopy": duka, "mt5:ftmo-demo": ftmo, "mt5:ft-server": quiet},
+                 "JP225": {"dukascopy": duka}}
+        eurusd, nikkei = instruments.get("EURUSD"), instruments.get("JP225")
+        with mock.patch.object(server.hub, "feeds", lambda s: feeds.get(s, {})), \
+                mock.patch.object(server.hub, "replay_feed", lambda s: duka):
+            self.assertEqual(server.chosen_replay_feed(eurusd, "mt5:ftmo-demo"), (ftmo, None))
+            self.assertEqual(server.chosen_replay_feed(eurusd, "dukascopy"), (duka, None))
+            self.assertEqual(server.chosen_replay_feed(eurusd, None), (duka, None))
+            self.assertEqual(server.chosen_replay_feed(nikkei, "mt5:ftmo-demo"),
+                             (duka, "MT5 FTMO-Demo has no Nikkei 225 (Japan) ticks; replaying Dukascopy history instead."))
+            self.assertEqual(server.chosen_replay_feed(eurusd, "mt5:ft-server"),
+                             (duka, "MT5 FT-Server has no EUR/USD ticks; replaying Dukascopy history instead."))
+            self.assertEqual(server.chosen_replay_feed(eurusd, "mt5:gone")[1],
+                             "mt5:gone has no EUR/USD ticks; replaying Dukascopy history instead.")
+
+
 if __name__ == "__main__":
     unittest.main()
